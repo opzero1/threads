@@ -35,7 +35,11 @@ threads_spawn({
 })
 ```
 
-The worker opens in a native tab without taking focus. Select that tab to read its conversation. Use `threads_list` to inspect reports and `/threads` to reopen closed worker tabs. Native `subagent` remains available for bounded tasks and role-specific reviews.
+The worker opens in a native tab without taking focus. Select that tab to read its conversation. Use `threads_list` to inspect reports and `/threads` to reopen closed worker tabs.
+
+Both the parent and managed workers can use native `subagent` for bounded tasks and role-specific reviews. The parent can mix direct subagent calls with managed threads. Each worker can work directly or delegate within its brief and inherited permissions, then review the results and submit its own combined report.
+
+The parent writes the `task` brief. The plugin appends an explicit reminder that native delegation is optional and that workers cannot call `threads_spawn`. Include the worker's delegation budget in the brief. Use `No children` only when the task requires it, since that also rules out native subagents.
 
 ## Tools
 

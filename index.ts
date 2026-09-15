@@ -38,7 +38,7 @@ export default Plugin.define({
       editor.add({
         name: "spawn",
         description:
-          "Delegate a task to a top-level worker in an existing absolute directory. Reuse key only for identical requests. No managed grandchildren.",
+          "Delegate a task to a top-level worker in an existing absolute directory. Both you and the worker may use native subagent when useful. Include any delegation limits in task. Workers cannot call threads_spawn. Reuse key only for identical requests.",
         input: Spawn,
         output: WorkerView,
         options: {

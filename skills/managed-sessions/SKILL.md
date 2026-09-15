@@ -5,21 +5,29 @@ description: Spawn and monitor visible top-level OpenCode workers with op-thread
 
 # Managed sessions
 
-Choose the delegation mode before launching work.
+Choose the delegation mode for each task. The parent can mix both modes in the same run.
 
 - Use native `subagent` for a bounded task or review.
 - Use `threads_spawn` for an independent workstream with its own visible session and assigned directory.
 
-Count both modes against the active protocol's delegation budget. Managed workers can use native subagents, but cannot create further managed workers. Keep every writer in its own assigned worktree. These tools do not create worktrees.
+Both the parent and managed workers may use native `subagent` when useful. Delegation is optional. Managed workers cannot create further managed workers. Count both modes and workers' native subagents against the active protocol's delegation budget. Keep every writer in its own assigned worktree. These tools do not create worktrees.
 
 ## Start work
 
 1. Confirm the `threads_spawn` tool is available. If it is unavailable, use native `subagent` or report that the plugin needs activation. Do not substitute a hidden `opencode run` process.
 2. Assign an existing absolute directory and a stable task key.
-3. Call `threads_spawn` with `key`, `title`, `directory`, and `task`. Include the goal, scope, relevant context, constraints, acceptance criteria, verification commands, and expected report in `task`.
+3. Call `threads_spawn` with `key`, `title`, `directory`, and `task`. Include the goal, scope, relevant context, constraints, delegation allowance, acceptance criteria, verification commands, and expected report in `task`.
 4. Save the returned worker session ID with the work unit.
 
 An identical spawn key retries the original admission. Different work requires a new key. A worker inherits the coordinator's agent, model, and permission constraints. It has a separate conversation, so include all context it needs in the task brief.
+
+## Write the delegation allowance
+
+The parent writes `task`; the plugin appends worker instructions. Give workers the option to delegate without requiring a sub-coordinator role. Include this allowance and the worker's share of the remaining delegation budget:
+
+> You may work directly or use native `subagent` for bounded tasks and reviews when useful. Pass your scope and constraints to subagents, review their results, and resolve outstanding work before calling `threads_report` yourself.
+
+Use a no-delegation restriction only for a task-specific reason or an explicit user constraint, and state the reason. Being a managed worker or having bounded scope does not by itself make the worker a leaf. To limit managed-thread nesting, say `Do not call threads_spawn` rather than `No children`.
 
 ## Coordinate
 
@@ -32,7 +40,7 @@ An identical spawn key retries the original admission. Different work requires a
 
 ## Finish
 
-The worker calls `threads_report` with a verdict, concise summary, and concrete evidence, then stops. Valid verdicts are `PASS`, `PASS WITH NOTES`, `FAIL`, and `INCONCLUSIVE`. Report partial work and blockers honestly.
+The worker reviews its subagents' results and resolves outstanding work before calling `threads_report` with a combined verdict, concise summary, and concrete evidence, then stops. Native subagents return results to the worker. Valid verdicts are `PASS`, `PASS WITH NOTES`, `FAIL`, and `INCONCLUSIVE`. Report partial work and blockers honestly.
 
 A worker report is a claim to review. Run the protocol's independent verification before marking the work unit complete. An idle session or a stopped loading indicator does not establish task success.
 

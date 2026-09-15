@@ -249,7 +249,7 @@ export function threads(
           sessionID: link.workerID,
           id: link.initialMessageID,
           delivery: "queue",
-          text: `${input.task}\n\nYou are a managed worker assigned to ${input.directory}. Work only within the assigned scope. Do not call threads_spawn. When finished call threads_report with verdict, summary, and evidence. Runtime completion alone does not establish task success.`,
+          text: `${input.task}\n\nYou are a managed worker assigned to ${input.directory}. Work only within the assigned scope. You may use native subagent for bounded tasks or reviews when useful, within the brief's delegation limits and inherited permissions. Delegation is optional. Pass relevant context, scope, and constraints to each subagent. Do not call threads_spawn. Review your subagents' results and resolve any outstanding work before reporting. Only you call threads_report with the combined verdict, summary, and evidence; subagents return results to you. Runtime completion alone does not establish task success.`,
         });
         return view(await ctx.session.get({ sessionID: workerID }));
       });

@@ -176,6 +176,20 @@ try:
     assert recursive["state"]["status"] == "error", recursive
     passed("only managed workers may report and they cannot spawn managed grandchildren")
 
+    for caller_id, role in [(coordinator_id, "coordinator"), (worker_id, "managed worker")]:
+        prompt = f"Return a short verification result to your {role}. Do not call any tools."
+        delegated = run_tool(caller_id, "subagent", {
+            "agent": "general", "description": f"Verify {role} delegation", "prompt": prompt,
+        })
+        assert delegated["state"]["status"] == "completed", delegated
+        children = sandbox.api("GET", f"/api/session?parentID={caller_id}&limit=100")["data"]
+        assert len(children) == 1 and children[0]["parentID"] == caller_id, children
+        assert children[0]["location"]["directory"] == (str(sandbox.directory) if caller_id == coordinator_id else str(sandbox.worker)), children
+        assert {"action": "shell", "resource": "*", "effect": "deny"} in children[0].get("permissions", []), children
+        assert any(prompt in message.get("text", "") for message in messages(children[0]["id"], "user"))
+        assert "Fixture completed." in json.dumps(delegated["state"]["content"]), delegated
+        passed(f"the {role} can run a native subagent and receive its result with inherited directory and permissions")
+
     provider.release.clear()
     provider.responses["FIXTURE_INTERRUPT"] = {
         "name": "threads_report",
