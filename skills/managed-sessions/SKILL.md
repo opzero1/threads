@@ -46,4 +46,6 @@ A worker report is a claim to review. Run the protocol's independent verificatio
 
 ## Visibility
 
+Managed tab titles start with `[Main]` for the coordinator or `[Worker]` for the worker. The TUI applies these prefixes to saved titles while preserving the rest of the name.
+
 The TUI plugin opens managed workers as ordinary tabs without changing focus. Workers with `PASS` or `PASS WITH NOTES` reports hide automatically once inactive. Failed, inconclusive, and unreported workers stay visible until the coordinator hides them. Running, selected, and attention-needed tabs stay open. Use `/threads` to restore hidden tabs for inspection. Sending a valid follow-up also restores that worker. Reports are delivered silently to the coordinator and remain available through `threads_list`.

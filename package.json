@@ -1,6 +1,6 @@
 {
   "name": "@op1/threads",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Visible top-level worker sessions for OpenCode V2, with native tabs and durable reports.",
   "type": "module",
   "main": "./index.ts",
@@ -31,6 +31,9 @@
     "@opencode/plugin": "2.0.3",
     "@opencode/schema": "2.0.3",
     "zod": "4.1.8"
+  },
+  "peerDependencies": {
+    "solid-js": ">=1.9.0"
   },
   "devDependencies": {
     "@types/bun": "1.4.0",

@@ -94,6 +94,7 @@ try:
 
     eventually(lambda: worker_id in sandbox.api("GET", "/api/session/active")["data"])
     terminal.wait_for("Visible fixture worker", left=True)
+    terminal.wait_for_match(lambda _: any(tab["sessionID"] == worker_id and tab["busy"] for tab in json.loads((artifacts / "tabs.json").read_text())["tabs"]), "running worker tab", 40, False)
     tab_state = json.loads((artifacts / "tabs.json").read_text())
     assert tab_state["route"] == {"type": "session", "sessionID": coordinator_id}, tab_state
     assert any(tab["sessionID"] == worker_id and tab["busy"] for tab in tab_state["tabs"]), tab_state

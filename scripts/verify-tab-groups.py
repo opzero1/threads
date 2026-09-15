@@ -55,6 +55,16 @@ def restore_tabs(expected, selected):
     return wait_tabs(expected, selected)
 
 
+def wait_titles(expected):
+    terminal.wait_for_match(
+        lambda _: all(any(tab["sessionID"] == sid and tab["title"] == title for tab in tab_state()["tabs"]) for sid, title in expected.items()),
+        f"role-labeled titles {expected}", 40, False,
+    )
+    for sid, title in expected.items():
+        terminal.wait_for(title, left=True)
+        assert sandbox.api("GET", f"/api/session/{sid}")["data"]["title"] == title
+
+
 def worker_view(coordinator_id, worker_id):
     snapshot = sandbox.api("POST", "/api/rpc/threads/snapshot", {"input": {"coordinatorIDs": [coordinator_id]}}, location=sandbox.directory)
     return next(worker for worker in snapshot["output"]["workers"] if worker["workerID"] == worker_id)
@@ -107,13 +117,21 @@ try:
         "arguments": {"key": "group-worker", "title": "Alpha new worker", "directory": str(worktree), "task": "WORKER_REPORT"},
     }
     sandbox.api("POST", f'/api/session/{alpha["id"]}/prompt', {"text": "GROUP_WORKER"})
-    worker = eventually(lambda: next((session for session in sandbox.api("GET", "/api/session?parentID=null&limit=100")["data"] if session["title"] == "Alpha new worker"), None))
+    worker = eventually(lambda: next((session for session in sandbox.api("GET", "/api/session?parentID=null&limit=100")["data"] if session.get("metadata", {}).get("opThreads", {}).get("key") == "group-worker"), None))
     worker_id = worker["id"]
     running_ids = [alpha["id"], worker_id, alpha_worktree["id"], beta["id"], beta_review["id"]]
     wait_tabs(running_ids, alpha["id"], busy=[worker_id])
     passed("a running worker rises above idle tabs in its project without taking focus")
+    wait_titles({
+        alpha["id"]: "[Main] Alpha coordinator", worker_id: "[Worker] Alpha new worker",
+        alpha_worktree["id"]: "Alpha worktree", beta["id"]: "Beta coordinator", beta_review["id"]: "Beta review",
+    })
+    passed("managed tabs gain saved Main and Worker prefixes without labeling unrelated sessions")
 
     provider.release.set()
+    report_marker = f"Managed worker {worker_id} (group-worker) report:"
+    eventually(lambda: any(report_marker in json.dumps(request.get("messages", [])) for request in provider.requests))
+    eventually(lambda: alpha["id"] not in sandbox.api("GET", "/api/session/active")["data"])
     wait_tabs(expected_ids, alpha["id"], idle=[alpha["id"]])
     report_messages = sandbox.api("GET", f'/api/session/{alpha["id"]}/message?type=synthetic')["data"]
     assert any("Ordering fixture complete" in message.get("text", "") for message in report_messages)
@@ -125,6 +143,10 @@ try:
     grouped_ids = [alpha["id"], alpha_worktree["id"], worker_id, beta["id"], beta_review["id"]]
     restore_tabs(grouped_ids, alpha["id"])
     passed("the /threads command restores hidden workers for inspection")
+    sandbox.api("POST", f"/api/session/{worker_id}/rename", {"title": "Renamed worker"})
+    sandbox.api("POST", f'/api/session/{alpha["id"]}/rename', {"title": "Renamed main"})
+    wait_titles({alpha["id"]: "[Main] Renamed main", worker_id: "[Worker] Renamed worker"})
+    passed("renaming managed conversations preserves the new names and reapplies their role prefixes")
 
     provider.release.clear()
     provider.responses["UNMANAGED_BUSY"] = {"name": "threads_list", "arguments": {}, "wait": True}
@@ -185,13 +207,15 @@ try:
 
     restore_tabs(grouped_ids, beta["id"])
     passed("hidden history remains restorable after a restart")
+    wait_titles({alpha["id"]: "[Main] Renamed main", worker_id: "[Worker] Renamed worker"})
+    passed("role prefixes persist across server and TUI restarts without accumulating duplicates")
     os.write(terminal.master, b"\x1b[13~")
     selected_ids = [worker_id, alpha["id"], alpha_worktree["id"], beta["id"], beta_review["id"]]
-    wait_tabs(selected_ids, worker_id, ordered=False)
+    wait_tabs(selected_ids, worker_id)
     provider.responses["HIDE_SELECTED"] = {"name": "threads_hide", "arguments": {"workerID": worker_id}}
     sandbox.api("POST", f'/api/session/{alpha["id"]}/prompt', {"text": "HIDE_SELECTED"})
     eventually(lambda: worker_view(alpha["id"], worker_id)["hidden"])
-    wait_tabs(selected_ids, worker_id, ordered=False)
+    wait_tabs(selected_ids, worker_id)
     passed("hiding the selected worker preserves the open conversation")
     os.write(terminal.master, b"\x1b[14~")
     wait_tabs(expected_ids, alpha["id"], ordered=False)
@@ -199,11 +223,21 @@ try:
     provider.responses["FAIL_REPORT"] = {"name": "threads_report", "arguments": {"verdict": "FAIL", "summary": "Needs coordinator review", "evidence": []}}
     provider.responses["SPAWN_FAILED"] = {"name": "threads_spawn", "arguments": {"key": "failed-worker", "title": "Alpha failed worker", "directory": str(worktree), "task": "FAIL_REPORT"}}
     sandbox.api("POST", f'/api/session/{alpha["id"]}/prompt', {"text": "SPAWN_FAILED"})
-    failed = eventually(lambda: next((session for session in sandbox.api("GET", "/api/session?parentID=null&limit=100")["data"] if session["title"] == "Alpha failed worker"), None))
+    failed = eventually(lambda: next((session for session in sandbox.api("GET", "/api/session?parentID=null&limit=100")["data"] if session.get("metadata", {}).get("opThreads", {}).get("key") == "failed-worker"), None))
     eventually(lambda: worker_view(alpha["id"], failed["id"])["report"])
     terminal.wait_for_match(lambda _: any(tab["sessionID"] == failed["id"] and not tab["busy"] for tab in tab_state()["tabs"]), "failed worker stays visible", 40, False)
     assert not worker_view(alpha["id"], failed["id"])["hidden"]
     passed("a failed worker stays visible after reporting and becoming idle")
+    terminal.close(artifacts / "labeled-tabs.txt")
+    terminal = Terminal(sandbox, failed["id"])
+    terminal.wait_for("ctrl+p commands")
+    terminal.wait_for_match(lambda _: tab_state()["route"].get("sessionID") == failed["id"] and len(tab_state()["tabs"]) > 1, "selected worker with restored tabs", 40, False)
+    os.write(terminal.master, b"\x0f")
+    wait_tabs([failed["id"]], failed["id"])
+    sandbox.api("POST", f'/api/session/{failed["id"]}/rename', {"title": "Worker alone"})
+    wait_titles({failed["id"]: "[Worker] Worker alone"})
+    wait_tabs([failed["id"]], failed["id"])
+    passed("a worker keeps its role label when its Main tab is closed without reopening other tabs")
 finally:
     if terminal:
         terminal.close(artifacts / "reopened.txt")
@@ -212,3 +246,4 @@ finally:
     provider.close()
     artifacts.mkdir(parents=True, exist_ok=True)
     (artifacts / "results.json").write_text(json.dumps({"checks": checks, "count": len(checks)}, indent=2) + "\n")
+    (artifacts / "provider-requests.json").write_text(json.dumps(provider.requests, indent=2) + "\n")

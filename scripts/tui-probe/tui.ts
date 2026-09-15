@@ -32,6 +32,14 @@ export default Plugin.define({
                 context.ui.tabs.move(sessionID, index);
               }
             },
+          }, {
+            id: "probe.isolate",
+            bind: "ctrl+o",
+            run() {
+              for (const tab of context.ui.tabs.list()) {
+                if (!tab.active) context.ui.tabs.close(tab.sessionID);
+              }
+            },
           }],
         }));
         createEffect(() => {

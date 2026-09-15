@@ -82,6 +82,8 @@ Plugin option `maxWorkers` defaults to 4 and accepts integers from 1 through 32.
 
 The terminal synchronizes workers before opening native tabs without changing focus. A TUI memory index survives plugin reloads and respects manually closed tabs. `/threads` explicitly reopens workers for open coordinator tabs. A new TUI recovers workers from durable storage. Closing the TUI does not interrupt workers.
 
+Managed tabs use saved title prefixes: `[Main]` for the coordinator and `[Worker]` for each managed worker. Labels appear when the TUI discovers the relationship, including existing threads. The rest of the title stays editable; renaming a managed conversation reapplies its role prefix. Unrelated sessions keep their titles. OpenCode's native tab API has no separate badge field, so the prefixes also appear in session history.
+
 Workers with `PASS` or `PASS WITH NOTES` reports hide automatically once idle. This also applies to reports saved before upgrading. Unreported workers and `FAIL` or `INCONCLUSIVE` reports stay visible. The selected tab, running workers, and tabs needing input stay open until they are inactive.
 
 The coordinator can call `threads_hide` when a worker is no longer needed. Hiding preserves the conversation and report, survives restarts, and does not free an admission slot. `/threads` restores hidden workers and keeps them visible for inspection. A valid `threads_send` follow-up also restores its worker. Visibility overrides belong to the original report message ID, so recreating a deleted worker cannot inherit its hidden state.
