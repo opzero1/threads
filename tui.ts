@@ -60,12 +60,30 @@ export default Plugin.define({
           ]),
         ].slice(0, 100);
         if (!coordinatorIDs.length) return;
-        const { workers } = await rpc.snapshot(
+        const { workers } = await (reopen ? rpc.restore : rpc.snapshot)(
           { coordinatorIDs },
           { location: ctx.location ?? ctx.data.location.default() },
         );
         for (const worker of workers) {
           if (stopped) return;
+          const tab = ctx.ui.tabs.list().find((tab) => tab.sessionID === worker.workerID);
+          if (
+            worker.hidden &&
+            !tab?.active &&
+            !tab?.busy &&
+            !tab?.attention &&
+            ctx.data.session.status(worker.workerID) !== "running"
+          ) {
+            if (tab && !ctx.ui.tabs.close(worker.workerID)) continue;
+            if (seen.workerIDs.includes(worker.workerID)) {
+              updateSeen((draft) => {
+                draft.workerIDs = draft.workerIDs.filter(
+                  (id) => id !== worker.workerID,
+                );
+              });
+            }
+            continue;
+          }
           if (!reopen && seen.workerIDs.includes(worker.workerID)) continue;
           await ctx.data.session.sync(worker.workerID);
           if (

@@ -42,7 +42,7 @@ export const Send = z
     text: z.string().min(1),
   })
   .strict();
-export const Interrupt = z.object({ workerID: sessionID }).strict();
+export const WorkerTarget = z.object({ workerID: sessionID }).strict();
 
 const digest = (parts: string[]) =>
   createHash("sha256").update(JSON.stringify(parts)).digest("hex");
@@ -94,12 +94,16 @@ export function threads(
     `workers/${link.coordinatorID}/${link.workerID}`;
   const reportKey = (link: z.infer<typeof Link>) =>
     `reports/${link.workerID}/${link.reportMessageID}`;
+  const visibilityKey = (link: z.infer<typeof Link>) =>
+    `visibility/${link.workerID}/${link.reportMessageID}`;
 
   async function view(
     session: NativeSession,
   ): Promise<z.infer<typeof WorkerView>> {
     const link = workerLink(session);
     const stored = await ctx.storage.get(reportKey(link));
+    const report = stored === undefined ? null : Report.parse(stored);
+    const visibility = await ctx.storage.get(visibilityKey(link));
     return {
       workerID: link.workerID,
       coordinatorID: link.coordinatorID,
@@ -107,7 +111,11 @@ export function threads(
       title: session.title ?? link.key,
       directory: session.location.directory,
       outcome: session.outcome ?? null,
-      report: stored === undefined ? null : Report.parse(stored),
+      report,
+      hidden:
+        visibility === undefined
+          ? report?.verdict === "PASS" || report?.verdict === "PASS WITH NOTES"
+          : z.boolean().parse(visibility),
     };
   }
 
@@ -132,6 +140,7 @@ export function threads(
           if (!missing.success || missing.data.sessionID !== link.workerID)
             throw error;
           await ctx.storage.remove(reportKey(link));
+          await ctx.storage.remove(visibilityKey(link));
           await ctx.storage.remove(entry.key);
           continue;
         }
@@ -152,6 +161,22 @@ export function threads(
 
   return {
     list,
+    async hide(actor: string, input: z.infer<typeof WorkerTarget>) {
+      const { session, link } = await owned(actor, input.workerID);
+      await ctx.storage.set(visibilityKey(link), true);
+      return view(session);
+    },
+    async restore(coordinatorID: string) {
+      const workers = await list(coordinatorID);
+      return Promise.all(
+        workers.map(async (worker) => {
+          if (!worker.hidden) return worker;
+          const { session, link } = await owned(coordinatorID, worker.workerID);
+          await ctx.storage.set(visibilityKey(link), false);
+          return view(session);
+        }),
+      );
+    },
     async spawn(
       actor: string,
       input: z.infer<typeof Spawn>,
@@ -230,7 +255,7 @@ export function threads(
       });
     },
     async send(actor: string, input: z.infer<typeof Send>) {
-      await owned(actor, input.workerID);
+      const { link } = await owned(actor, input.workerID);
       const id = SessionMessage.ID.make(
         `msg_${digest([input.workerID, "send", input.key]).slice(0, 32)}`,
       );
@@ -243,9 +268,14 @@ export function threads(
       });
       if (admitted.payload.text !== input.text)
         throw new Error("This send key already belongs to different text");
+      if ((await ctx.storage.get(reportKey(link))) !== undefined) {
+        await ctx.storage.set(visibilityKey(link), false);
+      } else {
+        await ctx.storage.remove(visibilityKey(link));
+      }
       return { workerID: input.workerID, messageID: admitted.id };
     },
-    async interrupt(actor: string, input: z.infer<typeof Interrupt>) {
+    async interrupt(actor: string, input: z.infer<typeof WorkerTarget>) {
       await owned(actor, input.workerID);
       await ctx.session.interrupt({
         sessionID: input.workerID,
@@ -261,7 +291,6 @@ export function threads(
         id: link.reportMessageID,
         text: `Managed worker ${link.workerID} (${link.key}) report:\n${JSON.stringify(input)}`,
         metadata: { opThreadsReport: input, workerID: link.workerID },
-        description: `Worker report: ${link.key}`,
         delivery: "queue",
         resume: true,
       });

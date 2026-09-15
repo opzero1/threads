@@ -17,6 +17,7 @@ export const WorkerView = z.object({
   directory: z.string(),
   outcome: z.enum(["succeeded", "failed", "interrupted"]).nullable(),
   report: Report.nullable(),
+  hidden: z.boolean(),
 });
 
 export const ThreadsRpc = Rpc.define({
@@ -26,6 +27,11 @@ export const ThreadsRpc = Rpc.define({
       input: z
         .object({ coordinatorIDs: z.array(z.string()).max(100) })
         .strict(),
+      output: z.object({ workers: z.array(WorkerView) }),
+      errors: {},
+    },
+    restore: {
+      input: z.object({ coordinatorIDs: z.array(z.string()).max(100) }).strict(),
       output: z.object({ workers: z.array(WorkerView) }),
       errors: {},
     },

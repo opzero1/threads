@@ -9,9 +9,13 @@ export default Plugin.define({
     if (typeof path !== "string")
       throw new Error("Probe output path is required");
     const openSessionIDs = z.array(z.string()).default([]).parse(context.options.openSessionIDs);
-    for (const sessionID of openSessionIDs) {
-      await context.data.session.sync(sessionID);
-      context.ui.tabs.open(sessionID);
+    const [seeded, updateSeeded] = context.storage.memory("seeded", { initial: { done: false } });
+    if (!seeded.done) {
+      for (const sessionID of openSessionIDs) {
+        await context.data.session.sync(sessionID);
+        context.ui.tabs.open(sessionID);
+      }
+      updateSeeded((draft) => { draft.done = true; });
     }
     let writes = Promise.resolve();
     return context.ui.slot({
@@ -19,6 +23,7 @@ export default Plugin.define({
       render() {
         context.keymap.layer(() => ({
           mode: "global",
+          priority: 100,
           commands: [{
             id: "probe.arrange",
             bind: "ctrl+g",

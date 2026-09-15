@@ -107,8 +107,8 @@ describe("admission serialization", () => {
   });
 });
 
-test("RPC remains read-only and requires explicit report verdicts", () => {
-  expect(Object.keys(ThreadsRpc.methods)).toEqual(["snapshot"]);
+test("RPC exposes snapshot and explicit tab restoration, with report verdicts required", () => {
+  expect(Object.keys(ThreadsRpc.methods)).toEqual(["snapshot", "restore"]);
   expect(ThreadsRpc.events).toEqual({});
   expect(ThreadsRpc.methods.snapshot.errors).toEqual({});
   expect(() =>

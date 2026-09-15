@@ -30,12 +30,12 @@ def tab_state():
         return {"tabs": [], "route": {}}
 
 
-def wait_tabs(expected, selected, busy=(), attention=(), idle=()):
+def wait_tabs(expected, selected, busy=(), attention=(), idle=(), ordered=True):
     def matches(_):
         state = tab_state()
         tabs = {tab["sessionID"]: tab for tab in state["tabs"]}
         return (
-            list(tabs) == expected
+            (list(tabs) == expected if ordered else set(tabs) == set(expected))
             and state["route"].get("sessionID") == selected
             and all(tabs[sid]["busy"] for sid in busy)
             and all(tabs[sid]["attention"] for sid in attention)
@@ -46,6 +46,18 @@ def wait_tabs(expected, selected, busy=(), attention=(), idle=()):
     state = tab_state()
     terminal.wait_for_order([tab["title"] for tab in state["tabs"]])
     return state
+
+
+def restore_tabs(expected, selected):
+    os.write(terminal.master, b"/threads")
+    terminal.wait_for("/threads")
+    os.write(terminal.master, b"\r")
+    return wait_tabs(expected, selected)
+
+
+def worker_view(coordinator_id, worker_id):
+    snapshot = sandbox.api("POST", "/api/rpc/threads/snapshot", {"input": {"coordinatorIDs": [coordinator_id]}}, location=sandbox.directory)
+    return next(worker for worker in snapshot["output"]["workers"] if worker["workerID"] == worker_id)
 
 
 try:
@@ -72,6 +84,7 @@ try:
     cli_path = sandbox.root / "config" / "opencode" / "cli.json"
     cli = json.loads(cli_path.read_text())
     cli["plugins"][0]["options"]["openSessionIDs"] = [session["id"] for session in sessions]
+    cli["keybinds"] = {"session.tab.select.3": "f3", "session.tab.select.2": "f4"}
     cli_path.write_text(json.dumps(cli))
     terminal = Terminal(sandbox, alpha["id"])
     terminal.wait_for("ctrl+p commands")
@@ -101,10 +114,17 @@ try:
     passed("a running worker rises above idle tabs in its project without taking focus")
 
     provider.release.set()
-    wait_tabs(running_ids, alpha["id"], idle=[worker_id, alpha["id"]])
+    wait_tabs(expected_ids, alpha["id"], idle=[alpha["id"]])
     report_messages = sandbox.api("GET", f'/api/session/{alpha["id"]}/message?type=synthetic')["data"]
     assert any("Ordering fixture complete" in message.get("text", "") for message in report_messages)
-    passed("a reported worker stays visible and becomes idle without changing equal-priority order")
+    assert all(not message.get("description") for message in report_messages)
+    assert "Worker report:" not in "\n".join(terminal.screen.display)
+    assert "Ordering fixture complete" not in "\n".join(terminal.screen.display)
+    passed("a successful report hides its idle worker without deleting the report or adding a parent notification row")
+
+    grouped_ids = [alpha["id"], alpha_worktree["id"], worker_id, beta["id"], beta_review["id"]]
+    restore_tabs(grouped_ids, alpha["id"])
+    passed("the /threads command restores hidden workers for inspection")
 
     provider.release.clear()
     provider.responses["UNMANAGED_BUSY"] = {"name": "threads_list", "arguments": {}, "wait": True}
@@ -148,6 +168,42 @@ try:
     terminal.wait_for_match(lambda _: time.monotonic() - settled >= 7, "two refresh intervals", 10, False)
     assert [tab["sessionID"] for tab in tab_state()["tabs"]] == running_ids
     passed("unchanged activity keeps the tab order stable across periodic refreshes")
+    provider.responses["HIDE_WORKER"] = {"name": "threads_hide", "arguments": {"workerID": worker_id}}
+    sandbox.api("POST", f'/api/session/{alpha["id"]}/prompt', {"text": "HIDE_WORKER"})
+    wait_tabs(expected_ids, beta["id"])
+    passed("the orchestrator can hide a restored idle worker without removing its conversation")
+    assert sandbox.api("GET", f"/api/session/{worker_id}")["data"]["id"] == worker_id
+
+    terminal.close(artifacts / "hidden.txt")
+    terminal = None
+    sandbox.stop()
+    sandbox.start()
+    (artifacts / "tabs.json").unlink(missing_ok=True)
+    terminal = Terminal(sandbox, beta["id"])
+    wait_tabs(expected_ids, beta["id"])
+    passed("hidden workers stay hidden across server and TUI restarts")
+
+    restore_tabs(grouped_ids, beta["id"])
+    passed("hidden history remains restorable after a restart")
+    os.write(terminal.master, b"\x1b[13~")
+    selected_ids = [worker_id, alpha["id"], alpha_worktree["id"], beta["id"], beta_review["id"]]
+    wait_tabs(selected_ids, worker_id, ordered=False)
+    provider.responses["HIDE_SELECTED"] = {"name": "threads_hide", "arguments": {"workerID": worker_id}}
+    sandbox.api("POST", f'/api/session/{alpha["id"]}/prompt', {"text": "HIDE_SELECTED"})
+    eventually(lambda: worker_view(alpha["id"], worker_id)["hidden"])
+    wait_tabs(selected_ids, worker_id, ordered=False)
+    passed("hiding the selected worker preserves the open conversation")
+    os.write(terminal.master, b"\x1b[14~")
+    wait_tabs(expected_ids, alpha["id"], ordered=False)
+    passed("a hidden selected worker closes once the user leaves it")
+    provider.responses["FAIL_REPORT"] = {"name": "threads_report", "arguments": {"verdict": "FAIL", "summary": "Needs coordinator review", "evidence": []}}
+    provider.responses["SPAWN_FAILED"] = {"name": "threads_spawn", "arguments": {"key": "failed-worker", "title": "Alpha failed worker", "directory": str(worktree), "task": "FAIL_REPORT"}}
+    sandbox.api("POST", f'/api/session/{alpha["id"]}/prompt', {"text": "SPAWN_FAILED"})
+    failed = eventually(lambda: next((session for session in sandbox.api("GET", "/api/session?parentID=null&limit=100")["data"] if session["title"] == "Alpha failed worker"), None))
+    eventually(lambda: worker_view(alpha["id"], failed["id"])["report"])
+    terminal.wait_for_match(lambda _: any(tab["sessionID"] == failed["id"] and not tab["busy"] for tab in tab_state()["tabs"]), "failed worker stays visible", 40, False)
+    assert not worker_view(alpha["id"], failed["id"])["hidden"]
+    passed("a failed worker stays visible after reporting and becoming idle")
 finally:
     if terminal:
         terminal.close(artifacts / "reopened.txt")

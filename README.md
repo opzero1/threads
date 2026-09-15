@@ -39,7 +39,7 @@ The worker opens in a native tab without taking focus. Select that tab to read i
 
 ## Tools
 
-The native tool names use namespace `threads` and individual names `spawn`, `list`, `send`, `interrupt`, and `report`.
+The native tool names use namespace `threads` and individual names `spawn`, `list`, `send`, `interrupt`, `hide`, and `report`.
 
 | Tool | Input | Result |
 | --- | --- | --- |
@@ -47,13 +47,14 @@ The native tool names use namespace `threads` and individual names `spawn`, `lis
 | `threads_list` | `{}` | `{ workers: WorkerView[] }` |
 | `threads_send` | `{ workerID, key, text }` | `{ workerID, messageID }` |
 | `threads_interrupt` | `{ workerID }` | Worker view |
+| `threads_hide` | `{ workerID }` | Worker view |
 | `threads_report` | `{ verdict, summary, evidence }` | `{ workerID, report }` |
 
 All fields are strings except `evidence`, which is an array of strings. Verdicts are `PASS`, `PASS WITH NOTES`, `FAIL`, and `INCONCLUSIVE`. Each tool returns JSON in native `content` and the same value in `output`.
 
 `directory` must exist and be absolute. Spawn uses native `subagent` permission gating. The worker uses the coordinator's agent and model, with resolved agent permissions followed by session permissions. Its actual tool actions still pass through native permission checks. There is no separate directory-approval flow or agent/model override.
 
-Tool identity comes from the calling session. Only the owning coordinator can send or interrupt. Only the exact original top-level worker can report. Native subagents and managed workers cannot spawn managed workers. Native `subagent` remains available.
+Tool identity comes from the calling session. Only the owning coordinator can send, interrupt, or hide a worker. Only the exact original top-level worker can report. Native subagents and managed workers cannot spawn managed workers. Native `subagent` remains available.
 
 ## Identity and retries
 
@@ -65,9 +66,11 @@ Send keys are scoped to the worker and determine a stable message ID. A retry wi
 
 ## Worker views and limits
 
-`WorkerView` contains `workerID`, `coordinatorID`, `key`, `title`, `directory`, `outcome`, and `report`. `outcome` is the native last execution outcome, or `null` before one exists. It is not current activity. Native tabs display current busy, attention, and unread state.
+`WorkerView` contains `workerID`, `coordinatorID`, `key`, `title`, `directory`, `outcome`, `report`, and `hidden`. `outcome` is the native last execution outcome, or `null` before one exists. It is not current activity. Native tabs display current busy, attention, and unread state.
 
 `report` is the explicit worker claim, or `null`. Native `succeeded` means the agent loop completed, not that the assigned task passed.
+
+`hidden` is the desired idle-tab visibility. Current activity, input requests, or selection can keep that tab open.
 
 Plugin option `maxWorkers` defaults to 4 and accepts integers from 1 through 32. Admission is serialized by coordinator within the loaded server process. A worker without a report continues to occupy a slot unless its native outcome is `failed` or `interrupted`. A successful run without a report does not silently free its slot.
 
@@ -75,18 +78,24 @@ Plugin option `maxWorkers` defaults to 4 and accepts integers from 1 through 32.
 
 The terminal synchronizes workers before opening native tabs without changing focus. A TUI memory index survives plugin reloads and respects manually closed tabs. `/threads` explicitly reopens workers for open coordinator tabs. A new TUI recovers workers from durable storage. Closing the TUI does not interrupt workers.
 
+Workers with `PASS` or `PASS WITH NOTES` reports hide automatically once idle. This also applies to reports saved before upgrading. Unreported workers and `FAIL` or `INCONCLUSIVE` reports stay visible. The selected tab, running workers, and tabs needing input stay open until they are inactive.
+
+The coordinator can call `threads_hide` when a worker is no longer needed. Hiding preserves the conversation and report, survives restarts, and does not free an admission slot. `/threads` restores hidden workers and keeps them visible for inspection. A valid `threads_send` follow-up also restores its worker. Visibility overrides belong to the original report message ID, so recreating a deleted worker cannot inherit its hidden state.
+
+Reports reach the coordinator through silent synthetic messages. They remain available through `threads_list` and the session history without adding a notification row to the conversation. Older report notification rows remain in native history.
+
 All open native root-session tabs are automatically grouped by OpenCode project ID, including sessions not managed by this plugin. Projects follow their first appearance in the current tab order. Worktrees with the same project ID stay together.
 
-Within each project, running sessions, the selected tab, and sessions waiting for input come before idle sessions. Tabs with the same priority keep their relative order. Finished runs remain visible below active work and rise again when resumed or selected. Idle is a display priority, not a completion verdict. Each tab with unloaded project metadata stays in its own group until that metadata becomes available. Reconciliation moves only out-of-order tabs, without changing focus or closing and reopening them. Native tabs do not support divider rows.
+Within each project, running sessions, the selected tab, and sessions waiting for input come before idle sessions. Tabs with the same priority keep their relative order. Idle is a display priority, not a completion verdict. Each tab with unloaded project metadata stays in its own group until that metadata becomes available. Reconciliation moves only out-of-order tabs, without changing focus or closing and reopening them to reorder. Native tabs do not support divider rows.
 
-The read-only RPC definition is `ThreadsRpc` in `src/rpc.ts`, with ID `threads` and method `snapshot`:
+The RPC definition is `ThreadsRpc` in `src/rpc.ts`, with ID `threads`. `snapshot` is read-only. The user-invoked `restore` method clears hidden state for the supplied coordinators' workers. Both methods accept and return:
 
 ```ts
 input: { coordinatorIDs: string[] }
 result: { workers: WorkerView[] }
 ```
 
-The input accepts at most 100 coordinator IDs. Raw HTTP RPC requests wrap the input as `{ "input": { "coordinatorIDs": ["ses_..."] } }`. The method declares `errors: {}` and the RPC declares `events: {}`. The TUI subscribes to native session events and reconciles at most one snapshot at a time, with a three-second missed-event refresh.
+The input accepts at most 100 coordinator IDs. Raw HTTP RPC requests wrap the input as `{ "input": { "coordinatorIDs": ["ses_..."] } }`. Each method declares `errors: {}` and the RPC declares `events: {}`. The TUI subscribes to native session events and reconciles at most one snapshot at a time, with a three-second missed-event refresh.
 
 ## Verification and limits
 

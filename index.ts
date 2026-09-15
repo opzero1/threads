@@ -2,7 +2,7 @@ import { Plugin } from "@opencode/plugin";
 import type { SessionContext } from "@opencode/plugin/promise/session";
 import { z } from "zod";
 import { Report, ThreadsRpc, WorkerView } from "./src/rpc";
-import { Interrupt, Send, Spawn, threads } from "./src/threads";
+import { Send, Spawn, WorkerTarget, threads } from "./src/threads";
 
 export default Plugin.define({
   id: "op-threads",
@@ -25,6 +25,9 @@ export default Plugin.define({
     await ctx.rpc.register(ThreadsRpc, {
       snapshot: async ({ coordinatorIDs }) => ({
         workers: (await Promise.all(coordinatorIDs.map(workers.list))).flat(),
+      }),
+      restore: async ({ coordinatorIDs }) => ({
+        workers: (await Promise.all(coordinatorIDs.map(workers.restore))).flat(),
       }),
     });
     await ctx.tool.transform((editor) => {
@@ -81,11 +84,22 @@ export default Plugin.define({
       editor.add({
         name: "interrupt",
         description: "Interrupt your worker without claiming task success.",
-        input: Interrupt,
+        input: WorkerTarget,
         output: WorkerView,
         options: { namespace: "threads", codemode: false },
         execute: async (input, tool) => {
           const output = await workers.interrupt(tool.sessionID, input);
+          return { content: JSON.stringify(output), output };
+        },
+      });
+      editor.add({
+        name: "hide",
+        description: "Hide a worker you no longer need from the sidebar without deleting its conversation or report. Only its coordinator may hide it. Running, selected, or attention-needed tabs stay open until idle. Use /threads to restore hidden tabs.",
+        input: WorkerTarget,
+        output: WorkerView,
+        options: { namespace: "threads", codemode: false },
+        execute: async (input, tool) => {
+          const output = await workers.hide(tool.sessionID, input);
           return { content: JSON.stringify(output), output };
         },
       });

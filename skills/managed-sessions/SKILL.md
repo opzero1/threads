@@ -26,6 +26,7 @@ An identical spawn key retries the original admission. Different work requires a
 - Use `threads_list` for a progress snapshot when making a scheduling or delivery decision.
 - Use `threads_send` with a stable message key for a correction or follow-up within the worker's assigned task.
 - Use `threads_interrupt` to stop that worker's execution.
+- Use `threads_hide` with `workerID` when a worker is no longer needed in the sidebar. This preserves its report and conversation. Hiding does not interrupt work or free an admission slot.
 - Do not repeatedly query status while waiting. Workers report to the coordinator through OpenCode's durable inbox.
 - After a service restart, inspect existing worker IDs before deciding whether to resume them. Do not launch replacement tasks solely because a session is idle.
 
@@ -37,4 +38,4 @@ A worker report is a claim to review. Run the protocol's independent verificatio
 
 ## Visibility
 
-The TUI plugin opens managed workers as ordinary tabs without changing focus. Each tab uses OpenCode's native activity indicators. Use `/threads` to reopen managed worker tabs you closed.
+The TUI plugin opens managed workers as ordinary tabs without changing focus. Workers with `PASS` or `PASS WITH NOTES` reports hide automatically once inactive. Failed, inconclusive, and unreported workers stay visible until the coordinator hides them. Running, selected, and attention-needed tabs stay open. Use `/threads` to restore hidden tabs for inspection. Sending a valid follow-up also restores that worker. Reports are delivered silently to the coordinator and remain available through `threads_list`.

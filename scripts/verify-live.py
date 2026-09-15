@@ -99,6 +99,12 @@ try:
     assert any(tab["sessionID"] == worker_id and tab["busy"] for tab in tab_state["tabs"]), tab_state
     passed("managed worker appears in the native TUI while its execution is running")
     passed("opening the worker tab preserves coordinator focus and its native busy indicator")
+    hidden = run_tool(coordinator_id, "threads_hide", {"workerID": worker_id})
+    assert hidden["state"]["status"] == "completed", hidden
+    terminal.wait_for("threads_hide")
+    tab_state = json.loads((artifacts / "tabs.json").read_text())
+    assert any(tab["sessionID"] == worker_id and tab["busy"] for tab in tab_state["tabs"]), tab_state
+    passed("an orchestrator hide request leaves a running worker visible")
     terminal.close(artifacts / "tui-visible.txt")
     terminal = None
     assert worker_id in sandbox.api("GET", "/api/session/active")["data"]
@@ -121,6 +127,9 @@ try:
     unauthorized = run_tool(stranger["id"], "threads_send", {"workerID": worker_id, "key": "foreign", "text": "Do other work"})
     assert unauthorized["state"]["status"] == "error", unauthorized
     passed("unrelated coordinators cannot send work to another coordinator's worker")
+    unauthorized_hide = run_tool(stranger["id"], "threads_hide", {"workerID": worker_id})
+    assert unauthorized_hide["state"]["status"] == "error", unauthorized_hide
+    passed("only the owning coordinator can hide a worker")
 
     provider.release.set()
     report = eventually(lambda: tool_results(worker_id, "threads_report"), timeout=60)[0]
@@ -204,15 +213,17 @@ try:
 
     capacity_report = run_tool(unreported[1], "threads_report", {"verdict": "PASS", "summary": "Capacity task completed", "evidence": []})
     assert capacity_report["state"]["status"] == "completed", capacity_report
+    hidden = run_tool(coordinator_id, "threads_hide", {"workerID": worker_id})
+    assert hidden["state"]["status"] == "completed", hidden
     old_report_id = sandbox.api("GET", f"/api/session/{worker_id}")["data"]["metadata"]["opThreads"]["reportMessageID"]
     sandbox.api("DELETE", f"/api/session/{worker_id}")
     recreated = run_tool(coordinator_id, "threads_spawn", {**request, "task": "Finish without reporting."})
     assert recreated["state"]["status"] == "completed", recreated
     recreated_view = json.loads(next(item["text"] for item in recreated["state"]["content"] if item["type"] == "text"))
-    assert recreated_view["workerID"] == worker_id and recreated_view["report"] is None, recreated_view
+    assert recreated_view["workerID"] == worker_id and recreated_view["report"] is None and not recreated_view["hidden"], recreated_view
     fresh = sandbox.api("GET", f"/api/session/{worker_id}")["data"]
     assert fresh["metadata"]["opThreads"]["reportMessageID"] != old_report_id
-    passed("recreating a deleted worker under the same key cannot resurrect its old PASS report")
+    passed("recreating a deleted worker cannot inherit its old report or hidden state")
 
     before = len(messages(worker_id, "user"))
     sandbox.stop()
