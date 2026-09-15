@@ -159,13 +159,20 @@ class Terminal:
         return re.sub(r"\x1b(?:\][^\x07]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~])", "", decoded)
 
     def wait_for(self, text, timeout=40, left=False):
+        self.wait_for_match(lambda display: text in display, repr(text), timeout, left)
+
+    def wait_for_order(self, titles, timeout=40):
+        pattern = re.compile(".*".join(map(re.escape, titles)), re.S)
+        self.wait_for_match(lambda display: pattern.search(display), str(titles), timeout, True)
+
+    def wait_for_match(self, matches, description, timeout, left):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             display = "\n".join(line[:42] if left else line for line in self.screen.display)
-            if text in display:
+            if matches(display):
                 return
             if self.process.poll() is not None:
-                raise RuntimeError(f"TUI exited before displaying {text!r}")
+                raise RuntimeError(f"TUI exited before displaying {description}")
             if not select.select([self.master], [], [], 0.1)[0]:
                 continue
             chunk = os.read(self.master, 65536)
@@ -174,7 +181,7 @@ class Terminal:
             for query, response in [(b"\x1b[6n", b"\x1b[1;1R"), (b"\x1b[c", b"\x1b[?1;2c")]:
                 if query in chunk:
                     os.write(self.master, response)
-        raise TimeoutError(f"TUI did not display {text!r}")
+        raise TimeoutError(f"TUI did not display {description}")
 
     def close(self, path):
         self.process.terminate()

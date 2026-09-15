@@ -11,6 +11,33 @@ export default Plugin.define({
     let running = false;
     let reopenPending = false;
     let lastError: string | undefined;
+    function groupTabs() {
+      const tabs = ctx.ui.tabs.list().map((tab) => {
+        const projectID = ctx.data.session.get(tab.sessionID)?.projectID;
+        return {
+          sessionID: tab.sessionID,
+          projectID:
+            typeof projectID === "string" && projectID.length > 0
+              ? projectID
+              : undefined,
+        };
+      });
+      const groups = new Map<string, string[]>();
+      for (const tab of tabs) {
+        const key =
+          tab.projectID === undefined
+            ? `session:${tab.sessionID}`
+            : `project:${tab.projectID}`;
+        const group = groups.get(key);
+        if (group) group.push(tab.sessionID);
+        else groups.set(key, [tab.sessionID]);
+      }
+      const ordered = [...groups.values()].flat();
+      for (const [index, sessionID] of ordered.entries()) {
+        if (ctx.ui.tabs.list()[index]?.sessionID === sessionID) continue;
+        if (!ctx.ui.tabs.move(sessionID, index)) break;
+      }
+    }
     async function reconcile(reopen = false) {
       if (stopped || !ctx.ui.tabs.enabled()) return;
       if (running) {
@@ -19,6 +46,7 @@ export default Plugin.define({
       }
       running = true;
       try {
+        groupTabs();
         const route = ctx.ui.router.current();
         const coordinatorIDs = [
           ...new Set([
@@ -45,6 +73,7 @@ export default Plugin.define({
             });
           }
         }
+        if (!stopped && ctx.ui.tabs.enabled()) groupTabs();
       } finally {
         running = false;
         if (reopenPending) {
