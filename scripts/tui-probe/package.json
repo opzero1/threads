@@ -1,0 +1,1 @@
+{"name":"op-threads-tui-probe","type":"module","exports":{"./tui":"./tui.ts"}}

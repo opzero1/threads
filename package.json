@@ -1,0 +1,39 @@
+{
+  "name": "@op1/threads",
+  "version": "0.1.0",
+  "description": "Visible top-level worker sessions for OpenCode V2, with native tabs and durable reports.",
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./tui": "./tui.ts"
+  },
+  "files": ["index.ts", "tui.ts", "src/", "skills/"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/opzero1/threads.git"
+  },
+  "homepage": "https://github.com/opzero1/threads#readme",
+  "bugs": "https://github.com/opzero1/threads/issues",
+  "license": "MIT",
+  "keywords": ["opencode", "opencode-plugin", "agents", "threads"],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "verify:live": "uv run --with pyte python scripts/verify-live.py"
+  },
+  "dependencies": {
+    "@opencode/plugin": "2.0.3",
+    "@opencode/schema": "2.0.3",
+    "zod": "4.1.8"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.0",
+    "solid-js": "1.9.9",
+    "typescript": "5.9.3"
+  }
+}
