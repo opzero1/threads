@@ -17,6 +17,18 @@ export default Plugin.define({
     return context.ui.slot({
       append: "app",
       render() {
+        context.keymap.layer(() => ({
+          mode: "global",
+          commands: [{
+            id: "probe.arrange",
+            bind: "ctrl+g",
+            run() {
+              for (const [index, sessionID] of openSessionIDs.entries()) {
+                context.ui.tabs.move(sessionID, index);
+              }
+            },
+          }],
+        }));
         createEffect(() => {
           const snapshot = JSON.stringify({
             tabs: context.ui.tabs.list().map((tab) => ({

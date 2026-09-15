@@ -75,7 +75,9 @@ Plugin option `maxWorkers` defaults to 4 and accepts integers from 1 through 32.
 
 The terminal synchronizes workers before opening native tabs without changing focus. A TUI memory index survives plugin reloads and respects manually closed tabs. `/threads` explicitly reopens workers for open coordinator tabs. A new TUI recovers workers from durable storage. Closing the TUI does not interrupt workers.
 
-All open native root-session tabs are automatically grouped by OpenCode project ID, including sessions not managed by this plugin. Projects follow their first appearance in the current tab order; sessions keep their relative order within each project. Worktrees with the same project ID stay together. Each tab with unloaded project metadata stays in its own group until that metadata becomes available. Reconciliation moves only out-of-order tabs, without changing focus or closing and reopening them. Native tabs do not support divider rows.
+All open native root-session tabs are automatically grouped by OpenCode project ID, including sessions not managed by this plugin. Projects follow their first appearance in the current tab order. Worktrees with the same project ID stay together.
+
+Within each project, running sessions, the selected tab, and sessions waiting for input come before idle sessions. Tabs with the same priority keep their relative order. Finished runs remain visible below active work and rise again when resumed or selected. Idle is a display priority, not a completion verdict. Each tab with unloaded project metadata stays in its own group until that metadata becomes available. Reconciliation moves only out-of-order tabs, without changing focus or closing and reopening them. Native tabs do not support divider rows.
 
 The read-only RPC definition is `ThreadsRpc` in `src/rpc.ts`, with ID `threads` and method `snapshot`:
 
@@ -90,7 +92,7 @@ The input accepts at most 100 coordinator IDs. Raw HTTP RPC requests wrap the in
 
 Run `bun run typecheck`, `bun test`, and `bun run verify:live`. The live check requires OpenCode 2.0.3, Python, and `uv`. It starts a separate local server, a deterministic model endpoint, and a terminal process with isolated configuration and data. It verifies actual tool calls, durable messages, permission restrictions, worker limits, deleted-worker cleanup, restart behavior, and native tab visibility, busy state, and focus.
 
-Run `bun run verify:tabs` to verify project grouping across real git worktrees, new worker insertion, focus preservation, and TUI reopening.
+Run `bun run verify:tabs` to verify project grouping across real git worktrees, activity-based ordering, permission prompts, completed and resumed workers, focus preservation, and TUI reopening.
 
 Pass an extracted package directory to test the release artifact: `bun run verify:live /absolute/path/to/package`.
 

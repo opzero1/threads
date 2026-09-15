@@ -16,23 +16,28 @@ export default Plugin.define({
         const projectID = ctx.data.session.get(tab.sessionID)?.projectID;
         return {
           sessionID: tab.sessionID,
+          priority: tab.busy || tab.active || tab.attention,
           projectID:
             typeof projectID === "string" && projectID.length > 0
               ? projectID
               : undefined,
         };
       });
-      const groups = new Map<string, string[]>();
+      const groups = new Map<string, typeof tabs>();
       for (const tab of tabs) {
         const key =
           tab.projectID === undefined
             ? `session:${tab.sessionID}`
             : `project:${tab.projectID}`;
         const group = groups.get(key);
-        if (group) group.push(tab.sessionID);
-        else groups.set(key, [tab.sessionID]);
+        if (group) group.push(tab);
+        else groups.set(key, [tab]);
       }
-      const ordered = [...groups.values()].flat();
+      const ordered = [...groups.values()].flatMap((group) =>
+        group
+          .sort((left, right) => Number(right.priority) - Number(left.priority))
+          .map((tab) => tab.sessionID),
+      );
       for (const [index, sessionID] of ordered.entries()) {
         if (ctx.ui.tabs.list()[index]?.sessionID === sessionID) continue;
         if (!ctx.ui.tabs.move(sessionID, index)) break;

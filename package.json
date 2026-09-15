@@ -1,6 +1,6 @@
 {
   "name": "@op1/threads",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Visible top-level worker sessions for OpenCode V2, with native tabs and durable reports.",
   "type": "module",
   "main": "./index.ts",
