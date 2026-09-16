@@ -15,6 +15,12 @@ export const WorkerView = z.object({
   key: z.string(),
   title: z.string(),
   directory: z.string(),
+  agent: z.string().nullable(),
+  model: z.object({
+    providerID: z.string(),
+    id: z.string(),
+    variant: z.string().optional(),
+  }).nullable(),
   outcome: z.enum(["succeeded", "failed", "interrupted"]).nullable(),
   report: Report.nullable(),
   hidden: z.boolean(),

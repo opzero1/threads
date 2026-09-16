@@ -1,6 +1,6 @@
 {
   "name": "@op1/threads",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Visible top-level worker sessions for OpenCode V2, with native tabs and durable reports.",
   "type": "module",
   "main": "./index.ts",
@@ -25,6 +25,8 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "verify:live": "uv run --with pyte python scripts/verify-live.py",
+    "verify:roles": "python3 scripts/verify-roles.py",
+    "verify:idle-tabs": "uv run --with pyte python scripts/verify-idle-tabs.py",
     "verify:tabs": "uv run --with pyte python scripts/verify-tab-groups.py"
   },
   "dependencies": {

@@ -74,6 +74,20 @@ describe("native identity and caller boundaries", () => {
       expect(fingerprint(changed)).not.toBe(fingerprint(request));
     expect(fingerprint({ ...request })).toBe(fingerprint(request));
   });
+  test("named agent selection is admitted and participates in spawn identity", () => {
+    const request = { key: "roles", title: "Workstream", directory: "/work", task: "Verify" };
+    const core = Spawn.parse({ ...request, agent: "vera-core" });
+    const engineer = Spawn.parse({ ...request, agent: "vera-engineer" });
+    expect(core.agent).toBe("vera-core");
+    expect(fingerprint(core)).not.toBe(fingerprint(engineer));
+    expect(fingerprint(core)).not.toBe(fingerprint(Spawn.parse(request)));
+    expect(() => Spawn.parse({ ...request, agent: "" })).toThrow();
+  });
+  test("omitting an agent preserves the fingerprint of pre-role workers", () => {
+    expect(fingerprint(Spawn.parse({ key: "roles", title: "Workstream", directory: "/work", task: "Verify" }))).toBe(
+      "386dfd06102da10f8ca294a78d241e8a33d6921ff86f0615d282a618b140bdcf",
+    );
+  });
 });
 
 describe("admission serialization", () => {

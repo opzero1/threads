@@ -22,7 +22,7 @@ export default Plugin.define({
         const projectID = ctx.data.session.get(tab.sessionID)?.projectID;
         return {
           sessionID: tab.sessionID,
-          priority: tab.busy || tab.active || tab.attention,
+          priority: tab.busy || tab.attention,
           projectID:
             typeof projectID === "string" && projectID.length > 0
               ? projectID

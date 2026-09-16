@@ -4,9 +4,11 @@ import { isAbsolute } from "node:path";
 import type { Plugin } from "@opencode/plugin";
 import type { SessionContext } from "@opencode/plugin/promise/session";
 import type { ToolContext } from "@opencode/plugin/promise/tool";
+import type { Permission } from "@opencode/schema/permission";
 import { Session } from "@opencode/schema/session";
 import { SessionMessage } from "@opencode/schema/session-message";
 import { z } from "zod";
+import { requireDelegation } from "./permissions";
 import { Report, WorkerView } from "./rpc";
 
 const sessionID = z.string().transform((value) => Session.ID.make(value));
@@ -33,6 +35,9 @@ export const Spawn = z
     title: z.string().min(1),
     directory: z.string().min(1),
     task: z.string().min(1),
+    agent: z.string().min(1).optional().describe(
+      "Configured agent ID in the worker's directory. Omit to inherit the caller's agent and model.",
+    ),
   })
   .strict();
 export const Send = z
@@ -49,7 +54,12 @@ const digest = (parts: string[]) =>
 export const workerIdentity = (coordinatorID: string, key: string) =>
   Session.ID.make(`ses_${digest([coordinatorID, key]).slice(0, 32)}`);
 export const fingerprint = (input: z.infer<typeof Spawn>) =>
-  digest([input.title, input.directory, input.task]);
+  digest([
+    input.title,
+    input.directory,
+    input.task,
+    ...(input.agent === undefined ? [] : [input.agent]),
+  ]);
 
 const locks = new Map<string, Promise<void>>();
 export async function serialized<T>(
@@ -96,6 +106,18 @@ export function threads(
     `reports/${link.workerID}/${link.reportMessageID}`;
   const visibilityKey = (link: z.infer<typeof Link>) =>
     `visibility/${link.workerID}/${link.reportMessageID}`;
+  const initializedKey = (link: z.infer<typeof Link>) =>
+    `initialized/${link.workerID}/${link.initialMessageID}`;
+
+  async function initialized(session: NativeSession, link: z.infer<typeof Link>) {
+    return session.metadata?.opThreadsRole !== true ||
+      await ctx.storage.get(initializedKey(link)) === true;
+  }
+
+  async function callerPermissions(session: NativeSession, agentID: string) {
+    const agent = await ctx.agent.get({ agentID, location: session.location });
+    return [...agent.data.permissions, ...(session.permissions ?? [])];
+  }
 
   async function view(
     session: NativeSession,
@@ -110,6 +132,8 @@ export function threads(
       key: link.key,
       title: session.title ?? link.key,
       directory: session.location.directory,
+      agent: session.agent ?? null,
+      model: session.model ?? null,
       outcome: session.outcome ?? null,
       report,
       hidden:
@@ -141,6 +165,7 @@ export function threads(
             throw error;
           await ctx.storage.remove(reportKey(link));
           await ctx.storage.remove(visibilityKey(link));
+          await ctx.storage.remove(initializedKey(link));
           await ctx.storage.remove(entry.key);
           continue;
         }
@@ -161,6 +186,34 @@ export function threads(
 
   return {
     list,
+    async preparePrompt(actor: string, messageID: string, callerAgent: unknown) {
+      const session = await ctx.session.get({ sessionID: actor });
+      if (session.metadata?.opThreadsRole !== true) return;
+      const recorded = Link.parse(session.metadata.opThreads);
+      if (session.parentID !== undefined || recorded.workerID !== session.id) return;
+      const link = workerLink(session);
+      if (await initialized(session, link)) return;
+      if (link.initialMessageID !== messageID || session.agent === undefined) {
+        throw new Error(
+          "Worker initialization is pending. Retry the original threads_spawn request.",
+        );
+      }
+      const coordinator = await ctx.session.get({ sessionID: link.coordinatorID });
+      requireDelegation(
+        await callerPermissions(coordinator, z.string().min(1).parse(callerAgent)),
+        session.agent,
+      );
+      const agent = await ctx.agent.get({
+        agentID: session.agent,
+        location: session.location,
+      });
+      if (agent.data.model) {
+        await ctx.session.switchModel({
+          sessionID: session.id,
+          model: agent.data.model,
+        });
+      }
+    },
     async hide(actor: string, input: z.infer<typeof WorkerTarget>) {
       const { session, link } = await owned(actor, input.workerID);
       await ctx.storage.set(visibilityKey(link), true);
@@ -199,9 +252,17 @@ export function threads(
           throw new Error("directory must be an existing absolute directory");
         }
         const workerID = workerIdentity(actor, input.key);
+        let session = await ctx.session.get({ sessionID: workerID }).catch(
+          (error: unknown) => {
+            const missing = MissingSession.safeParse(error);
+            if (!missing.success || missing.data.sessionID !== workerID)
+              throw error;
+            return undefined;
+          },
+        );
         const existing = await list(actor);
         if (
-          !existing.some((worker) => worker.workerID === workerID) &&
+          !session &&
           existing.filter(
             (worker) =>
               !worker.report &&
@@ -211,10 +272,6 @@ export function threads(
         ) {
           throw new Error(`Coordinator worker limit reached (${limit})`);
         }
-        const agent = await ctx.agent.get({
-          agentID: runtime.agent,
-          location: coordinator.location,
-        });
         const proposed = Link.parse({
           workerID,
           coordinatorID: actor,
@@ -223,18 +280,31 @@ export function threads(
           initialMessageID: SessionMessage.ID.create(),
           reportMessageID: SessionMessage.ID.create(),
         });
-        const session = await ctx.session.create({
-          id: workerID,
-          title: input.title,
-          location: { directory: input.directory },
-          agent: runtime.agent,
-          model: runtime.model,
-          permissions: [
-            ...agent.data.permissions,
-            ...(coordinator.permissions ?? []),
-          ],
-          metadata: { opThreads: proposed },
-        });
+        if (!session) {
+          const inherited = await callerPermissions(coordinator, runtime.agent);
+          if (input.agent !== undefined) requireDelegation(inherited, input.agent);
+          session = await ctx.session.create({
+            id: workerID,
+            title: input.title,
+            location: { directory: input.directory },
+            agent: input.agent ?? runtime.agent,
+            model: runtime.model,
+            permissions: [
+              ...(input.agent === undefined
+                ? inherited
+                : (coordinator.permissions ?? [])
+                    .filter((rule) => rule.effect !== "allow")
+                    .map((rule) => (
+                      { ...rule, effect: "deny" } satisfies Permission.Rule
+                    ))),
+              { action: "threads_report", resource: "*", effect: "allow" },
+            ],
+            metadata: {
+              opThreads: proposed,
+              ...(input.agent === undefined ? {} : { opThreadsRole: true }),
+            },
+          });
+        }
         const link = workerLink(session);
         if (
           link.coordinatorID !== actor ||
@@ -249,13 +319,22 @@ export function threads(
           sessionID: link.workerID,
           id: link.initialMessageID,
           delivery: "queue",
-          text: `${input.task}\n\nYou are a managed worker assigned to ${input.directory}. Work only within the assigned scope. You may use native subagent for bounded tasks or reviews when useful, within the brief's delegation limits and inherited permissions. Delegation is optional. Pass relevant context, scope, and constraints to each subagent. Do not call threads_spawn. Review your subagents' results and resolve any outstanding work before reporting. Only you call threads_report with the combined verdict, summary, and evidence; subagents return results to you. Runtime completion alone does not establish task success.`,
+          metadata: input.agent === undefined
+            ? undefined
+            : { opThreadsCallerAgent: runtime.agent },
+          text: `${input.task}\n\nYou are a managed worker assigned to ${input.directory}. Work only within the assigned scope. You may use native subagent for bounded tasks or reviews when useful, within the brief's delegation limits and your permissions. Delegation is optional. Pass relevant context, scope, and constraints to each subagent. Do not call threads_spawn. Review your subagents' results and resolve any outstanding work before reporting. Only you call threads_report with the combined verdict, summary, and evidence; subagents return results to you. Runtime completion alone does not establish task success.`,
         });
+        if (input.agent !== undefined) {
+          await ctx.storage.set(initializedKey(link), true);
+        }
         return view(await ctx.session.get({ sessionID: workerID }));
       });
     },
     async send(actor: string, input: z.infer<typeof Send>) {
-      const { link } = await owned(actor, input.workerID);
+      const { session, link } = await owned(actor, input.workerID);
+      if (!await initialized(session, link)) {
+        throw new Error("Worker initialization is pending. Retry the original threads_spawn request.");
+      }
       const id = SessionMessage.ID.make(
         `msg_${digest([input.workerID, "send", input.key]).slice(0, 32)}`,
       );

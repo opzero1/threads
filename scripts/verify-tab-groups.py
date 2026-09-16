@@ -119,7 +119,7 @@ try:
     sandbox.api("POST", f'/api/session/{alpha["id"]}/prompt', {"text": "GROUP_WORKER"})
     worker = eventually(lambda: next((session for session in sandbox.api("GET", "/api/session?parentID=null&limit=100")["data"] if session.get("metadata", {}).get("opThreads", {}).get("key") == "group-worker"), None))
     worker_id = worker["id"]
-    running_ids = [alpha["id"], worker_id, alpha_worktree["id"], beta["id"], beta_review["id"]]
+    running_ids = [worker_id, alpha["id"], alpha_worktree["id"], beta["id"], beta_review["id"]]
     wait_tabs(running_ids, alpha["id"], busy=[worker_id])
     passed("a running worker rises above idle tabs in its project without taking focus")
     wait_titles({
@@ -151,7 +151,7 @@ try:
     provider.release.clear()
     provider.responses["UNMANAGED_BUSY"] = {"name": "threads_list", "arguments": {}, "wait": True}
     sandbox.api("POST", f'/api/session/{alpha_worktree["id"]}/prompt', {"text": "UNMANAGED_BUSY"})
-    grouped_ids = [alpha["id"], alpha_worktree["id"], worker_id, beta["id"], beta_review["id"]]
+    grouped_ids = [alpha_worktree["id"], alpha["id"], worker_id, beta["id"], beta_review["id"]]
     wait_tabs(grouped_ids, alpha["id"], busy=[alpha_worktree["id"]], idle=[worker_id])
     passed("new activity in an unmanaged session moves it above a completed worker")
     provider.release.set()
@@ -160,6 +160,7 @@ try:
     provider.release.clear()
     provider.responses["RESUME_WORKER"] = {"name": "threads_list", "arguments": {}, "wait": True}
     sandbox.api("POST", f'/api/session/{worker_id}/prompt', {"text": "RESUME_WORKER"})
+    running_ids = [worker_id, alpha_worktree["id"], alpha["id"], beta["id"], beta_review["id"]]
     wait_tabs(running_ids, alpha["id"], busy=[worker_id])
     passed("resuming a completed worker raises it above idle sessions again")
     provider.release.set()
@@ -170,7 +171,7 @@ try:
     })
     provider.responses["ASK_PERMISSION"] = {"name": "shell", "arguments": {"command": "true"}}
     sandbox.api("POST", f'/api/session/{beta_review["id"]}/prompt', {"text": "ASK_PERMISSION"})
-    attention_ids = [alpha["id"], worker_id, alpha_worktree["id"], beta_review["id"], beta["id"]]
+    attention_ids = [worker_id, alpha_worktree["id"], alpha["id"], beta_review["id"], beta["id"]]
     state = wait_tabs(attention_ids, alpha["id"], attention=[beta_review["id"]])
     (artifacts / "attention.json").write_text(json.dumps(state, indent=2) + "\n")
     passed("a native permission request rises above idle tabs without crossing project groups")
@@ -184,14 +185,18 @@ try:
     eventually(lambda: beta_review["id"] not in sandbox.api("GET", "/api/session/active")["data"])
     (artifacts / "tabs.json").unlink(missing_ok=True)
     terminal = Terminal(sandbox, beta["id"])
-    state = wait_tabs(running_ids, beta["id"], idle=[beta_review["id"]])
-    passed("selecting an idle session raises it within its project after TUI reopening")
+    state = wait_tabs(attention_ids, beta["id"], idle=[beta_review["id"]])
+    passed("selecting an idle session preserves the shared tab order after TUI reopening")
     settled = time.monotonic()
     terminal.wait_for_match(lambda _: time.monotonic() - settled >= 7, "two refresh intervals", 10, False)
-    assert [tab["sessionID"] for tab in tab_state()["tabs"]] == running_ids
+    assert [tab["sessionID"] for tab in tab_state()["tabs"]] == attention_ids
     passed("unchanged activity keeps the tab order stable across periodic refreshes")
-    provider.responses["HIDE_WORKER"] = {"name": "threads_hide", "arguments": {"workerID": worker_id}}
+    provider.release.clear()
+    provider.responses["HIDE_WORKER"] = {"name": "threads_hide", "arguments": {"workerID": worker_id}, "wait": True}
     sandbox.api("POST", f'/api/session/{alpha["id"]}/prompt', {"text": "HIDE_WORKER"})
+    wait_tabs([alpha["id"], worker_id, alpha_worktree["id"], beta_review["id"], beta["id"]], beta["id"], busy=[alpha["id"]])
+    provider.release.set()
+    expected_ids = [alpha["id"], alpha_worktree["id"], beta_review["id"], beta["id"]]
     wait_tabs(expected_ids, beta["id"])
     passed("the orchestrator can hide a restored idle worker without removing its conversation")
     assert sandbox.api("GET", f"/api/session/{worker_id}")["data"]["id"] == worker_id
@@ -205,12 +210,13 @@ try:
     wait_tabs(expected_ids, beta["id"])
     passed("hidden workers stay hidden across server and TUI restarts")
 
+    grouped_ids = [alpha["id"], alpha_worktree["id"], worker_id, beta_review["id"], beta["id"]]
     restore_tabs(grouped_ids, beta["id"])
     passed("hidden history remains restorable after a restart")
     wait_titles({alpha["id"]: "[Main] Renamed main", worker_id: "[Worker] Renamed worker"})
     passed("role prefixes persist across server and TUI restarts without accumulating duplicates")
     os.write(terminal.master, b"\x1b[13~")
-    selected_ids = [worker_id, alpha["id"], alpha_worktree["id"], beta["id"], beta_review["id"]]
+    selected_ids = grouped_ids
     wait_tabs(selected_ids, worker_id)
     provider.responses["HIDE_SELECTED"] = {"name": "threads_hide", "arguments": {"workerID": worker_id}}
     sandbox.api("POST", f'/api/session/{alpha["id"]}/prompt', {"text": "HIDE_SELECTED"})
@@ -218,7 +224,7 @@ try:
     wait_tabs(selected_ids, worker_id)
     passed("hiding the selected worker preserves the open conversation")
     os.write(terminal.master, b"\x1b[14~")
-    wait_tabs(expected_ids, alpha["id"], ordered=False)
+    wait_tabs(expected_ids, alpha_worktree["id"], ordered=False)
     passed("a hidden selected worker closes once the user leaves it")
     provider.responses["FAIL_REPORT"] = {"name": "threads_report", "arguments": {"verdict": "FAIL", "summary": "Needs coordinator review", "evidence": []}}
     provider.responses["SPAWN_FAILED"] = {"name": "threads_spawn", "arguments": {"key": "failed-worker", "title": "Alpha failed worker", "directory": str(worktree), "task": "FAIL_REPORT"}}
@@ -231,8 +237,21 @@ try:
     terminal.close(artifacts / "labeled-tabs.txt")
     terminal = Terminal(sandbox, failed["id"])
     terminal.wait_for("ctrl+p commands")
-    terminal.wait_for_match(lambda _: tab_state()["route"].get("sessionID") == failed["id"] and len(tab_state()["tabs"]) > 1, "selected worker with restored tabs", 40, False)
+
+    def restored_groups_settled(_):
+        state = tab_state()
+        projects = [tab.get("projectID") for tab in state["tabs"]]
+        groups = [project for index, project in enumerate(projects) if index == 0 or projects[index - 1] != project]
+        return (
+            state["route"].get("sessionID") == failed["id"]
+            and {tab["sessionID"] for tab in state["tabs"]} == set(expected_ids + [failed["id"]])
+            and None not in projects and len(groups) == len(set(projects))
+            and all(not tab["busy"] for tab in state["tabs"])
+        )
+
+    terminal.wait_for_match(restored_groups_settled, "selected worker with settled project groups", 40, False)
     os.write(terminal.master, b"\x0f")
+    terminal.wait_for_match(lambda _: tab_state().get("isolateRequests", 0) == 1, "close-others key command acknowledged", 40, False)
     wait_tabs([failed["id"]], failed["id"])
     sandbox.api("POST", f'/api/session/{failed["id"]}/rename', {"title": "Worker alone"})
     wait_titles({failed["id"]: "[Worker] Worker alone"})

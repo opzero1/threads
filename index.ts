@@ -15,6 +15,11 @@ export default Plugin.define({
       .default(4)
       .parse(ctx.options.maxWorkers);
     const workers = threads(ctx, limit);
+    await ctx.session.hook("prompt", (event) => {
+      return workers.preparePrompt(
+        event.sessionID, event.messageID, event.metadata?.opThreadsCallerAgent,
+      );
+    });
     const models = new Map<
       SessionContext["sessionID"],
       SessionContext["model"]
@@ -38,7 +43,7 @@ export default Plugin.define({
       editor.add({
         name: "spawn",
         description:
-          "Delegate a task to a top-level worker in an existing absolute directory. Both you and the worker may use native subagent when useful. Include any delegation limits in task. Workers cannot call threads_spawn. Reuse key only for identical requests.",
+          "Delegate a task to a top-level worker in an existing absolute directory. Set agent to a configured profile (for example vera-core); its prompt, model preference, and permissions apply. Omit agent to inherit your active agent and model. Native subagent remains available within the selected profile's permissions and task's delegation limits. Workers cannot call threads_spawn. Reuse key only for identical requests, including agent.",
         input: Spawn,
         output: WorkerView,
         options: {

@@ -16,10 +16,15 @@ Both the parent and managed workers may use native `subagent` when useful. Deleg
 
 1. Confirm the `threads_spawn` tool is available. If it is unavailable, use native `subagent` or report that the plugin needs activation. Do not substitute a hidden `opencode run` process.
 2. Assign an existing absolute directory and a stable task key.
-3. Call `threads_spawn` with `key`, `title`, `directory`, and `task`. Include the goal, scope, relevant context, constraints, delegation allowance, acceptance criteria, verification commands, and expected report in `task`.
-4. Save the returned worker session ID with the work unit.
+3. If the tool schema supports `agent`, select a configured profile explicitly. Use `agent: "vera-core"` for a VERA workstream that owns integration and may delegate. Use a specialist profile for a leaf task or read-only review. Omitting `agent` inherits the caller's active agent and model. Older plugin versions always inherit them.
+4. Call `threads_spawn` with `key`, `title`, `directory`, `task`, and the selected `agent`. Include the goal, scope, relevant context, constraints, delegation allowance, acceptance criteria, verification commands, and expected report in `task`.
+5. Save the returned worker session ID and inspect its returned agent and model when present.
 
-An identical spawn key retries the original admission. Different work requires a new key. A worker inherits the coordinator's agent, model, and permission constraints. It has a separate conversation, so include all context it needs in the task brief.
+An identical spawn key retries the original admission. Different work or a different agent requires a new key. A selected profile supplies its real system prompt, model preference, and permissions in the assigned directory. A profile without a model inherits the caller's resolved model. It has a separate conversation, so include all context it needs in the task brief. Mentioning a role in the brief does not select that profile.
+
+Explicit role selection requires an `allow` for `subagent` on that role ID. Selected workers carry parent session `deny` and `ask` rules as hard denials; parent allow exceptions do not reopen them. Read-only workers can still call their ownership-checked `threads_report` tool.
+
+If the selected profile is unavailable, fix its configuration and retry the identical spawn request. The indexed worker stays uninitialized until that retry succeeds. Do not use `threads_send` to start it.
 
 ## Write the delegation allowance
 
@@ -27,7 +32,7 @@ The parent writes `task`; the plugin appends worker instructions. Give workers t
 
 > You may work directly or use native `subagent` for bounded tasks and reviews when useful. Pass your scope and constraints to subagents, review their results, and resolve outstanding work before calling `threads_report` yourself.
 
-Use a no-delegation restriction only for a task-specific reason or an explicit user constraint, and state the reason. Being a managed worker or having bounded scope does not by itself make the worker a leaf. To limit managed-thread nesting, say `Do not call threads_spawn` rather than `No children`.
+Honor the selected profile's restrictions. A specialist that denies native delegation stays a leaf, and a read-only profile stays read-only. For a delegation-capable profile, add a no-delegation restriction only for a task-specific reason or an explicit user constraint, and state the reason. Being a managed worker or having bounded scope does not by itself make the worker a leaf. To limit managed-thread nesting, say `Do not call threads_spawn` rather than `No children`.
 
 ## Coordinate
 
