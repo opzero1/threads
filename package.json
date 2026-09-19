@@ -1,6 +1,6 @@
 {
   "name": "@op1/threads",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Visible top-level worker sessions for OpenCode V2, with native tabs and durable reports.",
   "type": "module",
   "main": "./index.ts",
@@ -30,8 +30,8 @@
     "verify:tabs": "uv run --with pyte python scripts/verify-tab-groups.py"
   },
   "dependencies": {
-    "@opencode/plugin": "2.0.3",
-    "@opencode/schema": "2.0.3",
+    "@opencode/plugin": "2.0.7",
+    "@opencode/schema": "2.0.7",
     "zod": "4.1.8"
   },
   "peerDependencies": {

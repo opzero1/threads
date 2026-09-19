@@ -143,8 +143,8 @@ try:
     grouped_ids = [alpha["id"], alpha_worktree["id"], worker_id, beta["id"], beta_review["id"]]
     restore_tabs(grouped_ids, alpha["id"])
     passed("the /threads command restores hidden workers for inspection")
-    sandbox.api("POST", f"/api/session/{worker_id}/rename", {"title": "Renamed worker"})
-    sandbox.api("POST", f'/api/session/{alpha["id"]}/rename', {"title": "Renamed main"})
+    sandbox.api("PATCH", f"/api/session/{worker_id}", {"title": "Renamed worker"})
+    sandbox.api("PATCH", f'/api/session/{alpha["id"]}', {"title": "Renamed main"})
     wait_titles({alpha["id"]: "[Main] Renamed main", worker_id: "[Worker] Renamed worker"})
     passed("renaming managed conversations preserves the new names and reapplies their role prefixes")
 
@@ -166,7 +166,7 @@ try:
     provider.release.set()
     wait_tabs(running_ids, alpha["id"], idle=[worker_id])
 
-    sandbox.api("PUT", f'/api/session/{beta_review["id"]}/permission/rules', {
+    sandbox.api("PATCH", f'/api/session/{beta_review["id"]}', {
         "permissions": [{"action": "shell", "resource": "*", "effect": "ask"}],
     })
     provider.responses["ASK_PERMISSION"] = {"name": "shell", "arguments": {"command": "true"}}
@@ -181,7 +181,7 @@ try:
     cli["plugins"][0]["options"]["openSessionIDs"] = []
     cli_path.write_text(json.dumps(cli))
     request = sandbox.api("GET", f'/api/session/{beta_review["id"]}/permission')["data"][0]
-    sandbox.api("POST", f'/api/session/{beta_review["id"]}/permission/{request["id"]}/reply', {"reply": "once"})
+    sandbox.api("POST", f'/api/session/{beta_review["id"]}/permission/{request["id"]}/reply', {"decision": "once"})
     eventually(lambda: beta_review["id"] not in sandbox.api("GET", "/api/session/active")["data"])
     (artifacts / "tabs.json").unlink(missing_ok=True)
     terminal = Terminal(sandbox, beta["id"])
@@ -253,7 +253,7 @@ try:
     os.write(terminal.master, b"\x0f")
     terminal.wait_for_match(lambda _: tab_state().get("isolateRequests", 0) == 1, "close-others key command acknowledged", 40, False)
     wait_tabs([failed["id"]], failed["id"])
-    sandbox.api("POST", f'/api/session/{failed["id"]}/rename', {"title": "Worker alone"})
+    sandbox.api("PATCH", f'/api/session/{failed["id"]}', {"title": "Worker alone"})
     wait_titles({failed["id"]: "[Worker] Worker alone"})
     wait_tabs([failed["id"]], failed["id"])
     passed("a worker keeps its role label when its Main tab is closed without reopening other tabs")

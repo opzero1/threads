@@ -98,7 +98,7 @@ class Sandbox:
                 if match:
                     self.password = match.group(1)
             try:
-                return self.api("GET", "/api/health").get("healthy")
+                return self.api("GET", "/api/info").get("version")
             except (URLError, TimeoutError):
                 return False
 
@@ -116,6 +116,12 @@ class Sandbox:
             self.log.close()
             path = self.artifacts / "server.log"
             path.write_text(re.sub(r"server password \S+", "server password [redacted]", path.read_text()))
+
+    def await_plugin(self):
+        return eventually(lambda: any(
+            plugin["id"] == "op-threads" and plugin["state"]["status"] == "active"
+            for plugin in self.api("GET", "/api/plugin", location=self.directory)["data"]
+        ))
 
     def api(self, method, path, body=None, location=None):
         if location:

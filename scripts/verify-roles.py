@@ -75,7 +75,7 @@ try:
     (sandbox.worker / "opencode.json").write_text(json.dumps({
         "agents": {"fixture-core": {"system": "FIXTURE_DESTINATION_SYSTEM. Coordinate the assigned work."}},
     }))
-    sandbox.api("POST", "/api/plugin/await-activation", location=sandbox.directory)
+    sandbox.await_plugin()
     coordinator = sandbox.api("POST", "/api/session", {
         "title": "Role fixture coordinator", "location": {"directory": str(sandbox.directory)},
         "permissions": [{"action": "shell", "resource": "*", "effect": "deny"}],
@@ -204,7 +204,7 @@ try:
     }))
     sandbox.stop()
     sandbox.start()
-    sandbox.api("POST", "/api/plugin/await-activation", location=sandbox.directory)
+    sandbox.await_plugin()
     restored = run_tool(coordinator["id"], "threads_spawn", request)
     assert restored["state"]["status"] == "completed", restored
     restored_view = json.loads(restored["state"]["content"][0]["text"])
@@ -226,7 +226,7 @@ try:
     }))
     sandbox.stop()
     sandbox.start()
-    sandbox.api("POST", "/api/plugin/await-activation", location=sandbox.directory)
+    sandbox.await_plugin()
     premature = run_tool(coordinator["id"], "threads_send", {
         "workerID": pending["workerID"], "key": "before-initialization", "text": "Start the task now.",
     })
@@ -241,7 +241,7 @@ try:
         raise AssertionError("A direct prompt bypassed initial role selection")
     assert not any(message["type"] in ["user", "assistant"] for message in messages(pending["workerID"]))
     passed("a direct user prompt cannot bypass pending role initialization")
-    sandbox.api("PUT", f"/api/session/{coordinator['id']}/permission/rules", {"permissions": [
+    sandbox.api("PATCH", f"/api/session/{coordinator['id']}", {"permissions": [
         {"action": "subagent", "resource": "fixture-core", "effect": "deny"},
     ]})
     revoked = run_tool(coordinator["id"], "threads_spawn", {**request, "key": "missing-profile"})
@@ -250,7 +250,7 @@ try:
     accepted_retry = run_tool(coordinator["id"], "threads_spawn", request)
     assert accepted_retry["state"]["status"] == "completed", accepted_retry
     passed("revoked role permission blocks first-admission recovery while an admitted retry still converges")
-    sandbox.api("PUT", f"/api/session/{coordinator['id']}/permission/rules", {"permissions": [
+    sandbox.api("PATCH", f"/api/session/{coordinator['id']}", {"permissions": [
         {"action": "shell", "resource": "*", "effect": "deny"},
     ]})
     recovered = run_tool(coordinator["id"], "threads_spawn", {**request, "key": "missing-profile"})

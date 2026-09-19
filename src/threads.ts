@@ -358,7 +358,7 @@ export function threads(
       await owned(actor, input.workerID);
       await ctx.session.interrupt({
         sessionID: input.workerID,
-        continue: false,
+        resume: false,
       });
       return view(await ctx.session.get({ sessionID: input.workerID }));
     },

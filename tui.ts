@@ -132,32 +132,26 @@ export default Plugin.define({
             if (!role || !session?.title) continue;
             const title = `[${role}] ${session.title.replace(/^\[(?:Main|Worker)\] /, "")}`;
             if (title === session.title) continue;
-            await ctx.client.session.rename({ sessionID: tab.sessionID, title });
+            await ctx.client.session.update({ sessionID: tab.sessionID, title });
           }
           groupTabs();
         }
+        lastError = undefined;
+      } catch (error) {
+        const message = `Managed worker tabs: ${String(error)}`;
+        if (!stopped && message !== lastError)
+          ctx.ui.toast.show({ message, variant: "error" });
+        lastError = message;
       } finally {
         running = false;
         if (reopenPending) {
           reopenPending = false;
-          void reconcile(true).catch((error) =>
-            ctx.ui.toast.show({ message: String(error), variant: "error" }),
-          );
+          void reconcile(true);
         }
       }
     }
     const refresh = () => {
-      void reconcile().then(
-        () => {
-          lastError = undefined;
-        },
-        (error: unknown) => {
-          const message = `Managed worker tabs: ${String(error)}`;
-          if (!stopped && message !== lastError)
-            ctx.ui.toast.show({ message, variant: "error" });
-          lastError = message;
-        },
-      );
+      void reconcile();
     };
     const stopEvents = ctx.data.listen(({ details }) => {
       if (details.type.startsWith("session.")) refresh();
@@ -178,16 +172,7 @@ export default Plugin.define({
               title: "Reopen managed worker tabs",
               palette: true,
               slash: { name: "threads" },
-              run: async () => {
-                try {
-                  await reconcile(true);
-                } catch (error) {
-                  ctx.ui.toast.show({
-                    message: String(error),
-                    variant: "error",
-                  });
-                }
-              },
+              run: () => reconcile(true),
             },
           ],
         }));

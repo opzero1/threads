@@ -56,12 +56,12 @@ def roots():
 try:
     settings = config(target, provider)
     sandbox = Sandbox(settings, artifacts)
-    sandbox.api("POST", "/api/plugin/await-activation", location=sandbox.directory)
+    sandbox.await_plugin()
     plugins = sandbox.api("GET", "/api/plugin", location=sandbox.directory)["data"]
     installed = next(plugin for plugin in plugins if plugin["id"] == "op-threads")
     assert installed["state"]["status"] == "active", installed
     assert installed["features"].get("server") and installed["features"].get("tui"), installed
-    passed("server and TUI entrypoints activate in isolated OpenCode 2.0.3")
+    passed(f"server and TUI entrypoints activate in isolated OpenCode {sandbox.api('GET', '/api/info')['version']}")
 
     coordinator = sandbox.api("POST", "/api/session", {
         "title": "Fixture coordinator",
@@ -243,7 +243,7 @@ try:
     before = len(messages(worker_id, "user"))
     sandbox.stop()
     sandbox.start()
-    sandbox.api("POST", "/api/plugin/await-activation", location=sandbox.directory)
+    sandbox.await_plugin()
     assert len(messages(worker_id, "user")) == before
     assert worker_id not in sandbox.api("GET", "/api/session/active")["data"]
     passed("service restart preserves the relation without replaying worker tasks")
