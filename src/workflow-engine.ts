@@ -19,6 +19,8 @@ import {
   interruptWorkflowWorkers,
   withWorkflowSlot,
   workflowDirectory,
+  workflowDirectoryPlan,
+  workflowSourceDirectory,
   workflowTask,
 } from "./workflow-worker";
 
@@ -27,13 +29,15 @@ type Runtime = { agent: string; model: { providerID: string; id: string; variant
 type Control = { runID: string; action: "pause" | "resume" | "stop"; checkpointKey?: string; response?: Json };
 
 const processState = globalThis as typeof globalThis & {
-  __opWorkflowLeases?: Map<string, Promise<void>>;
+  __opWorkflowLeases?: Map<string, { controller: AbortController; promise: Promise<void>; owner: symbol }>;
 };
-const leases = processState.__opWorkflowLeases ??= new Map<string, Promise<void>>();
+const leases = processState.__opWorkflowLeases ??= new Map();
 const digest = (...parts: string[]) => createHash("sha256").update(JSON.stringify(parts)).digest("hex");
 const runIdentity = (ownerID: string, key: string) => `wfr_${digest(ownerID, key).slice(0, 32)}`;
 const deliveryIdentity = (runID: string) => SessionMessage.ID.make(`msg_${digest(runID, "delivery").slice(0, 32)}`);
 const resultKey = (workerID: string) => `workflows/results/${workerID}`;
+const nestedKey = (runID: string, identity: string) => `workflows/nested/${runID}/${digest(identity)}`;
+const completionKey = (runID: string) => `workflows/completions/${runID}`;
 const terminal = new Set(["stopped", "failed", "completed"]);
 const activeStatus = new Set(["running", "pausing", "stopping", "waiting"]);
 const bounded = (text: string, length = 20_000) => text.length <= length ? text : `${text.slice(0, length)}\n…[truncated]`;
@@ -49,6 +53,8 @@ function boundedJson(value: unknown, label: string) {
 function errorText(error: unknown) {
   return bounded(error instanceof Error ? error.message : String(error));
 }
+
+class UncertainWriteError extends Error {}
 
 function usage(session: Awaited<ReturnType<Plugin.Context["session"]["get"]>>) {
   const tokens = session.tokens;
@@ -72,7 +78,7 @@ export function workflowEngine(
   if (!Number.isSafeInteger(maxWorkers) || maxWorkers < 1) throw new Error("maxWorkers must be a positive integer");
   const ajv = new Ajv({ allErrors: true, strict: false });
   const recoveredOwners = new Set<string>();
-  const controllers = new Map<string, AbortController>();
+  const engineOwner = Symbol("workflow-engine");
   let disposed = false;
 
   async function owned(ownerID: string, runID: string) {
@@ -149,14 +155,12 @@ export function workflowEngine(
   }
 
   function launch(runID: string, runtime: Runtime) {
-    if (disposed || leases.has(runID)) return leases.get(runID);
+    if (disposed || leases.has(runID)) return leases.get(runID)?.promise;
     const controller = new AbortController();
-    controllers.set(runID, controller);
     const task = executeRun(runID, runtime, controller).finally(() => {
-      controllers.delete(runID);
-      if (leases.get(runID) === task) leases.delete(runID);
+      if (leases.get(runID)?.promise === task) leases.delete(runID);
     });
-    leases.set(runID, task);
+    leases.set(runID, { controller, promise: task, owner: engineOwner });
     void task.catch(() => {});
     return task;
   }
@@ -173,98 +177,172 @@ export function workflowEngine(
     const seen = new Set<string>();
     const pendingAgents = new Set<Promise<unknown>>();
     const maxCalls = run.limits.maxAgents * 8 + 100;
-    let nestedIndex = 0;
+    let hostCalls = 0;
+    const countCall = () => {
+      hostCalls++;
+      if (hostCalls > maxCalls) throw new Error(`Workflow cumulative call limit exceeded (${maxCalls})`);
+    };
+    const storedCompletionOrder = await ctx.storage.get(completionKey(runID));
+    let completionOrder = storedCompletionOrder === undefined
+      ? []
+      : Json.parse(storedCompletionOrder) as Json[];
+    if (!completionOrder.every((key) => typeof key === "string")) throw new Error("Workflow completion order journal is invalid");
+    let completionCursor = 0;
+    const orderedResult = async (key: string, value: Json) => {
+      await serialized(completionKey(runID), async () => {
+        const stored = await ctx.storage.get(completionKey(runID));
+        const durable = stored === undefined ? [] : Json.parse(stored) as Json[];
+        if (!durable.every((item) => typeof item === "string")) throw new Error("Workflow completion order journal is invalid");
+        if (!durable.includes(key)) {
+          durable.push(key);
+          await ctx.storage.set(completionKey(runID), durable);
+        }
+        completionOrder = durable;
+      });
+      for (;;) {
+        if (controller.signal.aborted) throw controller.signal.reason;
+        if (completionOrder[completionCursor] === key) {
+          completionCursor++;
+          return value;
+        }
+        await Bun.sleep(5);
+      }
+    };
+    const nestedIndexes = new Map<string, number>();
     let active = 0;
     const hostFor = (prefix: string, depth: number): WorkflowHost => ({
       agent: async (raw) => {
+        countCall();
         const input = WorkflowAgentInput.parse(raw);
         if (input.schema !== undefined) ajv.compile(input.schema);
         const key = `${prefix}${input.key}`;
         if (seen.has(key)) throw new Error(`Duplicate workflow agent key in this execution: ${key}`);
         seen.add(key);
         await waitUntilRunnable(runID, controller.signal);
-        run = await store.get(runID);
-        const completed = run.steps.find((step): step is Extract<WorkflowStep, { status: "completed" }> => step.key === key && isCompleted(step));
         const requestFingerprint = workflowHash(input);
-        if (completed) {
-          if (completed.fingerprint !== requestFingerprint) throw new Error(`Workflow key ${key} was resumed with different input; use a new run key`);
-          return completed.report.result;
-        }
-        const previous = run.steps.find((step) => step.key === key);
-        if (previous && previous.fingerprint !== requestFingerprint) throw new Error(`Workflow key ${key} was resumed with different input; use a new run key`);
-        if (!previous && run.steps.length >= run.limits.maxAgents) throw new Error(`Workflow agent limit reached (${run.limits.maxAgents})`);
-        const consumed = run.steps.reduce((sum, step) => sum + (step.status === "completed" ? step.usage.tokens : 0), 0);
-        if (run.limits.tokenBudget !== undefined && consumed >= run.limits.tokenBudget) {
-          throw new Error(`Workflow token budget reached (${run.limits.tokenBudget}); in-flight usage may overshoot the soft budget`);
-        }
-        const profile = await ctx.agent.get({ agentID: input.agent, location: { directory: input.directory ?? run.directory } });
-        const owner = await ctx.session.get({ sessionID: run.ownerID });
-        const caller = await ctx.agent.get({ agentID: run.callerAgent, location: owner.location });
+        const beforeAdmission = await store.get(runID);
+        const source = await workflowSourceDirectory(ctx, beforeAdmission, input);
+        const directoryInput = { ...input, directory: source };
+        const owner = await ctx.session.get({ sessionID: beforeAdmission.ownerID });
+        const caller = await ctx.agent.get({ agentID: beforeAdmission.callerAgent, location: owner.location });
         requireDelegation([...caller.data.permissions, ...(owner.permissions ?? [])], input.agent);
-        const model = profile.data.model ?? run.model;
-        const profileFingerprint = workflowHash({ model, permissions: profile.data.permissions });
-        const directory = previous?.directory ?? await resolveWorktree(run, input, key);
-        const spawnKey = `workflow:${run.id}:${key}`;
-        const workerID = previous?.workerID ?? workerIdentity(run.ownerID, spawnKey);
-        if (!previous) {
-          const step: WorkflowStep = {
-            status: "prepared", key, fingerprint: requestFingerprint,
-            index: run.steps.length, input, workerID, spawnKey, created: Date.now(),
-            phase: input.phase ?? run.phase, directory, model, profileFingerprint,
-          };
-          await store.update(run.id, (current) => {
-            if (current.steps.some((item) => item.key === key)) throw new Error(`Duplicate persisted workflow key: ${key}`);
-            current.steps.push(step);
+        const sourceProfile = await ctx.agent.get({ agentID: input.agent, location: { directory: source } });
+        const sourceModel = sourceProfile.data.model ?? beforeAdmission.model;
+        const sourceProfileFingerprint = workflowHash({
+          model: sourceModel,
+          permissions: sourceProfile.data.permissions,
+          system: sourceProfile.data.system ?? null,
+        });
+        run = await store.update(runID, (current) => {
+          const existing = current.steps.find((step) => step.key === key);
+          if (existing) {
+            if (existing.fingerprint !== requestFingerprint) throw new Error(`Workflow key ${key} was resumed with different input; use a new run key`);
+            return;
+          }
+          if (current.steps.length >= current.limits.maxAgents) throw new Error(`Workflow agent limit reached (${current.limits.maxAgents})`);
+          const completed = current.steps.filter(isCompleted);
+          if (current.limits.tokenBudget !== undefined) {
+            if (completed.some((step) => !step.usage.measured)) {
+              throw new Error("Workflow token budget cannot continue because prior worker usage is unmeasured");
+            }
+            const consumed = completed.reduce((sum, step) => sum + step.usage.tokens, 0);
+            if (consumed >= current.limits.tokenBudget) {
+              throw new Error(`Workflow token budget reached (${current.limits.tokenBudget}); in-flight usage may overshoot the soft budget`);
+            }
+          }
+          const plan = workflowDirectoryPlan(current, directoryInput, key);
+          const spawnKey = `workflow:${current.id}:${key}`;
+          current.steps.push({
+            status: "prepared",
+            key,
+            fingerprint: requestFingerprint,
+            index: current.steps.reduce((maximum, step) => Math.max(maximum, step.index), -1) + 1,
+            input,
+            workerID: workerIdentity(current.ownerID, spawnKey),
+            spawnKey,
+            created: Date.now(),
+            phase: input.phase ?? current.phase,
+            directory: plan.directory,
+            model: sourceModel,
+            profileFingerprint: `pending:${sourceProfileFingerprint}`,
           });
+        });
+        let previous = run.steps.find((step) => step.key === key)!;
+        if (previous.profileFingerprint.startsWith("pending:") && previous.profileFingerprint !== `pending:${sourceProfileFingerprint}`) {
+          throw new Error(`Source agent profile for workflow key ${key} changed before worktree allocation; start a new workflow run key`);
         }
+        const directory = previous.profileFingerprint.startsWith("pending:")
+          ? await resolveWorktree(run, directoryInput, key)
+          : previous.directory;
+        const spawnKey = previous.spawnKey;
         const dispatch = async () => {
           await waitUntilRunnable(run.id, controller.signal);
           let current = (await store.get(run.id)).steps.find((step) => step.key === key)!;
+          const ensureWorker = () => workers.spawnWorkflow(run.ownerID, {
+            key: spawnKey,
+            title: input.label ?? `Workflow: ${key}`,
+            directory,
+            task: workflowTask(input),
+            agent: input.agent,
+          }, runtime as Parameters<Threads["spawnWorkflow"]>[2], {
+            ownerID: Session.ID.make(run.ownerID), runID: run.id, stepKey: key,
+            callerAgent: run.callerAgent, access: input.access,
+          });
+          await ensureWorker();
+          const profile = await ctx.agent.get({ agentID: input.agent, location: { directory } });
+          const model = profile.data.model ?? run.model;
+          const profileFingerprint = workflowHash({ model, permissions: profile.data.permissions, system: profile.data.system ?? null });
+          run = await store.update(run.id, (value) => {
+            const step = value.steps.find((item) => item.key === key)!;
+            if (!step.profileFingerprint.startsWith("pending:") && step.profileFingerprint !== profileFingerprint) {
+              throw new Error(`Agent profile for workflow key ${key} changed; start a new workflow run key`);
+            }
+            step.directory = directory;
+            step.model = model;
+            step.profileFingerprint = profileFingerprint;
+          });
+          current = run.steps.find((step) => step.key === key)!;
+          if (current.status === "completed") return current.report.result;
           const finishRecorded = async (recorded: unknown) => {
             const report = WorkflowResult.parse(recorded);
             const native = await ctx.session.get({ sessionID: current.workerID });
+            if (native.outcome !== "succeeded") {
+              const message = `Worker reported ${report.verdict} but its native execution ended ${native.outcome ?? "without a successful outcome"}`;
+              await store.update(run.id, (value) => {
+                const index = value.steps.findIndex((step) => step.key === key);
+                value.steps[index] = { ...value.steps[index], status: "failed", error: message, retryable: false } as WorkflowStep;
+              });
+              throw new Error(message);
+            }
             await store.update(run.id, (value) => {
               const index = value.steps.findIndex((step) => step.key === key);
               value.steps[index] = { ...value.steps[index], status: "completed", completed: Date.now(), report, usage: usage(native) } as WorkflowStep;
             });
             return report.result;
           };
-          const journaled = await ctx.storage.get(resultKey(current.workerID));
-          if (journaled !== undefined) return finishRecorded(journaled);
-          if (current.status === "failed") {
-            if (!current.retryable) throw new Error(current.error);
-            await workers.send(run.ownerID, {
-              workerID: Session.ID.make(current.workerID),
-              key: `workflow-retry:${run.id}:${key}`,
-              text: "The previous native execution failed before a valid workflows_result report was recorded. Inspect the existing session work, repair the issue, and call workflows_result. Do not redo already-completed external effects.",
-            });
-          } else {
-            const native = await ctx.session.get({ sessionID: current.workerID }).catch(() => undefined);
-            if (current.status === "running" && native && native.outcome !== undefined) {
-              if (input.access === "write") {
-                const message = "Interrupted write has uncertain external state. Inspect and resolve the retained worker/worktree explicitly; it will not be replayed automatically.";
-                await store.update(run.id, (value) => {
-                  const index = value.steps.findIndex((step) => step.key === key);
-                  value.steps[index] = { ...value.steps[index], status: "failed", error: message, retryable: false } as WorkflowStep;
-                });
-                throw new Error(message);
-              }
+          let recorded = await ctx.storage.get(resultKey(current.workerID));
+          if (recorded === undefined) {
+            if (current.status === "failed") {
+              if (!current.retryable) throw new Error(current.error);
               await workers.send(run.ownerID, {
                 workerID: Session.ID.make(current.workerID),
-                key: `workflow-reconcile:${run.id}:${key}`,
-                text: "The service resumed this read-only step after its prior execution ended without a validated report. Inspect the existing context, finish the task, and call workflows_result.",
+                key: `workflow-retry:${run.id}:${key}`,
+                text: "The previous native execution failed before a valid workflows_result report was recorded. Inspect the existing session work, repair the issue, and call workflows_result. Do not redo already-completed external effects.",
               });
             } else {
-            await workers.spawnWorkflow(run.ownerID, {
-              key: spawnKey,
-              title: input.label ?? `Workflow: ${key}`,
-              directory,
-              task: workflowTask(input),
-              agent: input.agent,
-            }, runtime as Parameters<Threads["spawnWorkflow"]>[2], {
-              ownerID: Session.ID.make(run.ownerID), runID: run.id, stepKey: key,
-              callerAgent: run.callerAgent, access: input.access,
-            });
+              const native = await ctx.session.get({ sessionID: current.workerID }).catch(() => undefined);
+              if (current.status === "running" && native?.outcome !== undefined) {
+                if (input.access === "write") {
+                  const message = "Interrupted write has uncertain external state. Inspect the retained worker/worktree and send that same worker an explicit resolution request; after it reports, resume this run. The write will not be replayed automatically.";
+                  await store.update(run.id, (value) => { value.status = "interrupted"; value.error = message; });
+                  throw new UncertainWriteError(message);
+                }
+                await workers.send(run.ownerID, {
+                  workerID: Session.ID.make(current.workerID),
+                  key: `workflow-reconcile:${run.id}:${key}`,
+                  text: "The service resumed this read-only step after its prior execution ended without a validated report. Inspect the existing context, finish the task, and call workflows_result.",
+                });
+              }
             }
           }
           await store.update(run.id, (value) => {
@@ -301,7 +379,7 @@ export function workflowEngine(
             }
           };
           await waitWorker();
-          let recorded = await ctx.storage.get(resultKey(current.workerID));
+          recorded ??= await ctx.storage.get(resultKey(current.workerID));
           if (recorded === undefined) {
             const native = await ctx.session.get({ sessionID: current.workerID });
             if (native.outcome === "succeeded" || (input.access === "read" && (native.outcome === "failed" || native.outcome === "interrupted"))) {
@@ -331,18 +409,26 @@ export function workflowEngine(
         };
         active++;
         try {
-          const perform = () => withWorkflowSlot(run.ownerID, Math.min(maxWorkers, run.limits.concurrency), controller.signal, dispatch);
+          const perform = () => withWorkflowSlot(
+            run.ownerID,
+            maxWorkers,
+            run.id,
+            run.limits.concurrency,
+            controller.signal,
+            dispatch,
+          );
           const pending = input.access === "write" && input.isolation === "shared"
             ? serialized(`workflow-write:${directory}`, perform)
             : perform();
           pendingAgents.add(pending);
           try {
-            return await pending;
+            return await orderedResult(key, await pending as Json);
           } finally {
             pendingAgents.delete(pending);
           }
         } catch (error) {
           await store.update(run.id, (value) => {
+            if (value.status === "interrupted") return;
             const index = value.steps.findIndex((step) => step.key === key);
             const step = value.steps[index];
             if (step && step.status !== "completed" && step.status !== "failed") {
@@ -357,26 +443,32 @@ export function workflowEngine(
         }
       },
       phase: async (title) => {
+        countCall();
         const phase = bounded(String(title), 160);
         await store.update(runID, (current) => { current.phase = phase; });
       },
       log: async (message) => {
+        countCall();
         await store.update(runID, (current) => {
           current.logs.push({ time: Date.now(), text: bounded(String(message), 2_000) });
           if (current.logs.length > 200) current.logs.splice(0, current.logs.length - 200);
         });
       },
       checkpoint: async (raw) => {
+        countCall();
         const request = raw as { key?: unknown; prompt?: unknown };
-        const key = String(request.key ?? "");
+        const localKey = String(request.key ?? "");
+        const key = `${prefix}${localKey}`;
         const prompt = bounded(String(request.prompt ?? ""), 10_000);
-        if (!key || !prompt) throw new Error("Checkpoint requires non-empty key and prompt");
-        await store.update(runID, (current) => {
+        if (!localKey || !prompt) throw new Error("Checkpoint requires non-empty key and prompt");
+        const checkpoint = await store.update(runID, (current) => {
           const checkpoint = current.checkpoints.find((item) => item.key === key);
           if (checkpoint && checkpoint.prompt !== prompt) throw new Error(`Checkpoint ${key} changed on resume`);
           if (!checkpoint) current.checkpoints.push({ key, prompt });
-          current.status = "waiting";
+          if (checkpoint?.response === undefined) current.status = "waiting";
         });
+        const recorded = checkpoint.checkpoints.find((item) => item.key === key)!;
+        if (recorded.response !== undefined) return recorded.response;
         for (;;) {
           if (controller.signal.aborted) throw controller.signal.reason;
           const current = await store.get(runID);
@@ -386,11 +478,36 @@ export function workflowEngine(
         }
       },
       workflow: async (input) => {
+        countCall();
         if (depth >= 4) throw new Error("Nested workflow depth limit reached (4)");
         if (!options.loadSaved) throw new Error("Saved workflow loading is not configured");
-        const script = await options.loadSaved(input.name);
+        const scope = `${prefix}workflow:${input.name}`;
+        const index = nestedIndexes.get(scope) ?? 0;
+        nestedIndexes.set(scope, index + 1);
+        const identity = `${scope}:${index}`;
+        const key = nestedKey(run.id, identity);
+        const existing = await ctx.storage.get(key);
+        let script: string;
+        if (existing === undefined) {
+          const loaded = await options.loadSaved(input.name);
+          const pinned = { name: input.name, identity, script: loaded, fingerprint: digest(loaded) };
+          await serialized(key, async () => {
+            const raced = await ctx.storage.get(key);
+            if (raced === undefined) await ctx.storage.set(key, Json.parse(pinned));
+          });
+          const durable = await ctx.storage.get(key) as Partial<typeof pinned> | undefined;
+          if (durable?.name !== input.name || durable.identity !== identity || typeof durable.script !== "string" || durable.fingerprint !== digest(durable.script)) {
+            throw new Error(`Nested workflow pin ${identity} is invalid`);
+          }
+          script = durable.script;
+        } else {
+          const durable = existing as { name?: unknown; identity?: unknown; script?: unknown; fingerprint?: unknown };
+          if (durable.name !== input.name || durable.identity !== identity || typeof durable.script !== "string" || durable.fingerprint !== digest(durable.script)) {
+            throw new Error(`Nested workflow pin ${identity} is invalid`);
+          }
+          script = durable.script;
+        }
         parseWorkflow(script);
-        const index = nestedIndex++;
         return executeWorkflow({
           script,
           args: input.args ?? null,
@@ -412,6 +529,8 @@ export function workflowEngine(
       } else if (latest.status === "pausing" || latest.status === "paused") {
         await store.update(runID, (current) => { current.status = "paused"; });
       } else {
+        const unresolved = latest.steps.find((step) => step.status !== "completed");
+        if (unresolved) throw new Error(`Workflow cannot complete with unresolved step ${unresolved.key} (${unresolved.status})`);
         const adverse = latest.steps.filter(isCompleted).find((step) => step.report.verdict === "FAIL" || step.report.verdict === "INCONCLUSIVE");
         if (adverse) throw new Error(`Step ${adverse.key} reported ${adverse.report.verdict}: ${adverse.report.summary}`);
         await store.update(runID, (current) => {
@@ -476,36 +595,45 @@ export function workflowEngine(
       return store.list(ownerID);
     },
     async control(ownerID: string, input: Control) {
-      await recover(ownerID);
-      let run = await owned(ownerID, input.runID);
-      if (input.action === "pause") {
-        if (run.status !== "running") throw new Error(`Cannot pause workflow in ${run.status}`);
-        run = await store.update(run.id, (current) => { current.status = "pausing"; });
-        if (!run.steps.some((step) => step.status === "running")) run = await store.update(run.id, (current) => { current.status = "paused"; });
-      } else if (input.action === "stop") {
-        if (!terminal.has(run.status)) {
-          run = await store.update(run.id, (current) => { current.status = "stopping"; });
-          controllers.get(run.id)?.abort(new Error("Workflow stopped"));
-          await interruptWorkflowWorkers(workers, ownerID, run);
-          await leases.get(run.id)?.catch(() => {});
-          run = await store.update(run.id, (current) => { current.status = "stopped"; });
-          await deliver(run.id);
+      return serialized(`workflow-control:${input.runID}`, async () => {
+        await recover(ownerID);
+        let run = await owned(ownerID, input.runID);
+        if (input.action === "pause") {
+          if (run.status !== "running") throw new Error(`Cannot pause workflow in ${run.status}`);
+          run = await store.update(run.id, (current) => { current.status = "pausing"; });
+          if (!run.steps.some((step) => step.status === "running")) run = await store.update(run.id, (current) => { current.status = "paused"; });
+        } else if (input.action === "stop") {
+          if (!terminal.has(run.status)) {
+            run = await store.update(run.id, (current) => { current.status = "stopping"; });
+            leases.get(run.id)?.controller.abort(new Error("Workflow stopped"));
+            await interruptWorkflowWorkers(workers, ownerID, run);
+            await leases.get(run.id)?.promise.catch(() => {});
+            run = await store.update(run.id, (current) => { current.status = "stopped"; });
+            await deliver(run.id);
+          }
+        } else {
+          if (input.checkpointKey !== undefined || input.response !== undefined) {
+            if (!input.checkpointKey || input.response === undefined) throw new Error("Checkpoint resume requires checkpointKey and response");
+            if (terminal.has(run.status) || run.status === "stopping") throw new Error(`Cannot answer a checkpoint in ${run.status}`);
+            run = await store.update(run.id, (current) => {
+              const checkpoint = current.checkpoints.find((item) => item.key === input.checkpointKey);
+              if (!checkpoint) throw new Error(`Checkpoint ${input.checkpointKey} not found`);
+              if (checkpoint.response !== undefined && JSON.stringify(checkpoint.response) !== JSON.stringify(input.response)) throw new Error("Checkpoint already has a different response");
+              checkpoint.response = Json.parse(input.response);
+              current.status = "running";
+              delete current.error;
+            });
+          } else {
+            if (!["paused", "interrupted"].includes(run.status)) {
+              if (run.status === "waiting") throw new Error("Waiting workflow requires checkpointKey and response");
+              throw new Error(`Cannot resume workflow in ${run.status}`);
+            }
+            run = await store.update(run.id, (current) => { current.status = "running"; delete current.error; });
+          }
+          launch(run.id, { agent: run.callerAgent, model: run.model });
         }
-      } else {
-        if (!["paused", "interrupted", "waiting"].includes(run.status)) throw new Error(`Cannot resume workflow in ${run.status}`);
-        if (run.status === "waiting") {
-          if (!input.checkpointKey || input.response === undefined) throw new Error("Checkpoint resume requires checkpointKey and response");
-          run = await store.update(run.id, (current) => {
-            const checkpoint = current.checkpoints.find((item) => item.key === input.checkpointKey);
-            if (!checkpoint) throw new Error(`Checkpoint ${input.checkpointKey} not found`);
-            if (checkpoint.response !== undefined && JSON.stringify(checkpoint.response) !== JSON.stringify(input.response)) throw new Error("Checkpoint already has a different response");
-            checkpoint.response = Json.parse(input.response);
-            current.status = "running";
-          });
-        } else run = await store.update(run.id, (current) => { current.status = "running"; delete current.error; });
-        launch(run.id, { agent: run.callerAgent, model: run.model });
-      }
-      return run;
+        return run;
+      });
     },
     async result(workerID: string, raw: WorkflowResult) {
       const session = await ctx.session.get({ sessionID: workerID });
@@ -520,7 +648,7 @@ export function workflowEngine(
       if (input.summary.length > 20_000 || input.evidence.length > 100 || input.evidence.some((item) => item.length > 20_000)) {
         throw new Error("Workflow report exceeds its bounded summary or evidence limits");
       }
-      boundedJson(input.result, "Workflow worker result");
+      boundedJson(input, "Workflow worker report");
       if (step.input.schema !== undefined) {
         const validate = ajv.compile(step.input.schema);
         if (!validate(input.result)) throw new Error(`Workflow result schema validation failed: ${ajv.errorsText(validate.errors)}`);
@@ -539,16 +667,16 @@ export function workflowEngine(
     async dispose() {
       disposed = true;
       const pending: Promise<void>[] = [];
-      for (const [runID, controller] of controllers) {
+      for (const [runID, lease] of leases) {
+        if (lease.owner !== engineOwner) continue;
         await store.update(runID, (run) => {
           if (!terminal.has(run.status)) {
             run.status = "interrupted";
             run.error = "Workflow engine disposed while the run was active; resume explicitly.";
           }
         });
-        controller.abort(new Error("Workflow engine disposed"));
-        const task = leases.get(runID);
-        if (task) pending.push(task.catch(() => {}));
+        lease.controller.abort(new Error("Workflow engine disposed"));
+        pending.push(lease.promise.catch(() => {}));
       }
       await Promise.all(pending);
     },
