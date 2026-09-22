@@ -44,7 +44,7 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
     session: {
       async get({ sessionID }: { sessionID: string }) {
         const session = sessions.get(sessionID);
-        if (!session) throw new Error(`missing ${sessionID}`);
+        if (!session) throw { _tag: "Session.NotFoundError", sessionID };
         return session;
       },
       async wait({ sessionID }: { sessionID: string }) { await waits.get(sessionID); },
@@ -140,6 +140,12 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
     setSaved: (name: string, value: string) => { saved.set(name, value); },
     spawnedStepKeys,
     workerEvents,
+    deleteWorker: (stepKey: string) => {
+      const found = [...sessions.entries()].find(([, session]) =>
+        (session.metadata as { opWorkflow?: { stepKey?: string } } | undefined)?.opWorkflow?.stepKey === stepKey
+      );
+      if (found) sessions.delete(found[0]);
+    },
     mutateRun: async (runID: string, mutate: (run: WorkflowRun) => void) => {
       const key = `workflows/runs/${runID}`;
       const run = WorkflowRun.parse(await storage.get(key));
@@ -488,6 +494,49 @@ return await agent("read", { key: "read", agent: "analyst" });`;
     expect(fixture.workerEvents.slice(0, 2)).toEqual(["spawn", "send"]);
     await fixture.complete("read");
     expect((await settled(reopened, fixture.ownerID, started.id)).status).toBe("completed");
+    await reopened.dispose();
+  });
+
+  test("returns a completed cached write without recreating its deleted native session", async () => {
+    const fixture = await harness("valid");
+    const writeThenWait = `
+export const meta = { name: "cached-write", description: "deleted session" };
+const result = await agent("write", { key: "write", agent: "analyst", access: "write" });
+await checkpoint("Continue?", { key: "continue" });
+return result;`;
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "cached-write", script: writeThenWait, args: null }), {
+      agent: "caller", model: { providerID: "test", id: "model" },
+    });
+    await reaches(fixture.api, fixture.ownerID, started.id, "waiting");
+    expect(fixture.spawns()).toBe(1);
+    await fixture.api.dispose();
+    fixture.deleteWorker("write");
+    const reopened = fixture.reopen();
+    await reopened.control(fixture.ownerID, { runID: started.id, action: "resume", checkpointKey: "continue", response: true });
+    const run = await settled(reopened, fixture.ownerID, started.id);
+    expect(run.status).toBe("completed");
+    expect(run.result).toEqual({ ok: true });
+    expect(fixture.spawns()).toBe(1);
+    await reopened.dispose();
+  });
+
+  test("does not recreate a missing previously-dispatched write worker", async () => {
+    const fixture = await harness("manual");
+    const write = `
+export const meta = { name: "missing-write", description: "ambiguous dispatch" };
+return await agent("write", { key: "write", agent: "analyst", access: "write" });`;
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "missing-write", script: write, args: null }), {
+      agent: "caller", model: { providerID: "test", id: "model" },
+    });
+    while (!fixture.spawnedStepKeys.includes("write")) await Bun.sleep(2);
+    await fixture.api.dispose();
+    fixture.deleteWorker("write");
+    const reopened = fixture.reopen();
+    await reopened.control(fixture.ownerID, { runID: started.id, action: "resume" });
+    const run = await reaches(reopened, fixture.ownerID, started.id, "interrupted");
+    expect(run.error).toContain("external state is ambiguous");
+    expect(run.steps[0].status).toBe("running");
+    expect(fixture.spawns()).toBe(1);
     await reopened.dispose();
   });
 });

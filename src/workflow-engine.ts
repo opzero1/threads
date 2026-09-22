@@ -288,21 +288,60 @@ export function workflowEngine(
             ownerID: Session.ID.make(run.ownerID), runID: run.id, stepKey: key,
             callerAgent: run.callerAgent, access: input.access,
           });
-          await ensureWorker();
-          const profile = await ctx.agent.get({ agentID: input.agent, location: { directory } });
-          const model = profile.data.model ?? run.model;
-          const profileFingerprint = workflowHash({ model, permissions: profile.data.permissions, system: profile.data.system ?? null });
-          run = await store.update(run.id, (value) => {
-            const step = value.steps.find((item) => item.key === key)!;
-            if (!step.profileFingerprint.startsWith("pending:") && step.profileFingerprint !== profileFingerprint) {
-              throw new Error(`Agent profile for workflow key ${key} changed; start a new workflow run key`);
+          const finalizeProfile = async () => {
+            const profile = await ctx.agent.get({ agentID: input.agent, location: { directory } });
+            const model = profile.data.model ?? run.model;
+            const profileFingerprint = workflowHash({ model, permissions: profile.data.permissions, system: profile.data.system ?? null });
+            run = await store.update(run.id, (value) => {
+              const step = value.steps.find((item) => item.key === key)!;
+              if (!step.profileFingerprint.startsWith("pending:") && step.profileFingerprint !== profileFingerprint) {
+                throw new Error(`Agent profile for workflow key ${key} changed; start a new workflow run key`);
+              }
+              step.directory = directory;
+              step.model = model;
+              step.profileFingerprint = profileFingerprint;
+            });
+            return run.steps.find((step) => step.key === key)!;
+          };
+          if (current.status === "completed") {
+            const result = current.report.result;
+            await finalizeProfile();
+            return result;
+          }
+          const fresh = current.status === "prepared";
+          if (fresh) {
+            run = await store.update(run.id, (value) => {
+              const index = value.steps.findIndex((step) => step.key === key);
+              if (value.steps[index].status === "prepared") {
+                value.steps[index] = { ...value.steps[index], status: "running" } as WorkflowStep;
+              }
+            });
+            current = run.steps.find((step) => step.key === key)!;
+          } else {
+            try {
+              await ctx.session.get({ sessionID: current.workerID });
+            } catch (error) {
+              const missing = typeof error === "object" && error !== null &&
+                "_tag" in error && error._tag === "Session.NotFoundError" &&
+                "sessionID" in error && error.sessionID === current.workerID;
+              if (!missing) throw error;
+              const message = input.access === "write"
+                ? "Previously dispatched write worker is missing. Its external state is ambiguous, so it will not be recreated or replayed."
+                : "Previously dispatched worker is missing and cannot be safely recreated under the same durable identity.";
+              await store.update(run.id, (value) => {
+                if (input.access === "write") {
+                  value.status = "interrupted";
+                  value.error = message;
+                  return;
+                }
+                const index = value.steps.findIndex((step) => step.key === key);
+                value.steps[index] = { ...value.steps[index], status: "failed", error: message, retryable: false } as WorkflowStep;
+              });
+              throw new Error(message);
             }
-            step.directory = directory;
-            step.model = model;
-            step.profileFingerprint = profileFingerprint;
-          });
-          current = run.steps.find((step) => step.key === key)!;
-          if (current.status === "completed") return current.report.result;
+          }
+          await ensureWorker();
+          current = await finalizeProfile();
           const finishRecorded = async (recorded: unknown) => {
             const report = WorkflowResult.parse(recorded);
             const native = await ctx.session.get({ sessionID: current.workerID });
