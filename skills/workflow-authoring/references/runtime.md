@@ -21,14 +21,14 @@ The body supports top-level `await`, ordinary data transformations, branching, a
 | `label` | Optional display title. |
 | `phase` | Optional phase override. |
 | `schema` | Optional JSON Schema for the result. Invalid schemas fail before dispatch. |
-| `access` | `read` by default. `write` permits the selected profile's write tools. |
+| `access` | `read` by default: only the profile's permitted read, glob, grep, webfetch, websearch, and skill tools. `write` permits the selected profile's other tools. |
 | `isolation` | `shared` by default, or `worktree` for a retained isolated checkout. |
-| `directory` | Optional explicit working directory. |
+| `directory` | Optional existing directory inside the owner project or one of its registered worktrees. Symlinks are resolved before containment checks. |
 | `timeoutMs` | Optional step timeout, bounded by the run's execution policy. |
 
 Workers submit `workflows_result({ verdict, summary, evidence, result })`. Invalid results return a validation error so the worker can repair its output. A native execution that ends without a result has no task verdict.
 
-Profile restrictions and the coordinator's restrictions still apply. Workflow workers cannot delegate. Selecting `access: "write"` does not grant permissions that the selected profile lacks.
+Profile restrictions and the coordinator's restrictions still apply. Read access blocks other plugin and MCP tools, including those with side effects, even if the selected profile permits them. Workflow workers cannot delegate. Selecting `access: "write"` does not grant permissions that the selected profile lacks.
 
 ## Composition
 
@@ -37,7 +37,7 @@ Profile restrictions and the coordinator's restrictions still apply. Workflow wo
 - `await phase(title)` records a display phase.
 - `await log(message)` records a bounded progress message.
 - `workflow(name, args)` invokes a saved workflow within the parent's limits.
-- `retry(thunk, { attempts })` bounds semantic retries. Give each agent attempt a distinct step key. Inspect uncertain writes before retrying them.
+- `retry(thunk, { attempts })` bounds logical or validation retries. Give each agent attempt a distinct step key. Return expected negative findings as validated data, then let the validator decide whether another attempt is useful. A native execution failure or an explicit `FAIL`/`INCONCLUSIVE` report remains an unresolved failure and prevents the run from passing, even when caught by the script. Inspect uncertain writes before starting a replacement run.
 - `gate(thunk, validator, { attempts })` repeats until the validator accepts or attempts run out. The validator returns a boolean or `{ ok: boolean, feedback?: string }`. A truthy object without `ok: true` does not pass.
 - `loopUntilDry({ round, key, consecutiveEmpty, maxRounds })` accumulates unique findings until discovery stops producing new items.
 - `checkpoint(prompt, { key })` records a question and waits for an explicit response through the run controls. The response becomes recorded input on resume.
@@ -61,6 +61,10 @@ The configured Threads worker limit also applies. A token budget checks recorded
 The same start key and identical input identify the same run. Start retries do not restart completed or stopped runs. Pause stops new scheduling and drains active steps. Stop interrupts active work. Resume uses the same recorded script and arguments, reconciles existing sessions, and reuses completed results. A changed step request under an existing key fails rather than returning a stale result. Save edits as a new workflow run.
 
 A service restart leaves interrupted work available for explicit resume. Worktrees and session evidence are retained. A missing result after an interrupted write requires inspection; it does not prove that no write occurred.
+
+For an uncertain write, inspect its retained worker and directory. Use `threads_send` to ask that same worker to verify the existing effects and submit `workflows_result` without repeating completed actions. After its native execution finishes, resume the workflow. A missing worker session is not permission to replay its writes in a new session.
+
+Nested saved scripts are pinned to their run. Recorded agent completions replay in their original order. If a selected profile's model, instructions, or permissions change, start a new run rather than treating its old result as evidence from the new profile.
 
 ## Saved workflows
 

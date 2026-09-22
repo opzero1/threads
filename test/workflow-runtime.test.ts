@@ -38,6 +38,25 @@ describe("workflow metadata", () => {
 });
 
 describe("real CodeMode workflow execution", () => {
+  test("computed data keys remain usable while CodeMode rejects computed Function construction", async () => {
+    expect(await run('const key = "va" + "lue"; return args[key];')).toBe(7);
+    await expect(run(`const key = "constructo" + "r";
+      const F = (() => {})[key]; return F("return typeof process")();`)).rejects.toThrow("Function constructor is not supported");
+    expect(await run('const key = "__prot" + "o__"; const value = {}; value[key] = {leaked: 1}; return value.leaked === undefined;')).toBe(true);
+    await expect(run('const key = "getPrototype" + "Of"; return Object[key]({});')).rejects.toThrow("not a function");
+    await expect(run('const key = "define" + "Property"; const value = {}; Object[key](value, "x", {value:1}); return value;')).rejects.toThrow("not a function");
+  });
+  test("returning before a started agent finishes cannot claim workflow success", async () => {
+    let finish = () => {};
+    const pending = new Promise<void>((resolve) => { finish = resolve; });
+    try {
+      await expect(run('agent("work", {key:"one"}); return true;', {
+        host: host({ agent: async () => { await pending; return "late result"; } }),
+      })).rejects.toThrow();
+    } finally {
+      finish();
+    }
+  });
   test("passes args without source serialization and exposes shaped wrappers", async () => {
     const calls: unknown[] = [];
     const value = await run(`

@@ -39,7 +39,7 @@ export function workflowUI(ctx: Plugin.Context) {
       const id = selected()?.id;
       if (id) {
         const run = await rpc.inspect({ ownerID: current, runID: id }, { location: location(), signal: abort.signal });
-        if (current === ownerID() && !abort.signal.aborted) setSelected(run);
+        if (current === ownerID() && selected()?.id === id && !abort.signal.aborted) setSelected(run);
       }
       setError("");
     } catch (cause) {

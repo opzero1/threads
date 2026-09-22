@@ -126,7 +126,7 @@ export function workflowSummary(run: WorkflowRun): WorkflowSummary {
     usage: {
       tokens: completed.reduce((total, step) => total + step.usage.tokens, 0),
       cost: completed.reduce((total, step) => total + step.usage.cost, 0),
-      measured: completed.length > 0 && completed.every((step) => step.usage.measured),
+      measured: run.steps.length > 0 && completed.length === run.steps.length && completed.every((step) => step.usage.measured),
     },
   });
 }

@@ -359,6 +359,7 @@ export async function executeWorkflow(input: {
     throw error;
   }
   if (!result.ok) throw new Error(`${result.error.kind}: ${result.error.message}`);
+  if (pending.size > 0) throw new Error("Workflow returned with unawaited host operations; await every agent and helper call");
   if (result.truncated || result.warnings?.some((warning) => warning.kind === "Truncated" || warning.kind === "TimeoutExceeded"))
     throw new Error("Workflow execution was truncated or timed out");
   const failedBackgroundWork = result.warnings?.find((warning) => warning.kind === "ToolFailure" || warning.kind === "ExecutionFailure");

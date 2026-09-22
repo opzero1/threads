@@ -8,7 +8,7 @@ import type { Permission } from "@opencode/schema/permission";
 import { Session } from "@opencode/schema/session";
 import { SessionMessage } from "@opencode/schema/session-message";
 import { z } from "zod";
-import { requireDelegation } from "./permissions";
+import { permissionMatches, requireDelegation } from "./permissions";
 import { Report, WorkerView } from "./rpc";
 
 const sessionID = z.string().transform((value) => Session.ID.make(value));
@@ -68,6 +68,14 @@ export const fingerprint = (input: z.infer<typeof Spawn>) =>
   ]);
 
 const locks = new Map<string, Promise<void>>();
+const workflowState = globalThis as typeof globalThis & { __opWorkflowExecutionGrants?: Set<string> };
+const workflowExecutionGrants = workflowState.__opWorkflowExecutionGrants ??= new Set<string>();
+export function authorizeWorkflowExecution(workerID: string) {
+  workflowExecutionGrants.add(workerID);
+}
+export function workflowExecutionAuthorized(workerID: string) {
+  return workflowExecutionGrants.has(workerID);
+}
 export async function serialized<T>(
   key: string,
   run: () => Promise<T>,
@@ -123,6 +131,23 @@ export function threads(
   async function callerPermissions(session: NativeSession, agentID: string) {
     const agent = await ctx.agent.get({ agentID, location: session.location });
     return [...agent.data.permissions, ...(session.permissions ?? [])];
+  }
+
+  function workflowPermissions(inherited: Permission.Ruleset, readProfile?: Permission.Ruleset): Permission.Ruleset {
+    const readActions = ["read", "glob", "grep", "webfetch", "websearch", "skill", "external_directory"];
+    return [
+      ...(readProfile === undefined ? [] : [
+        { action: "*", resource: "*", effect: "deny" as const },
+        ...readProfile.flatMap((rule) => readActions
+          .filter((action) => permissionMatches(rule.action, action))
+          .map((action) => ({ ...rule, action }))),
+      ]),
+      ...inherited.filter((rule) => rule.effect !== "allow").map((rule) => ({ ...rule, effect: "deny" as const })),
+      { action: "subagent", resource: "*", effect: "deny" },
+      { action: "threads_*", resource: "*", effect: "deny" },
+      { action: "workflows_*", resource: "*", effect: "deny" },
+      { action: "workflows_result", resource: "*", effect: "allow" },
+    ];
   }
 
   async function prepareRole(
@@ -261,7 +286,19 @@ export function threads(
       const workflow = WorkflowWorker.safeParse(session.metadata?.opWorkflow);
       if (!workflow.success) return;
       const link = workerLink(session);
+      if (await initialized(session, link)) {
+        authorizeWorkflowExecution(actor);
+        return;
+      }
       await prepareRole(session, link, messageID, workflow.data.callerAgent);
+      if (!await initialized(session, link) && session.metadata?.opWorkflowAccess === "read") {
+        const coordinator = await ctx.session.get({ sessionID: link.coordinatorID });
+        const profile = await ctx.agent.get({ agentID: session.agent!, location: session.location });
+        await ctx.session.update({
+          sessionID: session.id,
+          permissions: workflowPermissions(await callerPermissions(coordinator, workflow.data.callerAgent), profile.data.permissions),
+        });
+      }
     },
     async hide(actor: string, input: z.infer<typeof WorkerTarget>) {
       const { session, link } = await owned(actor, input.workerID);
@@ -420,21 +457,7 @@ export function threads(
         if (!session) {
           const inherited = await callerPermissions(coordinator, runtime.agent);
           requireDelegation(inherited, input.agent);
-          const restrictions: Permission.Ruleset = [
-            ...(coordinator.permissions ?? [])
-              .filter((rule) => rule.effect !== "allow")
-              .map((rule) => ({ ...rule, effect: "deny" as const })),
-            { action: "subagent", resource: "*", effect: "deny" },
-            { action: "threads_*", resource: "*", effect: "deny" },
-            { action: "workflows_*", resource: "*", effect: "deny" },
-            ...(workflow.access === "read" ? [
-              { action: "shell", resource: "*", effect: "deny" as const },
-              { action: "edit", resource: "*", effect: "deny" as const },
-              { action: "write", resource: "*", effect: "deny" as const },
-              { action: "patch", resource: "*", effect: "deny" as const },
-            ] : []),
-            { action: "workflows_result", resource: "*", effect: "allow" },
-          ];
+          const restrictions = workflowPermissions(inherited, workflow.access === "read" ? [] : undefined);
           session = await ctx.session.create({
             id: workerID,
             title: input.title,
@@ -442,7 +465,7 @@ export function threads(
             agent: input.agent,
             model: runtime.model,
             permissions: restrictions,
-            metadata: { opThreads: proposed, opThreadsRole: true, opWorkflow: workflowMetadata },
+            metadata: { opThreads: proposed, opThreadsRole: true, opWorkflow: workflowMetadata, opWorkflowAccess: workflow.access },
           });
         }
         const link = workerLink(session);
@@ -457,7 +480,7 @@ export function threads(
             id: link.initialMessageID,
             delivery: "queue",
             metadata: { opThreadsCallerAgent: runtime.agent, opWorkflowRunID: workflow.runID },
-            text: `${input.task}\n\nYou are a leaf workflow worker. Do not delegate, spawn or control other workers, or operate workflow controls. Work only in ${input.directory}. Finish by calling workflows_result exactly once with a verdict, concise summary, evidence, and a result matching the requested JSON schema. Native completion without that validated report is not success.`,
+            text: `${input.task}\n\nYou are a leaf workflow worker. Do not delegate, spawn or control other workers, or operate workflow controls. Work only in ${input.directory}. Finish by submitting one accepted workflows_result with a verdict, concise summary, evidence, and a result matching the requested JSON schema. If validation rejects your result, correct it and resubmit. Native completion without that validated report is not success.`,
           });
           await ctx.storage.set(initializedKey(link), true);
         }
@@ -472,6 +495,7 @@ export function threads(
       const id = SessionMessage.ID.make(
         `msg_${digest([input.workerID, "send", input.key]).slice(0, 32)}`,
       );
+      if (session.metadata?.opWorkflow !== undefined) authorizeWorkflowExecution(input.workerID);
       const admitted = await ctx.session.synthetic({
         sessionID: input.workerID,
         id,
@@ -507,7 +531,8 @@ export function threads(
       const session = await ctx.session.get({ sessionID: actor });
       WorkflowWorker.parse(session.metadata?.opWorkflow);
       const link = workerLink(session);
-      return { workerID: link.workerID, report: await journalReport(session, link, input, true) };
+      const report = { verdict: input.verdict, summary: input.summary, evidence: input.evidence };
+      return { workerID: link.workerID, report: await journalReport(session, link, report, true) };
     },
   };
 }

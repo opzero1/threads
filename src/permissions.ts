@@ -1,6 +1,6 @@
 import type { Permission } from "@opencode/schema/permission";
 
-function matches(pattern: string, value: string) {
+export function permissionMatches(pattern: string, value: string) {
   const expression = pattern
     .replaceAll("\\", "/")
     .replace(/[.+^${}()|[\]\\]/g, "\\$&")
@@ -19,7 +19,7 @@ export function delegationEffect(
   agentID: string,
 ): Permission.Effect {
   return rules.findLast((rule) =>
-    matches(rule.action, "subagent") && matches(rule.resource, agentID)
+    permissionMatches(rule.action, "subagent") && permissionMatches(rule.resource, agentID)
   )?.effect ?? "ask";
 }
 
