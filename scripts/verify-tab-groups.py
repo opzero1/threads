@@ -4,6 +4,8 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import shutil
+import re
 
 from fixture import Provider, config
 from sandbox import Sandbox, Terminal, eventually
@@ -12,6 +14,7 @@ from sandbox import Sandbox, Terminal, eventually
 root = Path(__file__).resolve().parent.parent
 target = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else root
 artifacts = root / ".audit" / ("tab-groups" if target == root else "tab-groups-package")
+shutil.rmtree(artifacts, ignore_errors=True)
 provider = Provider()
 sandbox = None
 terminal = None
@@ -43,9 +46,11 @@ def wait_tabs(expected, selected, busy=(), attention=(), idle=(), ordered=True):
         )
 
     terminal.wait_for_match(matches, f"native tab state {expected}", 40, False)
-    state = tab_state()
-    terminal.wait_for_order([tab["title"] for tab in state["tabs"]])
-    return state
+    terminal.wait_for_match(
+        lambda display: re.search(".*".join(re.escape(tab["title"]) for tab in tab_state()["tabs"]), display, re.S),
+        "current native titles in tab order", 40, True,
+    )
+    return tab_state()
 
 
 def restore_tabs(expected, selected):
@@ -58,7 +63,7 @@ def restore_tabs(expected, selected):
 def wait_titles(expected):
     terminal.wait_for_match(
         lambda _: all(any(tab["sessionID"] == sid and tab["title"] == title for tab in tab_state()["tabs"]) for sid, title in expected.items()),
-        f"role-labeled titles {expected}", 40, False,
+        f"saved titles {expected}", 40, False,
     )
     for sid, title in expected.items():
         terminal.wait_for(title, left=True)
@@ -71,7 +76,9 @@ def worker_view(coordinator_id, worker_id):
 
 
 try:
-    sandbox = Sandbox(config(target, provider), artifacts)
+    configuration = config(target, provider)
+    configuration["plugins"] = [{"package": str(target), "options": {"activity": False}}]
+    sandbox = Sandbox(configuration, artifacts)
     subprocess.run(["git", "init", "-b", "main", str(sandbox.directory)], check=True, capture_output=True)
     subprocess.run([
         "git", "-C", str(sandbox.directory), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
@@ -81,7 +88,7 @@ try:
     subprocess.run(["git", "-C", str(sandbox.directory), "worktree", "add", "--detach", str(worktree)], check=True, capture_output=True)
 
     sessions = [sandbox.api("POST", "/api/session", {"title": title, "location": {"directory": str(directory)}})["data"] for title, directory in [
-        ("Alpha coordinator", sandbox.directory),
+        ("[Main] Alpha coordinator", sandbox.directory),
         ("Beta coordinator", sandbox.worker),
         ("Alpha worktree", worktree),
         ("Beta review", sandbox.worker),
@@ -93,6 +100,7 @@ try:
 
     cli_path = sandbox.root / "config" / "opencode" / "cli.json"
     cli = json.loads(cli_path.read_text())
+    cli["plugins"].append({"package": str(target), "options": {"activity": False}})
     cli["plugins"][0]["options"]["openSessionIDs"] = [session["id"] for session in sessions]
     cli["keybinds"] = {"session.tab.select.3": "f3", "session.tab.select.2": "f4"}
     cli_path.write_text(json.dumps(cli))
@@ -114,7 +122,7 @@ try:
     }
     provider.responses["GROUP_WORKER"] = {
         "name": "threads_spawn",
-        "arguments": {"key": "group-worker", "title": "Alpha new worker", "directory": str(worktree), "task": "WORKER_REPORT"},
+        "arguments": {"key": "group-worker", "title": "[Worker] Alpha new worker", "directory": str(worktree), "task": "WORKER_REPORT"},
     }
     sandbox.api("POST", f'/api/session/{alpha["id"]}/prompt', {"text": "GROUP_WORKER"})
     worker = eventually(lambda: next((session for session in sandbox.api("GET", "/api/session?parentID=null&limit=100")["data"] if session.get("metadata", {}).get("opThreads", {}).get("key") == "group-worker"), None))
@@ -123,10 +131,10 @@ try:
     wait_tabs(running_ids, alpha["id"], busy=[worker_id])
     passed("a running worker rises above idle tabs in its project without taking focus")
     wait_titles({
-        alpha["id"]: "[Main] Alpha coordinator", worker_id: "[Worker] Alpha new worker",
+        alpha["id"]: "Alpha coordinator", worker_id: "Alpha new worker",
         alpha_worktree["id"]: "Alpha worktree", beta["id"]: "Beta coordinator", beta_review["id"]: "Beta review",
     })
-    passed("managed tabs gain saved Main and Worker prefixes without labeling unrelated sessions")
+    passed("legacy managed Main/Worker prefixes are cleaned without labeling unrelated sessions")
 
     provider.release.set()
     report_marker = f"Managed worker {worker_id} (group-worker) report:"
@@ -145,8 +153,8 @@ try:
     passed("the /threads command restores hidden workers for inspection")
     sandbox.api("PATCH", f"/api/session/{worker_id}", {"title": "Renamed worker"})
     sandbox.api("PATCH", f'/api/session/{alpha["id"]}', {"title": "Renamed main"})
-    wait_titles({alpha["id"]: "[Main] Renamed main", worker_id: "[Worker] Renamed worker"})
-    passed("renaming managed conversations preserves the new names and reapplies their role prefixes")
+    wait_titles({alpha["id"]: "Renamed main", worker_id: "Renamed worker"})
+    passed("renaming managed conversations preserves their new names without role prefixes")
 
     provider.release.clear()
     provider.responses["UNMANAGED_BUSY"] = {"name": "threads_list", "arguments": {}, "wait": True}
@@ -213,8 +221,8 @@ try:
     grouped_ids = [alpha["id"], alpha_worktree["id"], worker_id, beta_review["id"], beta["id"]]
     restore_tabs(grouped_ids, beta["id"])
     passed("hidden history remains restorable after a restart")
-    wait_titles({alpha["id"]: "[Main] Renamed main", worker_id: "[Worker] Renamed worker"})
-    passed("role prefixes persist across server and TUI restarts without accumulating duplicates")
+    wait_titles({alpha["id"]: "Renamed main", worker_id: "Renamed worker"})
+    passed("cleaned titles persist across server and TUI restarts")
     os.write(terminal.master, b"\x1b[13~")
     selected_ids = grouped_ids
     wait_tabs(selected_ids, worker_id)
@@ -254,9 +262,9 @@ try:
     terminal.wait_for_match(lambda _: tab_state().get("isolateRequests", 0) == 1, "close-others key command acknowledged", 40, False)
     wait_tabs([failed["id"]], failed["id"])
     sandbox.api("PATCH", f'/api/session/{failed["id"]}', {"title": "Worker alone"})
-    wait_titles({failed["id"]: "[Worker] Worker alone"})
+    wait_titles({failed["id"]: "Worker alone"})
     wait_tabs([failed["id"]], failed["id"])
-    passed("a worker keeps its role label when its Main tab is closed without reopening other tabs")
+    passed("renaming a worker alone does not reopen other tabs or add a saved role label")
 finally:
     if terminal:
         terminal.close(artifacts / "reopened.txt")

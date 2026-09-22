@@ -78,7 +78,7 @@ try:
         "arguments": {"verdict": "PASS", "summary": "Fixture delivery", "evidence": ["local fixture"]},
         "wait": True,
     }
-    request = {"key": "worker-1", "title": "Visible fixture worker", "directory": str(sandbox.worker), "task": task}
+    request = {"key": "worker-1", "title": "Fixture worker", "directory": str(sandbox.worker), "task": task}
     spawn = run_tool(coordinator_id, "threads_spawn", request)
     assert spawn["state"]["status"] == "completed", spawn
     workers = [session for session in roots() if session["id"] != coordinator_id]
@@ -93,7 +93,7 @@ try:
     passed("spawn creates one independent worker in its assigned directory with inherited policy and model")
 
     eventually(lambda: worker_id in sandbox.api("GET", "/api/session/active")["data"])
-    terminal.wait_for("Visible fixture worker", left=True)
+    terminal.wait_for("Fixture worker", left=True)
     terminal.wait_for_match(lambda _: any(tab["sessionID"] == worker_id and tab["busy"] for tab in json.loads((artifacts / "tabs.json").read_text())["tabs"]), "running worker tab", 40, False)
     tab_state = json.loads((artifacts / "tabs.json").read_text())
     assert tab_state["route"] == {"type": "session", "sessionID": coordinator_id}, tab_state
@@ -249,7 +249,7 @@ try:
     passed("service restart preserves the relation without replaying worker tasks")
 
     terminal = Terminal(sandbox, coordinator_id)
-    terminal.wait_for("Visible fixture worker", left=True)
+    terminal.wait_for("Fixture worker", left=True)
     passed("a fresh TUI recovers the managed worker tab after a service restart")
 
     tool_names = {tool["function"]["name"] for request in provider.requests for tool in request.get("tools", [])}

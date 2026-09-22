@@ -1,7 +1,17 @@
 import { Plugin } from "@opencode/plugin/tui";
-import { createEffect } from "solid-js";
+import { getComponentCatalogue } from "@opentui/solid/components";
+import { createEffect, createSignal } from "solid-js";
 import { z } from "zod";
 import { ThreadsRpc } from "./src/rpc";
+import { activity } from "./src/activity";
+import { cleanRoleTitle } from "./src/activity-model";
+import {
+  BoxRenderable,
+  ScrollBoxRenderable,
+  TextRenderable,
+  TextAttributes,
+  RGBA,
+} from "@opentui/core";
 
 const CoordinatorRef = z.object({ coordinatorID: z.string() });
 
@@ -9,15 +19,26 @@ export default Plugin.define({
   id: "op-threads",
   setup(ctx) {
     const rpc = ctx.client.rpc(ThreadsRpc);
+    const sidebar = activity(
+      ctx,
+      { BoxRenderable, ScrollBoxRenderable, TextRenderable, TextAttributes, RGBA },
+      { createEffect, createSignal },
+      getComponentCatalogue().spinner,
+    );
+    const [cleaned, saveCleaned] = ctx.storage.store("role-title-cleanup", {
+      initial: { ids: [] as string[] },
+    });
     const initial: { workerIDs: string[] } = { workerIDs: [] };
     const [seen, updateSeen] = ctx.storage.memory("seen-workers", { initial });
     const closing = new Set<string>();
+    const abort = new AbortController();
     let stopped = false;
     let running = false;
     let reopenPending = false;
     let lastError: string | undefined;
     let movingFrom: string | undefined;
     function groupTabs() {
+      if (sidebar.mounted()) return;
       const tabs = ctx.ui.tabs.list().map((tab) => {
         const projectID = ctx.data.session.get(tab.sessionID)?.projectID;
         return {
@@ -80,11 +101,20 @@ export default Plugin.define({
         if (!coordinatorIDs.length) return;
         const { workers } = await (reopen ? rpc.restore : rpc.snapshot)(
           { coordinatorIDs },
-          { location: ctx.location ?? ctx.data.location.default() },
+          {
+            location: ctx.location ?? ctx.data.location.default(),
+            signal: abort.signal,
+          },
         );
+        if (reopen)
+          await sidebar.restore(workers.map((worker) => worker.workerID));
+        sidebar.updateWorkers(workers);
         for (const worker of workers) {
           if (stopped) return;
-          const tab = ctx.ui.tabs.list().find((tab) => tab.sessionID === worker.workerID);
+          if (!reopen && sidebar.isDismissed(worker.workerID)) continue;
+          const tab = ctx.ui.tabs
+            .list()
+            .find((tab) => tab.sessionID === worker.workerID);
           if (closing.has(worker.workerID) && tab) continue;
           const closed = closing.delete(worker.workerID);
           if (
@@ -107,7 +137,8 @@ export default Plugin.define({
             }
             continue;
           }
-          if (!reopen && !closed && seen.workerIDs.includes(worker.workerID)) continue;
+          if (!reopen && !closed && seen.workerIDs.includes(worker.workerID))
+            continue;
           await ctx.data.session.sync(worker.workerID);
           if (
             !stopped &&
@@ -129,10 +160,24 @@ export default Plugin.define({
             if (stopped) return;
             const role = roles.get(tab.sessionID);
             const session = ctx.data.session.get(tab.sessionID);
-            if (!role || !session?.title) continue;
-            const title = `[${role}] ${session.title.replace(/^\[(?:Main|Worker)\] /, "")}`;
-            if (title === session.title) continue;
-            await ctx.client.session.update({ sessionID: tab.sessionID, title });
+            if (!role || !session || cleaned.ids.includes(tab.sessionID))
+              continue;
+            const fresh = await ctx.client.session.get(
+              { sessionID: tab.sessionID },
+              { signal: abort.signal },
+            );
+            if (stopped) return;
+            const title = cleanRoleTitle(fresh.title ?? "", true);
+            if (title && title !== fresh.title)
+              await ctx.client.session.update(
+                { sessionID: tab.sessionID, title },
+                { signal: abort.signal },
+              );
+            if (stopped) return;
+            await saveCleaned((draft) => {
+              if (!draft.ids.includes(tab.sessionID))
+                draft.ids.push(tab.sessionID);
+            });
           }
           groupTabs();
         }
@@ -182,6 +227,8 @@ export default Plugin.define({
     refresh();
     return () => {
       stopped = true;
+      abort.abort();
+      sidebar.dispose();
       clearInterval(timer);
       stopEvents();
       removeSlot();

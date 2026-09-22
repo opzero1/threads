@@ -61,6 +61,7 @@ try:
 
     cli_path = sandbox.root / "config" / "opencode" / "cli.json"
     cli = json.loads(cli_path.read_text())
+    cli["plugins"].append({"package": str(target), "options": {"activity": False}})
     cli["plugins"][0]["options"].update({
         "openSessionIDs": [session["id"] for session in sessions],
         "perProcess": True, "history": True,

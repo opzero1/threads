@@ -1,6 +1,6 @@
 {
   "name": "@op1/threads",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Visible top-level worker sessions for OpenCode V2, with native tabs and durable reports.",
   "type": "module",
   "main": "./index.ts",
@@ -27,19 +27,27 @@
     "verify:live": "uv run --with pyte python scripts/verify-live.py",
     "verify:roles": "python3 scripts/verify-roles.py",
     "verify:idle-tabs": "uv run --with pyte python scripts/verify-idle-tabs.py",
-    "verify:tabs": "uv run --with pyte python scripts/verify-tab-groups.py"
+    "verify:tabs": "uv run --with pyte python scripts/verify-tab-groups.py",
+    "verify:activity": "uv run --with pyte python scripts/verify-activity.py"
   },
   "dependencies": {
     "@opencode/plugin": "2.0.7",
     "@opencode/schema": "2.0.7",
+    "fuzzysort": "3.1.0",
     "zod": "4.1.8"
   },
   "peerDependencies": {
+    "@opentui/core": "0.5.10",
+    "@opentui/solid": "0.5.10",
     "solid-js": ">=1.9.0"
   },
   "devDependencies": {
+    "@opencode/theme": "2.0.12",
+    "@opentui/core": "0.5.10",
+    "@opentui/solid": "0.5.10",
     "@types/bun": "1.4.0",
-    "solid-js": "1.9.9",
+    "opentui-spinner": "0.0.7",
+    "solid-js": "1.9.12",
     "typescript": "5.9.3"
   }
 }

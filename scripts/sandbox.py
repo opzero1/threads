@@ -146,7 +146,7 @@ class Terminal:
 
         self.output = bytearray()
         self.screen = pyte.Screen(160, 48)
-        self.stream = pyte.Stream(self.screen)
+        self.stream = pyte.ByteStream(self.screen)
         self.master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 48, 160, 0, 0))
 
@@ -183,7 +183,7 @@ class Terminal:
                 continue
             chunk = os.read(self.master, 65536)
             self.output.extend(chunk)
-            self.stream.feed(chunk.decode("utf-8", errors="replace"))
+            self.stream.feed(chunk)
             for query, response in [(b"\x1b[6n", b"\x1b[1;1R"), (b"\x1b[c", b"\x1b[?1;2c")]:
                 if query in chunk:
                     os.write(self.master, response)
