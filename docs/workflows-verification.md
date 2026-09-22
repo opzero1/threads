@@ -12,7 +12,7 @@ Verified on OpenCode `2.0.12` with Bun `1.4.0`.
 | `bun run verify:roles` | 17 checks pass | Configured profiles, inherited restrictions, role admission, and native delegation |
 | `bun run verify:live` | 27 checks pass | Existing managed-worker lifecycle, reports, limits, native tabs, and restart recovery |
 
-The native workflow harness hashes `index.ts`, `tui.ts`, `package.json`, and every direct TypeScript source file in `src/`. It rejects a run if those files change during verification. The verified source hash is `b84d6183d2ea68d26984ec6a8155b9c010f41c9c737794bf1ff6f32f1fe595b7`.
+The native workflow harness hashes `index.ts`, `tui.ts`, `package.json`, and every direct TypeScript source file in `src/`. It rejects a run if those files change during verification. The verified source hash is `df4bb7aae80b2702bdae8b0c9651974388e1feacc446941a6bdfbd4e02b3e38c`.
 
 The detailed local artifacts are `.audit/workflows/evidence.json`, `.audit/workflows/tui.screen.txt`, and `.audit/workflows/provider-requests.json`. They contain temporary workspace and session identifiers and are not committed. Run the commands above to regenerate them.
 

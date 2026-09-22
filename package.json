@@ -8,7 +8,7 @@
     ".": "./index.ts",
     "./tui": "./tui.ts"
   },
-  "files": ["index.ts", "tui.ts", "src/", "skills/", "docs/workflows.md", "docs/dynamic-workflows-plan.md"],
+  "files": ["index.ts", "tui.ts", "src/", "skills/", "docs/workflows.md", "docs/workflows-verification.md", "docs/dynamic-workflows-plan.md"],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/opzero1/threads.git"
