@@ -1,6 +1,10 @@
 import { z } from "zod";
 import { Report } from "./rpc";
 
+export const WORKFLOW_DIAGNOSTIC_JSON_BYTES = 4_096;
+export const WORKFLOW_SETTLEMENT_DIAGNOSTIC_JSON_BYTES = 512;
+export const WORKFLOW_CONTROL_HEADROOM = 64 * 1024;
+
 export const Json = z.json();
 export type Json = z.infer<typeof Json>;
 export const WorkflowModel = z.object({
@@ -61,7 +65,7 @@ const StepBase = z.object({
 });
 export const WorkflowStep = z.discriminatedUnion("status", [
   StepBase.extend({ status: z.literal("prepared") }),
-  StepBase.extend({ status: z.literal("running") }),
+  StepBase.extend({ status: z.literal("running"), usage: WorkflowUsage.optional() }),
   StepBase.extend({
     status: z.literal("completed"),
     completed: z.number(),
@@ -72,6 +76,7 @@ export const WorkflowStep = z.discriminatedUnion("status", [
     status: z.literal("failed"),
     error: z.string(),
     retryable: z.boolean(),
+    usage: WorkflowUsage.optional(),
   }),
 ]);
 export type WorkflowStep = z.infer<typeof WorkflowStep>;
@@ -80,6 +85,11 @@ export const WorkflowCheckpoint = z.object({
   prompt: z.string(),
   response: Json.optional(),
 });
+export const WorkflowSettlement = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("agent"), key: z.string(), outcome: z.enum(["success", "failure"]), error: z.string().optional() }),
+  z.object({ kind: z.literal("checkpoint"), key: z.string(), response: Json }),
+]);
+export type WorkflowSettlement = z.infer<typeof WorkflowSettlement>;
 export const WorkflowRun = z.object({
   version: z.literal(1),
   id: z.string(),
@@ -102,19 +112,21 @@ export const WorkflowRun = z.object({
   steps: z.array(WorkflowStep),
   logs: z.array(z.object({ time: z.number(), text: z.string() })),
   checkpoints: z.array(WorkflowCheckpoint),
+  settlements: z.array(WorkflowSettlement).optional(),
   result: Json.optional(),
   error: z.string().optional(),
   deliveryID: z.string(),
   delivered: z.boolean(),
 });
 export type WorkflowRun = z.infer<typeof WorkflowRun>;
-export const WorkflowSummary = WorkflowRun.omit({ script: true, args: true, result: true, steps: true, logs: true, checkpoints: true, fingerprint: true, callerAgent: true, deliveryID: true, delivered: true }).extend({
+export const WorkflowSummary = WorkflowRun.omit({ script: true, args: true, result: true, steps: true, logs: true, checkpoints: true, settlements: true, fingerprint: true, callerAgent: true, deliveryID: true, delivered: true }).extend({
   counts: z.object({ completed: z.number(), running: z.number(), failed: z.number(), total: z.number() }),
   usage: WorkflowUsage,
 });
 export type WorkflowSummary = z.infer<typeof WorkflowSummary>;
 export function workflowSummary(run: WorkflowRun): WorkflowSummary {
   const completed = run.steps.filter((step) => step.status === "completed");
+  const accounted = run.steps.flatMap((step) => "usage" in step && step.usage !== undefined ? [step.usage] : []);
   return WorkflowSummary.parse({
     ...run,
     counts: {
@@ -124,9 +136,9 @@ export function workflowSummary(run: WorkflowRun): WorkflowSummary {
       total: run.steps.length,
     },
     usage: {
-      tokens: completed.reduce((total, step) => total + step.usage.tokens, 0),
-      cost: completed.reduce((total, step) => total + step.usage.cost, 0),
-      measured: run.steps.length > 0 && completed.length === run.steps.length && completed.every((step) => step.usage.measured),
+      tokens: accounted.reduce((total, item) => total + item.tokens, 0),
+      cost: accounted.reduce((total, item) => total + item.cost, 0),
+      measured: run.steps.length > 0 && run.steps.every((step) => step.status === "prepared" || ("usage" in step && step.usage?.measured === true)),
     },
   });
 }

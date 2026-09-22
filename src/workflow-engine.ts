@@ -17,11 +17,15 @@ import {
 import { workflowHash, workflowStore } from "./workflow-store";
 import {
   Json,
+  WORKFLOW_DIAGNOSTIC_JSON_BYTES,
+  WORKFLOW_SETTLEMENT_DIAGNOSTIC_JSON_BYTES,
   WorkflowAgentInput,
   WorkflowResult,
   WorkflowRun,
+  WorkflowSettlement,
   WorkflowStart,
   type WorkflowStep,
+  type WorkflowSettlement as Settlement,
 } from "./workflow-types";
 import {
   interruptWorkflowWorkers,
@@ -38,8 +42,10 @@ type Control = { runID: string; action: "pause" | "resume" | "stop"; checkpointK
 
 const processState = globalThis as typeof globalThis & {
   __opWorkflowLeases?: Map<string, { controller: AbortController; promise: Promise<void>; owner: symbol }>;
+  __opWorkflowSignals?: Map<string, Set<() => void>>;
 };
 const leases = processState.__opWorkflowLeases ??= new Map();
+const workflowSignals = processState.__opWorkflowSignals ??= new Map();
 const digest = (...parts: string[]) => createHash("sha256").update(JSON.stringify(parts)).digest("hex");
 const runIdentity = (ownerID: string, key: string) => `wfr_${digest(ownerID, key).slice(0, 32)}`;
 const deliveryIdentity = (runID: string) => SessionMessage.ID.make(`msg_${digest(runID, "delivery").slice(0, 32)}`);
@@ -48,8 +54,49 @@ const nestedKey = (runID: string, identity: string) => `workflows/nested/${runID
 const completionKey = (runID: string) => `workflows/completions/${runID}`;
 const terminal = new Set(["stopped", "failed", "completed"]);
 const activeStatus = new Set(["running", "pausing", "stopping", "waiting"]);
+const settlementLimit = 16 * 1024 * 1024;
 const bounded = (text: string, length = 20_000) => text.length <= length ? text : `${text.slice(0, length)}\n…[truncated]`;
+const boundedBytes = (text: string, limit: number) => {
+  if (Buffer.byteLength(JSON.stringify(text), "utf8") - 2 <= limit) return text;
+  const suffix = "\n…[truncated]";
+  let low = 0;
+  let high = text.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (Buffer.byteLength(JSON.stringify(`${text.slice(0, middle)}${suffix}`), "utf8") - 2 <= limit) low = middle;
+    else high = middle - 1;
+  }
+  return `${text.slice(0, low)}${suffix}`;
+};
 const isCompleted = (step: WorkflowStep): step is Extract<WorkflowStep, { status: "completed" }> => step.status === "completed";
+const notify = (runID: string) => {
+  const listeners = workflowSignals.get(runID);
+  if (!listeners) return;
+  workflowSignals.delete(runID);
+  for (const listener of listeners) listener();
+};
+const waitForChange = (runID: string, signal: AbortSignal, timeoutMs = 1_000) => new Promise<void>((resolve, reject) => {
+  const listeners = workflowSignals.get(runID) ?? new Set<() => void>();
+  workflowSignals.set(runID, listeners);
+  let timer: ReturnType<typeof setTimeout>;
+  const done = () => {
+    clearTimeout(timer);
+    signal.removeEventListener("abort", aborted);
+    listeners.delete(done);
+    if (listeners.size === 0 && workflowSignals.get(runID) === listeners) workflowSignals.delete(runID);
+    resolve();
+  };
+  const aborted = () => {
+    clearTimeout(timer);
+    listeners.delete(done);
+    if (listeners.size === 0 && workflowSignals.get(runID) === listeners) workflowSignals.delete(runID);
+    reject(signal.reason ?? new Error("Workflow cancelled"));
+  };
+  listeners.add(done);
+  timer = setTimeout(done, timeoutMs);
+  signal.addEventListener("abort", aborted, { once: true });
+  if (signal.aborted) aborted();
+});
 function boundedJson(value: unknown, label: string) {
   const parsed = Json.parse(value);
   if (new TextEncoder().encode(JSON.stringify(parsed)).byteLength > 1_048_576) {
@@ -59,18 +106,42 @@ function boundedJson(value: unknown, label: string) {
 }
 
 function errorText(error: unknown) {
-  return bounded(error instanceof Error ? error.message : String(error));
+  return boundedBytes(error instanceof Error ? error.message : String(error), WORKFLOW_DIAGNOSTIC_JSON_BYTES);
+}
+
+const settlementError = (error: unknown) => boundedBytes(errorText(error), WORKFLOW_SETTLEMENT_DIAGNOSTIC_JSON_BYTES);
+const assertSettlementLimit = (settlements: Settlement[]) => {
+  if (Buffer.byteLength(JSON.stringify(settlements), "utf8") > settlementLimit) {
+    throw new Error("Workflow settlement journal exceeds the 16 MiB durable limit");
+  }
+};
+
+function readSettlements(run: WorkflowRun, stored: unknown): Settlement[] {
+  const raw = run.settlements !== undefined && (run.settlements.length > 0 || stored === undefined)
+    ? run.settlements
+    : stored ?? [];
+  if (!Array.isArray(raw)) throw new Error("Workflow settlement journal must be an array");
+  const legacy = raw.every((entry) => typeof entry === "string");
+  if (legacy && raw.length > 0 && run.checkpoints.some((checkpoint) => checkpoint.response !== undefined)) {
+    throw new Error("Legacy completion journal cannot deterministically replay answered checkpoints; start a new workflow run key");
+  }
+  const settlements: Settlement[] = legacy
+    ? raw.map((key: string) => ({ kind: "agent", key, outcome: "success" }))
+    : raw.map((entry: unknown) => WorkflowSettlement.parse(entry));
+  assertSettlementLimit(settlements);
+  return settlements;
 }
 
 class UncertainWriteError extends Error {}
 class SchedulingDeferred extends Error {}
+class AdmissionDenied extends Error {}
 
 function usage(session: Awaited<ReturnType<Plugin.Context["session"]["get"]>>) {
   const tokens = session.tokens;
   const measured = tokens !== undefined && session.cost !== undefined;
   return {
     tokens: measured
-      ? tokens.input + tokens.output + tokens.reasoning + tokens.cache.read + tokens.cache.write
+      ? tokens.input + tokens.output
       : 0,
     cost: measured ? session.cost : 0,
     measured,
@@ -82,7 +153,27 @@ export function workflowEngine(
   workers: Threads,
   options: { maxWorkers?: number; loadSaved?: (name: string) => Promise<string>; warmWorker?: (workerID: string) => Promise<void> } = {},
 ) {
-  const store = workflowStore(ctx.storage);
+  const diagnosed = new Set<string>();
+  async function diagnose(issue: { id: string; ownerID: string; message: string }) {
+    const message = errorText(issue.message);
+    const identity = digest(issue.ownerID, issue.id, message);
+    await serialized(`workflow-diagnostic:${identity}`, async () => {
+      if (diagnosed.has(identity)) return;
+      try {
+        await ctx.session.synthetic({
+          sessionID: issue.ownerID,
+          id: SessionMessage.ID.make(`msg_${identity.slice(0, 32)}`),
+          text: `Workflow ${issue.id} requires journal recovery: ${message}\nRaw evidence remains at workflows/runs/${issue.id}. Inspect the retained record and repair it or start a new workflow run key. Other runs remain available.`,
+          metadata: { opWorkflowJournalDiagnostic: { runID: issue.id, error: message } },
+          delivery: "queue", resume: true,
+        });
+        diagnosed.add(identity);
+      } catch {
+        // Diagnostic delivery must not make a damaged sibling block healthy runs.
+      }
+    });
+  }
+  const store = workflowStore(ctx.storage, { onDiagnostic: diagnose });
   const maxWorkers = options.maxWorkers ?? 4;
   if (!Number.isSafeInteger(maxWorkers) || maxWorkers < 1) throw new Error("maxWorkers must be a positive integer");
   const ajv = new Ajv({ allErrors: true, strict: false });
@@ -135,7 +226,7 @@ export function workflowEngine(
         delivery: "queue",
         resume: true,
       });
-      return store.update(run.id, (current) => { current.delivered = true; });
+      return store.update(run.id, (current) => { current.delivered = true; }, "control");
     });
   }
 
@@ -145,23 +236,29 @@ export function workflowEngine(
       recoveredOwners.add(ownerID);
       for (const run of runs) {
         if (activeStatus.has(run.status) && !leases.has(run.id)) {
-          if (run.status === "stopping") {
-            await interruptWorkflowWorkers(workers, ownerID, run);
+          try {
+            if (run.status === "stopping") {
+              await interruptWorkflowWorkers(workers, ownerID, run);
+              await store.update(run.id, (current) => {
+                current.status = "stopped";
+                current.error = "Workflow stop was recovered after server restart.";
+              }, "control");
+              continue;
+            }
             await store.update(run.id, (current) => {
-              current.status = "stopped";
-              current.error = "Workflow stop was recovered after server restart.";
-            });
-            continue;
+              current.status = "interrupted";
+              current.error = "OpenCode stopped while this workflow was active. Inspect its recorded steps, then resume explicitly.";
+            }, "control");
+          } catch (error) {
+            await diagnose({ id: run.id, ownerID, message: errorText(error) });
           }
-          await store.update(run.id, (current) => {
-            current.status = "interrupted";
-            current.error = "OpenCode stopped while this workflow was active. Inspect its recorded steps, then resume explicitly.";
-          });
         }
       }
     }
     for (const run of await store.list(ownerID)) {
-      if (terminal.has(run.status) && !run.delivered) await deliver(run.id);
+      if (terminal.has(run.status) && !run.delivered) {
+        await deliver(run.id).catch((error) => diagnose({ id: run.id, ownerID, message: errorText(error) }));
+      }
     }
   }
 
@@ -172,9 +269,9 @@ export function workflowEngine(
       if (run.status === "running") return;
       if (run.status === "stopping" || run.status === "stopped") throw new Error("Workflow stopped");
       if (run.status === "pausing" && !run.steps.some((step) => step.status === "running")) {
-        await store.update(runID, (current) => { if (current.status === "pausing") current.status = "paused"; });
+        await store.update(runID, (current) => { if (current.status === "pausing") current.status = "paused"; }, "control");
       }
-      await Bun.sleep(25);
+      await waitForChange(runID, signal);
     }
   }
 
@@ -182,10 +279,10 @@ export function workflowEngine(
     return serialized(`workflow-worktree:${run.id}:${key}`, () => workflowDirectory(ctx, run, input, key));
   }
 
-  function launch(runID: string, runtime: Runtime) {
+  function launch(runID: string, runtime: Runtime, recovering = false) {
     if (disposed || leases.has(runID)) return leases.get(runID)?.promise;
     const controller = new AbortController();
-    const task = executeRun(runID, runtime, controller).finally(() => {
+    const task = executeRun(runID, runtime, controller, recovering).finally(() => {
       if (leases.get(runID)?.promise === task) leases.delete(runID);
     });
     leases.set(runID, { controller, promise: task, owner: engineOwner });
@@ -193,11 +290,11 @@ export function workflowEngine(
     return task;
   }
 
-  async function executeRun(runID: string, runtime: Runtime, controller: AbortController) {
+  async function executeRun(runID: string, runtime: Runtime, controller: AbortController, recovering: boolean) {
     let run = await store.get(runID);
     const remaining = run.created + run.limits.timeoutMs - Date.now();
     if (remaining <= 0) {
-      await store.update(runID, (current) => { current.status = "failed"; current.error = "Workflow timeout exceeded"; });
+      await store.update(runID, (current) => { current.status = "failed"; current.error = "Workflow timeout exceeded"; }, "control");
       await deliver(runID);
       return;
     }
@@ -210,30 +307,56 @@ export function workflowEngine(
       hostCalls++;
       if (hostCalls > maxCalls) throw new Error(`Workflow cumulative call limit exceeded (${maxCalls})`);
     };
-    const storedCompletionOrder = await ctx.storage.get(completionKey(runID));
-    let completionOrder = storedCompletionOrder === undefined
-      ? []
-      : Json.parse(storedCompletionOrder) as Json[];
-    if (!completionOrder.every((key) => typeof key === "string")) throw new Error("Workflow completion order journal is invalid");
+    let completionOrder: Settlement[];
+    try {
+      const storedCompletionOrder = await ctx.storage.get(completionKey(runID));
+      if (run.settlements === undefined || (run.settlements.length === 0 && storedCompletionOrder !== undefined)) {
+        run = await store.update(runID, (current) => { current.settlements = readSettlements(current, storedCompletionOrder); });
+      }
+      completionOrder = readSettlements(run, undefined);
+    } catch (error) {
+      try {
+        await store.update(runID, (current) => { current.status = "failed"; current.error = errorText(error); }, "control")
+          .finally(() => clearTimeout(timer));
+      } catch (persistError) {
+        await diagnose({
+          id: runID, ownerID: run.ownerID,
+          message: `${errorText(error)}; recording the workflow failure also failed: ${errorText(persistError)}`,
+        });
+        return;
+      }
+      await deliver(runID);
+      return;
+    }
     let completionCursor = 0;
-    const orderedResult = async (key: string, value: Json) => {
-      await serialized(completionKey(runID), async () => {
-        const stored = await ctx.storage.get(completionKey(runID));
-        const durable = stored === undefined ? [] : Json.parse(stored) as Json[];
-        if (!durable.every((item) => typeof item === "string")) throw new Error("Workflow completion order journal is invalid");
-        if (!durable.includes(key)) {
-          durable.push(key);
-          await ctx.storage.set(completionKey(runID), durable);
+    const refreshSettlements = async () => {
+      const refreshed = readSettlements(await store.get(runID), undefined);
+      if (refreshed.length >= completionOrder.length) completionOrder = refreshed;
+    };
+    const appendSettlement = async (entry: Settlement) => {
+      const updated = await store.update(runID, (current) => {
+        current.settlements ??= [];
+        if (!current.settlements.some((item) => item.kind === entry.kind && item.key === entry.key)) {
+          const settlements = [...current.settlements, entry];
+          assertSettlementLimit(settlements);
+          current.settlements = settlements;
         }
-        completionOrder = durable;
-      });
+      }, entry.kind === "agent" && entry.outcome === "failure" ? "control" : "payload");
+      completionOrder = updated.settlements ?? [];
+      notify(runID);
+    };
+    const recordedSettlement = (kind: Settlement["kind"], key: string) => completionOrder.find((item) => item.kind === kind && item.key === key);
+    const consumeSettlement = async (kind: Settlement["kind"], key: string) => {
       for (;;) {
         if (controller.signal.aborted) throw controller.signal.reason;
-        if (completionOrder[completionCursor] === key) {
+        const next = completionOrder[completionCursor];
+        if (next?.kind === kind && next.key === key) {
           completionCursor++;
-          return value;
+          notify(runID);
+          return next;
         }
-        await Bun.sleep(5);
+        await waitForChange(runID, controller.signal);
+        await refreshSettlements();
       }
     };
     const nestedIndexes = new Map<string, number>();
@@ -273,16 +396,6 @@ export function workflowEngine(
             return;
           }
           if (current.steps.length >= current.limits.maxAgents) throw new Error(`Workflow agent limit reached (${current.limits.maxAgents})`);
-          const completed = current.steps.filter(isCompleted);
-          if (current.limits.tokenBudget !== undefined) {
-            if (completed.some((step) => !step.usage.measured)) {
-              throw new Error("Workflow token budget cannot continue because prior worker usage is unmeasured");
-            }
-            const consumed = completed.reduce((sum, step) => sum + step.usage.tokens, 0);
-            if (consumed >= current.limits.tokenBudget) {
-              throw new Error(`Workflow token budget reached (${current.limits.tokenBudget}); in-flight usage may overshoot the soft budget`);
-            }
-          }
           const plan = workflowDirectoryPlan(current, directoryInput, key);
           const spawnKey = `workflow:${current.id}:${key}`;
           current.steps.push({
@@ -304,13 +417,56 @@ export function workflowEngine(
         if (previous.profileFingerprint.startsWith("pending:") && previous.profileFingerprint !== `pending:${sourceProfileFingerprint}`) {
           throw new Error(`Source agent profile for workflow key ${key} changed before worktree allocation; start a new workflow run key`);
         }
+        const spawnKey = previous.spawnKey;
+        const priorSettlement = recordedSettlement("agent", key);
+        if (priorSettlement?.kind === "agent" && priorSettlement.outcome === "failure") {
+          let expectedFingerprint = `pending:${sourceProfileFingerprint}`;
+          if (!previous.profileFingerprint.startsWith("pending:")) {
+            const replayProfile = await ctx.agent.get({ agentID: input.agent, location: { directory: previous.directory } });
+            const replayModel = replayProfile.data.model ?? run.model;
+            expectedFingerprint = workflowHash({ model: replayModel, permissions: replayProfile.data.permissions, system: replayProfile.data.system ?? null });
+          }
+          if (previous.profileFingerprint !== expectedFingerprint) {
+            throw new Error(`Agent profile for workflow key ${key} changed; start a new workflow run key`);
+          }
+          const settlement = await consumeSettlement("agent", key);
+          throw new Error(settlement.kind === "agent" ? settlement.error ?? `Workflow step ${key} previously failed` : `Workflow step ${key} previously failed`);
+        }
         const directory = previous.profileFingerprint.startsWith("pending:")
           ? await resolveWorktree(run, directoryInput, key)
           : previous.directory;
-        const spawnKey = previous.spawnKey;
         const dispatch = async () => {
-          const admitted = await store.get(run.id);
+          let admitted = await store.get(run.id);
           if (admitted.status !== "running") throw new SchedulingDeferred();
+          if (admitted.limits.tokenBudget !== undefined && admitted.steps.find((step) => step.key === key)?.status === "prepared") {
+            const tokenBudget = admitted.limits.tokenBudget;
+            const discovered = new Map<string, ReturnType<typeof usage>>();
+            for (const step of admitted.steps) {
+              if (step.key === key || step.status === "prepared") continue;
+              if ("usage" in step && step.usage !== undefined) continue;
+              if (step.status === "failed") throw new AdmissionDenied("Workflow token budget cannot continue because prior worker usage is unmeasured");
+              if (step.status === "running") {
+                const native = await nativeWorker(step.workerID);
+                if (native?.outcome !== undefined) discovered.set(step.key, usage(native));
+              }
+            }
+            if (discovered.size > 0) {
+              admitted = await store.update(run.id, (value) => {
+                for (const step of value.steps) {
+                  const measured = discovered.get(step.key);
+                  if (measured && step.status === "running") step.usage = measured;
+                }
+              });
+            }
+            const spent = admitted.steps.flatMap((step) => step.key !== key && "usage" in step && step.usage !== undefined ? [step.usage] : []);
+            if (spent.some((item) => !item.measured)) {
+              throw new AdmissionDenied("Workflow token budget cannot continue because prior worker usage is unmeasured");
+            }
+            const consumed = spent.reduce((sum, item) => sum + item.tokens, 0);
+            if (consumed >= tokenBudget) {
+              throw new AdmissionDenied(`Workflow token budget reached (${tokenBudget}); in-flight usage may overshoot the soft budget`);
+            }
+          }
           let current = admitted.steps.find((step) => step.key === key)!;
           const ensureWorker = () => workers.spawnWorkflow(run.ownerID, {
             key: spawnKey,
@@ -350,7 +506,7 @@ export function workflowEngine(
               if (value.steps[index].status === "prepared") {
                 value.steps[index] = { ...value.steps[index], status: "running" } as WorkflowStep;
               }
-            });
+            }, "control");
             current = run.steps.find((step) => step.key === key)!;
           } else {
             try {
@@ -371,7 +527,7 @@ export function workflowEngine(
                 }
                 const index = value.steps.findIndex((step) => step.key === key);
                 value.steps[index] = { ...value.steps[index], status: "failed", error: message, retryable: false } as WorkflowStep;
-              });
+              }, "control");
               throw new Error(message);
             }
           }
@@ -382,10 +538,16 @@ export function workflowEngine(
             const native = await ctx.session.get({ sessionID: current.workerID });
             if (native.outcome !== "succeeded") {
               const message = `Worker reported ${report.verdict} but its native execution ended ${native.outcome ?? "without a successful outcome"}`;
+              if (recovering) {
+                const resolution = "A durable report exists, but the native execution was interrupted. Ask the same worker to inspect and explicitly resolve the crash window, then resume this workflow.";
+                await store.update(run.id, (value) => { value.status = "interrupted"; value.error = resolution; }, "control");
+                notify(run.id);
+                throw new UncertainWriteError(resolution);
+              }
               await store.update(run.id, (value) => {
                 const index = value.steps.findIndex((step) => step.key === key);
-                value.steps[index] = { ...value.steps[index], status: "failed", error: message, retryable: false } as WorkflowStep;
-              });
+                value.steps[index] = { ...value.steps[index], status: "failed", error: message, retryable: false, usage: usage(native) } as WorkflowStep;
+              }, "control");
               throw new Error(message);
             }
             await store.update(run.id, (value) => {
@@ -408,7 +570,7 @@ export function workflowEngine(
               if (current.status === "running" && native?.outcome !== undefined) {
                 if (input.access === "write") {
                   const message = "Interrupted write has uncertain external state. Inspect the retained worker/worktree and send that same worker an explicit resolution request; after it reports, resume this run. The write will not be replayed automatically.";
-                  await store.update(run.id, (value) => { value.status = "interrupted"; value.error = message; });
+                  await store.update(run.id, (value) => { value.status = "interrupted"; value.error = message; }, "control");
                   throw new UncertainWriteError(message);
                 }
                 await workers.send(run.ownerID, {
@@ -422,34 +584,54 @@ export function workflowEngine(
           await store.update(run.id, (value) => {
             const index = value.steps.findIndex((step) => step.key === key);
             if (index >= 0 && value.steps[index].status !== "completed") value.steps[index] = { ...value.steps[index], status: "running" } as WorkflowStep;
-          });
+          }, "control");
           const agentTimeout = input.timeoutMs ?? run.limits.agentTimeoutMs;
+          const deadline = Date.now() + agentTimeout;
+          const deadlineReason = () => controller.signal.aborted
+            ? controller.signal.reason ?? new Error("Workflow cancelled")
+            : Date.now() >= deadline ? new Error(`Workflow worker timed out after ${agentTimeout}ms`) : undefined;
           const waitWorker = async () => {
             let timeout: ReturnType<typeof setTimeout> | undefined;
             let abort = () => {};
-            const interruptAndReject = (reject: (reason?: unknown) => void, reason: unknown) => {
-              void workers.interrupt(run.ownerID, { workerID: Session.ID.make(current.workerID) })
-                .then(() => reject(reason), () => reject(reason));
+            let forcedReason: unknown;
+            let interrupt: Promise<void> | undefined;
+            const force = (reason: unknown) => {
+              if (forcedReason === undefined) {
+                forcedReason = reason;
+                interrupt = Promise.resolve().then(() => workers.interrupt(run.ownerID, { workerID: Session.ID.make(current.workerID) }))
+                  .then(() => undefined, () => undefined);
+              }
             };
             try {
               await Promise.race([
                 ctx.session.wait({ sessionID: current.workerID }),
                 new Promise<never>((_, reject) => {
                   timeout = setTimeout(() => {
-                    interruptAndReject(reject, new Error(`Workflow worker timed out after ${agentTimeout}ms`));
-                  }, agentTimeout);
+                    const reason = new Error(`Workflow worker timed out after ${agentTimeout}ms`);
+                    force(reason);
+                    reject(reason);
+                  }, Math.max(0, deadline - Date.now()));
                 }),
                 new Promise<never>((_, reject) => {
                   abort = () => {
-                    interruptAndReject(reject, controller.signal.reason ?? new Error("Workflow cancelled"));
+                    const reason = controller.signal.reason ?? new Error("Workflow cancelled");
+                    force(reason);
+                    reject(reason);
                   };
                   controller.signal.addEventListener("abort", abort, { once: true });
                   if (controller.signal.aborted) abort();
                 }),
               ]);
+              const reason = forcedReason ?? deadlineReason();
+              if (reason !== undefined) { force(reason); throw reason; }
+            } catch (error) {
+              const reason = forcedReason ?? deadlineReason();
+              if (reason !== undefined) { force(reason); throw reason; }
+              throw error;
             } finally {
               if (timeout !== undefined) clearTimeout(timeout);
               controller.signal.removeEventListener("abort", abort);
+              await interrupt;
             }
           };
           await waitWorker();
@@ -457,6 +639,11 @@ export function workflowEngine(
           if (recorded === undefined) {
             const native = await ctx.session.get({ sessionID: current.workerID });
             if (native.outcome === "succeeded" || (input.access === "read" && (native.outcome === "failed" || native.outcome === "interrupted"))) {
+              const reason = deadlineReason();
+              if (reason !== undefined) {
+                await workers.interrupt(run.ownerID, { workerID: Session.ID.make(current.workerID) }).catch(() => undefined);
+                throw reason;
+              }
               await workers.send(run.ownerID, {
                 workerID: Session.ID.make(current.workerID),
                 key: `workflow-report-repair:${run.id}:${key}`,
@@ -475,8 +662,8 @@ export function workflowEngine(
               : `Worker ended ${native.outcome ?? "without a terminal outcome"} before a valid workflows_result report`;
             await store.update(run.id, (value) => {
               const index = value.steps.findIndex((step) => step.key === key);
-              value.steps[index] = { ...value.steps[index], status: "failed", error: message, retryable: input.access === "read" } as WorkflowStep;
-            });
+              value.steps[index] = { ...value.steps[index], status: "failed", error: message, retryable: input.access === "read", usage: usage(native) } as WorkflowStep;
+            }, "control");
             throw new Error(message);
           }
           return finishRecorded(recorded);
@@ -506,24 +693,46 @@ export function workflowEngine(
           const pending = perform();
           pendingAgents.add(pending);
           try {
-            return await orderedResult(key, await pending);
+            const existing = recordedSettlement("agent", key);
+            let value: Json | undefined;
+            let failure: unknown;
+            try {
+              value = await pending;
+            } catch (error) {
+              failure = error;
+            }
+            if (failure !== undefined) {
+              if (failure instanceof UncertainWriteError) throw failure;
+              const state = await store.get(run.id);
+              if (state.status === "interrupted" || state.status === "stopping" || state.status === "stopped") throw failure;
+              if (existing?.kind === "agent" && existing.outcome === "success") throw failure;
+              if (!(failure instanceof AdmissionDenied)) {
+                await store.update(run.id, (value) => {
+                  if (value.status === "interrupted") return;
+                  const index = value.steps.findIndex((step) => step.key === key);
+                  const step = value.steps[index];
+                  if (step && step.status !== "completed" && step.status !== "failed") {
+                    value.steps[index] = { ...step, status: "failed", error: errorText(failure), retryable: input.access === "read" } as WorkflowStep;
+                  }
+                }, "control");
+              }
+              if (!existing) await appendSettlement({ kind: "agent", key, outcome: "failure", error: settlementError(failure) });
+              const settlement = await consumeSettlement("agent", key);
+              throw new Error(settlement.kind === "agent" && settlement.outcome === "failure" ? settlement.error ?? errorText(failure) : errorText(failure));
+            }
+            if (!existing) await appendSettlement({ kind: "agent", key, outcome: "success" });
+            const settlement = await consumeSettlement("agent", key);
+            if (settlement.kind === "agent" && settlement.outcome === "failure") throw new Error(settlement.error ?? `Workflow step ${key} previously failed`);
+            return value!;
           } finally {
             pendingAgents.delete(pending);
           }
         } catch (error) {
-          await store.update(run.id, (value) => {
-            if (value.status === "interrupted") return;
-            const index = value.steps.findIndex((step) => step.key === key);
-            const step = value.steps[index];
-            if (step && step.status !== "completed" && step.status !== "failed") {
-              value.steps[index] = { ...step, status: "failed", error: errorText(error), retryable: input.access === "read" } as WorkflowStep;
-            }
-          });
           throw error;
         } finally {
           active--;
           const latest = await store.get(run.id);
-          if (active === 0 && latest.status === "pausing") await store.update(run.id, (value) => { if (value.status === "pausing") value.status = "paused"; });
+          if (active === 0 && latest.status === "pausing") await store.update(run.id, (value) => { if (value.status === "pausing") value.status = "paused"; }, "control");
         }
       },
       phase: async (title) => {
@@ -552,13 +761,44 @@ export function workflowEngine(
           if (checkpoint?.response === undefined && current.status === "running") current.status = "waiting";
         });
         const recorded = checkpoint.checkpoints.find((item) => item.key === key)!;
-        if (recorded.response !== undefined) return recorded.response;
+        const reconcileSettlement = async () => {
+          await refreshSettlements();
+          const settlement = recordedSettlement("checkpoint", key);
+          if (settlement?.kind !== "checkpoint") return undefined;
+          const reconciled = await store.update(runID, (current) => {
+            const item = current.checkpoints.find((candidate) => candidate.key === key);
+            if (!item) throw new Error(`Checkpoint ${key} settlement has no matching checkpoint`);
+            if (item.response !== undefined && JSON.stringify(item.response) !== JSON.stringify(settlement.response)) {
+              throw new Error(`Checkpoint ${key} response conflicts with its durable settlement`);
+            }
+            item.response = settlement.response;
+            if (current.status === "running" || current.status === "waiting") {
+              current.status = current.checkpoints.some((candidate) => candidate.response === undefined) ? "waiting" : "running";
+            }
+          });
+          notify(runID);
+          const ordered = await consumeSettlement("checkpoint", key);
+          return ordered.kind === "checkpoint"
+            ? ordered.response
+            : reconciled.checkpoints.find((item) => item.key === key)!.response;
+        };
+        if (recorded.response !== undefined) {
+          const response = await reconcileSettlement();
+          if (response === undefined) throw new Error(`Checkpoint ${key} has a response but no deterministic settlement record`);
+          return response;
+        }
         for (;;) {
           if (controller.signal.aborted) throw controller.signal.reason;
+          const reconciled = await reconcileSettlement();
+          if (reconciled !== undefined) return reconciled;
           const current = await store.get(runID);
           const checkpoint = current.checkpoints.find((item) => item.key === key)!;
-          if (checkpoint.response !== undefined) return checkpoint.response;
-          await Bun.sleep(25);
+          if (checkpoint.response !== undefined) {
+            const raced = await reconcileSettlement();
+            if (raced !== undefined) return raced;
+            throw new Error(`Checkpoint ${key} has a response but no deterministic settlement record`);
+          }
+          await waitForChange(runID, controller.signal);
         }
       },
       workflow: async (input) => {
@@ -609,9 +849,9 @@ export function workflowEngine(
       });
       const latest = await store.get(runID);
       if (latest.status === "stopping" || latest.status === "stopped") {
-        await store.update(runID, (current) => { current.status = "stopped"; });
+        await store.update(runID, (current) => { current.status = "stopped"; }, "control");
       } else if (latest.status === "pausing" || latest.status === "paused") {
-        await store.update(runID, (current) => { current.status = "paused"; });
+        await store.update(runID, (current) => { current.status = "paused"; }, "control");
       } else {
         const unresolved = latest.steps.find((step) => step.status !== "completed");
         if (unresolved) throw new Error(`Workflow cannot complete with unresolved step ${unresolved.key} (${unresolved.status})`);
@@ -633,7 +873,7 @@ export function workflowEngine(
         if (latest.status === "stopping" || latest.status === "stopped") current.status = "stopped";
         else if (latest.status === "paused" || latest.status === "interrupted") return;
         else { current.status = "failed"; current.error = errorText(error); }
-      });
+      }, "control");
     } finally {
       clearTimeout(timer);
       const latest = await store.get(runID);
@@ -663,6 +903,7 @@ export function workflowEngine(
         name: parsed.meta.name, description: parsed.meta.description, script, args: input.args,
         fingerprint, limits: input, status: "running", created: now, updated: now,
         phase: parsed.meta.phases?.[0]?.title ?? "Starting", steps: [], logs: [], checkpoints: [],
+        settlements: [],
         deliveryID: deliveryIdentity(id), delivered: false,
       });
       const admitted = await store.create(run);
@@ -679,32 +920,51 @@ export function workflowEngine(
       return store.list(ownerID);
     },
     async control(ownerID: string, input: Control) {
+      let checkpointReply: { key: string; response: Json } | undefined;
+      if (input.action === "resume" && (input.checkpointKey !== undefined || input.response !== undefined)) {
+        if (!input.checkpointKey || input.response === undefined) throw new Error("Checkpoint resume requires checkpointKey and response");
+        checkpointReply = { key: input.checkpointKey, response: boundedJson(input.response, "Checkpoint response") };
+      }
       return serialized(`workflow-control:${input.runID}`, async () => {
         await recover(ownerID);
         let run = await owned(ownerID, input.runID);
         if (input.action === "pause") {
           if (run.status !== "running") throw new Error(`Cannot pause workflow in ${run.status}`);
-          run = await store.update(run.id, (current) => { current.status = "pausing"; });
-          if (!run.steps.some((step) => step.status === "running")) run = await store.update(run.id, (current) => { current.status = "paused"; });
+          run = await store.update(run.id, (current) => { current.status = "pausing"; }, "control");
+          if (!run.steps.some((step) => step.status === "running")) run = await store.update(run.id, (current) => { current.status = "paused"; }, "control");
         } else if (input.action === "stop") {
           if (!terminal.has(run.status)) {
-            run = await store.update(run.id, (current) => { current.status = "stopping"; });
+            run = await store.update(run.id, (current) => { current.status = "stopping"; }, "control");
             leases.get(run.id)?.controller.abort(new Error("Workflow stopped"));
             await interruptWorkflowWorkers(workers, ownerID, run);
             await leases.get(run.id)?.promise.catch(() => {});
-            run = await store.update(run.id, (current) => { current.status = "stopped"; });
+            run = await store.update(run.id, (current) => { current.status = "stopped"; }, "control");
             await deliver(run.id);
           }
         } else {
-          if (input.checkpointKey !== undefined || input.response !== undefined) {
-            if (!input.checkpointKey || input.response === undefined) throw new Error("Checkpoint resume requires checkpointKey and response");
+          if (run.status === "interrupted") {
+            await leases.get(run.id)?.promise.catch(() => {});
+            run = await owned(ownerID, run.id);
+          }
+          const recovering = run.status === "interrupted";
+          if (checkpointReply !== undefined) {
+            const { key, response } = checkpointReply;
             if (terminal.has(run.status) || run.status === "stopping") throw new Error(`Cannot answer a checkpoint in ${run.status}`);
+            const stored = await ctx.storage.get(completionKey(run.id));
             run = await store.update(run.id, (current) => {
-              const checkpoint = current.checkpoints.find((item) => item.key === input.checkpointKey);
-              if (!checkpoint) throw new Error(`Checkpoint ${input.checkpointKey} not found`);
-              if (checkpoint.response !== undefined && JSON.stringify(checkpoint.response) !== JSON.stringify(input.response)) throw new Error("Checkpoint already has a different response");
-              checkpoint.response = Json.parse(input.response);
-              current.status = "running";
+              if (terminal.has(current.status) || current.status === "stopping") throw new Error(`Cannot answer a checkpoint in ${current.status}`);
+              const checkpoint = current.checkpoints.find((item) => item.key === key);
+              if (!checkpoint) throw new Error(`Checkpoint ${key} not found`);
+              if (checkpoint.response !== undefined && JSON.stringify(checkpoint.response) !== JSON.stringify(response)) throw new Error("Checkpoint already has a different response");
+              const settlements = readSettlements(current, stored);
+              const existing = settlements.find((item) => item.kind === "checkpoint" && item.key === key);
+              if (existing?.kind === "checkpoint" && JSON.stringify(existing.response) !== JSON.stringify(response)) {
+                throw new Error("Checkpoint already has a different response");
+              }
+              current.settlements = existing ? settlements : [...settlements, { kind: "checkpoint", key, response }];
+              assertSettlementLimit(current.settlements);
+              checkpoint.response = response;
+              current.status = current.checkpoints.some((item) => item.response === undefined) ? "waiting" : "running";
               delete current.error;
             });
           } else {
@@ -712,10 +972,12 @@ export function workflowEngine(
               if (run.status === "waiting") throw new Error("Waiting workflow requires checkpointKey and response");
               throw new Error(`Cannot resume workflow in ${run.status}`);
             }
-            run = await store.update(run.id, (current) => { current.status = "running"; delete current.error; });
+            run = await store.update(run.id, (current) => { current.status = "running"; delete current.error; }, "control");
           }
-          launch(run.id, { agent: run.callerAgent, model: run.model });
+          notify(run.id);
+          launch(run.id, { agent: run.callerAgent, model: run.model }, recovering);
         }
+        notify(run.id);
         return run;
       });
     },
@@ -777,7 +1039,7 @@ export function workflowEngine(
             run.status = "interrupted";
             run.error = "Workflow engine disposed while the run was active; resume explicitly.";
           }
-        });
+        }, "control");
         lease.controller.abort(new Error("Workflow engine disposed"));
         pending.push(lease.promise.catch(() => {}));
       }

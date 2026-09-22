@@ -112,6 +112,79 @@ describe("real CodeMode workflow execution", () => {
       { host: host({ agent: async () => { calls++; return null; } }) })).toBe("done");
     expect(calls).toBe(3);
     expect((await failure(run(`return retry(() => 1, { attempts: 0 });`))).message).toContain("positive integer");
+    expect((await failure(run(`return retry(() => 1, { attempts: 9007199254740992 });`))).message).toContain("safe positive integer");
+    expect((await failure(run(`return loopUntilDry({ round: async () => [], key: "id", maxRounds: 1001 });`))).message).toContain("no greater than 1000");
+  });
+
+  test("preempts synchronous native RegExp work without blocking the parent event loop", async () => {
+    let heartbeats = 0;
+    const heartbeat = setInterval(() => { heartbeats++; }, 5);
+    const started = performance.now();
+    try {
+      const input = "a".repeat(30) + "!";
+      const error = await failure(run(`return /^(a+)+$/.test(${JSON.stringify(input)});`, { timeoutMs: 20 }));
+      expect(error.message).toContain("timed out");
+      expect(performance.now() - started).toBeLessThan(500);
+      expect(heartbeats).toBeGreaterThan(0);
+    } finally {
+      clearInterval(heartbeat);
+    }
+  });
+
+  test("aborts and drains cooperative Promise.race losers before rejecting", async () => {
+    let slowStarted = false;
+    let slowCancelled = false;
+    const error = await failure(run(`return await Promise.race([agent("fast"), agent("slow")]);`, {
+      host: host({ agent: async (input, signal) => {
+        const prompt = (input as { prompt: string }).prompt;
+        if (prompt === "fast") return "fast";
+        slowStarted = true;
+        await new Promise<void>((_, reject) => signal?.addEventListener("abort", () => {
+          slowCancelled = true;
+          reject(signal.reason);
+        }, { once: true }));
+      } }),
+    }));
+    expect(error.message).toContain("unawaited host operations");
+    expect(slowStarted).toBe(true);
+    expect(slowCancelled).toBe(true);
+  });
+
+  test("does not deadlock ordinary failure on a non-cooperative Promise.race loser", async () => {
+    let slowStarted = false;
+    const started = performance.now();
+    const error = await failure(run(`return await Promise.race([agent("fast"), agent("slow")]);`, {
+      host: host({ agent: async (input) => {
+        if ((input as { prompt: string }).prompt === "fast") return "fast";
+        slowStarted = true;
+        await new Promise<void>(() => {});
+      } }),
+    }));
+    expect(error.message).toContain("unawaited host operations");
+    expect(slowStarted).toBe(true);
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
+  test("supports bounded nested workflow host execution", async () => {
+    const child = `${meta}\nreturn { child: args.value + 1 };`;
+    const value = await run(`return await workflow("child", args);`, {
+      host: host({ workflow: async (input, signal) => executeWorkflow({
+        script: child,
+        args: input.args,
+        signal: signal ?? new AbortController().signal,
+        host: host(),
+        timeoutMs: 1_000,
+      }) }),
+    });
+    expect(value).toEqual({ child: 8 });
+  });
+
+  test("bounds host failure diagnostics", async () => {
+    const error = await failure(run(`return await agent("large failure");`, {
+      host: host({ agent: async () => { throw new Error("💥".repeat(1024 * 1024)); } }),
+    }));
+    expect(Buffer.byteLength(error.message)).toBeLessThanOrEqual(8_300);
+    expect(error.message).toContain("truncated");
   });
 
   test("gate and loopUntilDry retry deterministically and retain ordered unique results", async () => {
@@ -205,5 +278,20 @@ describe("real CodeMode workflow execution", () => {
     expect((await failure(run(`return await agent("large");`, {
       host: host({ agent: async () => "x".repeat(2 * 1024 * 1024) }),
     }))).message).toContain("truncated");
+  });
+
+  test("failed worker construction does not consume runtime capacity", async () => {
+    const original = globalThis.Worker;
+    const errors: string[] = [];
+    Reflect.set(globalThis, "Worker", class {
+      constructor() { throw new Error("Worker construction unavailable"); }
+    });
+    try {
+      for (let index = 0; index < 65; index++) errors.push((await failure(run("return true;"))).message);
+    } finally {
+      Reflect.set(globalThis, "Worker", original);
+    }
+    expect(errors.every((message) => message === "Worker construction unavailable")).toBe(true);
+    expect(await run("return true;")).toBe(true);
   });
 });

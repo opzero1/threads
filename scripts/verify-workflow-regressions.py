@@ -134,7 +134,16 @@ def failed_usage():
     expected = native["tokens"]["input"] + native["tokens"]["output"]
     assert expected > 1, native
     assert first.get("usage", {}).get("measured") and first["usage"]["tokens"] == expected, final
-    assert not any("FAILED_USAGE_NEXT" in json.dumps(request) for request in provider.requests), final
+    for step in final["steps"]:
+        if step["key"] != "next":
+            continue
+        assert step["status"] == "prepared", final
+        try:
+            sandbox.api("GET", f'/api/session/{step["workerID"]}')
+        except RuntimeError as error:
+            assert "404" in str(error), error
+        else:
+            raise AssertionError("Budget-exhausted successor created a native session")
     return {"run": final, "nativeTokens": expected}
 
 
@@ -261,6 +270,81 @@ def native_helpers():
     return final
 
 
+def saved_commands():
+    directory = sandbox.directory / ".opencode/workflows"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "command-example.js").write_text(script("command-example", "return args.value + 1;"))
+    before = len(provider.requests)
+    sandbox.api("POST", f"/api/session/{owner}/command", {"name": "workflow-refresh", "text": ""})
+    commands = sandbox.api("GET", "/api/command", location=sandbox.directory)["data"]
+    assert any(command["name"] == "workflow-command-example" for command in commands), commands
+    assert len(provider.requests) == before, "Refresh unexpectedly generated a model request"
+    marker = "SAVED_COMMAND_INVOCATION"
+    provider.responses[marker] = {"name": "workflows_start", "arguments": {"key": "command-example-run", "name": "command-example", "args": {"value": 9}}}
+    sandbox.api("POST", f"/api/session/{owner}/command", {"name": "workflow-command-example", "text": marker})
+    def started_run():
+        for message in messages(owner):
+            if message["type"] != "assistant":
+                continue
+            for part in message["content"]:
+                if part["type"] == "tool" and part["name"] == "workflows_start" and part["state"]["status"] == "completed":
+                    return json.loads(part["state"]["content"][0]["text"])
+        return None
+    run = eventually(started_run)
+    final = settled(run)
+    assert final["result"] == 10, final
+    return final
+
+
+def nesting_limit():
+    directory = sandbox.directory / ".opencode/workflows"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "recursive-child.js").write_text(script("recursive-child", 'return await workflow("recursive-child");'))
+    run = start("nesting-limit", 'return await workflow("recursive-child");')
+    final = settled(run, "failed")
+    assert "depth limit" in final.get("error", "").lower(), final
+    assert not final["steps"], final
+    return final
+
+
+def worktree_handoff():
+    provider.release.clear()
+    write_report = {"verdict": "PASS", "summary": "Wrote retained proof", "evidence": ["handoff-proof.txt"], "result": {"directory": "pending"}}
+    provider.responses["HANDOFF_WRITER"] = {"sequence": [
+        {"name": "shell", "wait": True, "arguments": {"command": "printf 'verified write\\n' > handoff-proof.txt"}},
+        {"name": "workflows_result", "arguments": write_report},
+    ]}
+    provider.responses["HANDOFF_VERIFIER"] = {"sequence": [
+        {"name": "shell", "arguments": {"command": "test \"$(cat handoff-proof.txt)\" = 'verified write'"}},
+        {"name": "workflows_result", "arguments": {"verdict": "PASS", "summary": "Verified retained proof", "evidence": ["handoff-proof.txt"], "result": True}},
+    ]}
+    run = start("worktree-handoff", '''const written=await agent("HANDOFF_WRITER", {key:"write",agent:"regression-role",access:"write",isolation:"worktree"});
+    return await agent("HANDOFF_VERIFIER", {key:"verify",agent:"regression-role",access:"write",directory:written.directory});''', maxAgents=2)
+    step = eventually(lambda: next((s for s in inspect(run)["steps"] if s["status"] == "running"), None))
+    write_report["result"]["directory"] = step["directory"]
+    provider.release.set()
+    final = settled(run)
+    assert final["result"] is True and final["steps"][0]["directory"] == final["steps"][1]["directory"], final
+    assert not (sandbox.directory / "handoff-proof.txt").exists(), final
+    shells = [part for message in messages(final["steps"][1]["workerID"]) if message["type"] == "assistant"
+              for part in message["content"] if part["type"] == "tool" and part["name"] == "shell"]
+    assert len(shells) == 1 and shells[0]["state"].get("metadata", {}).get("exit") == 0, shells
+    return {"run": final, "verificationShell": shells[0]}
+
+
+def runtime_deadline():
+    run = start("cpu-deadline", 'await log("cpu-started"); while (true) { /^(a+)+$/.test(' + json.dumps("a" * 34 + "!") + '); }', timeoutMs=1000)
+    eventually(lambda: any(entry["text"] == "cpu-started" for entry in inspect(run)["logs"]))
+    started = time.monotonic()
+    current = inspect(run)
+    response_seconds = time.monotonic() - started
+    assert response_seconds < 0.5, {"responseSeconds": response_seconds, "status": current["status"]}
+    final = settled(run, "failed")
+    assert any(text in final.get("error", "").lower() for text in ["timed out", "timeout"]), final
+    assert time.monotonic() - started < 2, final
+    return {"run": final, "responseSecondsDuringRegex": response_seconds}
+
+
 cases = {
     "queued-budget": token_budget,
     "failed-usage": failed_usage,
@@ -270,6 +354,10 @@ cases = {
     "reported-crash": reported_crash,
     "saved-nested": saved_and_nested,
     "native-helpers": native_helpers,
+    "saved-commands": saved_commands,
+    "nesting-limit": nesting_limit,
+    "worktree-handoff": worktree_handoff,
+    "runtime-deadline": runtime_deadline,
 }
 selected = options.case or list(cases)
 assert all(name in cases for name in selected), selected

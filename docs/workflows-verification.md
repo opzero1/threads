@@ -1,50 +1,92 @@
 # Dynamic workflow verification
 
-Verified on OpenCode `2.0.12` with Bun `1.4.0`.
+The hardening pass targets the seven defects reproduced against `5858de1`, plus storage and timeout races found during integration. The original blanket readiness claim is superseded by these checks and the limits below.
+
+Current verification uses OpenCode `2.0.14`, Bun `1.4.0`, and published `@opencode/codemode` `2.0.12`. Earlier baseline and failing-before evidence used OpenCode `2.0.12`.
 
 ## Automated checks
 
 | Command | Result | Coverage |
 | --- | --- | --- |
 | `bun run typecheck` | Pass | Server, runtime, and terminal types |
-| `bun test` | 75 tests, 266 assertions pass | Interpreter confinement, durable state, replay, cancellation, ownership, saved scripts, and existing Threads behavior |
-| `bun run verify:workflows` | 24 checks pass | Native sessions, distinct role models and variants, permission enforcement, result repair, worktrees, hard restart, and terminal controls |
+| `bun test` | 109 tests, 407 assertions pass | Confinement, replay, checkpoint atomicity, journal limits, deadline races, failed-attempt accounting, and existing Threads behavior |
+| `bun run verify:workflow-regressions` | 12 cases pass | Original engine defects, CPU-bound deadline, saved and nested execution, composition helpers, and retained-worktree handoff |
 | `bun run verify:roles` | 17 checks pass | Configured profiles, inherited restrictions, role admission, and native delegation |
-| `bun run verify:live` | 27 checks pass | Existing managed-worker lifecycle, reports, limits, native tabs, and restart recovery |
+| `bun run verify:live` | 27 checks pass | Managed-worker lifecycle, reports, limits, native tabs, and restart recovery |
+| `bun run verify:workflow-runtime` | Pass | 35 CPU-bound interpreter cancellations, stable native thread count, and idle CPU |
+| `python3 scripts/verify-workflows-model.py` | Pass | Model-authored workflow, real VERA readers, validated handoffs, and automatic coordinator notification |
+| `bun run verify:workflows` | 27 checks pass | Native workflow lifecycle, permissions, hard restart, uncertain writes, fresh navigator snapshots, keyboard step navigation, and terminal controls |
+| `bun run verify:workflow-capacity --steps 1000 --timeout 900` | 8 scenarios pass | Eight concurrent workers, 1,000 unique native sessions, owner pool sharing, controls, deadlines, and cleanup |
 
-The native workflow harness hashes `index.ts`, `tui.ts`, `package.json`, and every direct TypeScript source file in `src/`. It rejects a run if those files change during verification. The verified source hash is `df4bb7aae80b2702bdae8b0c9651974388e1feacc446941a6bdfbd4e02b3e38c`.
+Native harnesses use real isolated OpenCode services with deterministic local providers. These fixtures prove execution behavior rather than model quality. The separate real-model check uses the installed plugin and configured VERA profiles.
 
-The detailed local artifacts are `.audit/workflows/evidence.json`, `.audit/workflows/tui.screen.txt`, and `.audit/workflows/provider-requests.json`. They contain temporary workspace and session identifiers and are not committed. Run the commands above to regenerate them.
+Each workflow, regression, and capacity harness records a hash of `index.ts`, `tui.ts`, `package.json`, and direct TypeScript sources in `src/`. It rejects source changes during its run. Local artifacts are retained under `.audit/` and are gitignored:
 
-## Recovery proof
+- `workflows/evidence.json` and `workflows/tui.screen.txt`
+- `workflow-regressions/evidence.json` and `workflow-regressions/evidence.baseline.json`
+- `workflow-capacity/evidence.json`
+- `runtime-soak/evidence.json`
+- `workflow-model/evidence.json`
 
-The native fixture appends one line to a file, blocks before its result report, and kills the OpenCode service. After restart, no provider request is allowed until explicit recovery. Resume leaves the uncertain write interrupted. An authorized follow-up asks the same worker to report the inspected result, after which resume completes with the original worker ID and exactly one appended line.
+The commands regenerate the evidence. Raw transcripts and temporary session directories are not published.
 
-A separate fixture completes an isolated worktree write, waits at a checkpoint, and restarts the service. Resume activates the cold location's configuration, checks its profile, and returns the cached result without repeating the write.
+The final workflow, regression, and 1,000-step capacity runs all verified source hash `1414fd9d27ead4a1f955f11168917842aaef043a8eec172b7bd73699aaf3e414`.
+
+## Regression and recovery proof
+
+The native regression harness first reproduced six engine failures on the old source. The runtime tests separately reproduced the synchronous deadline failure. All twelve native cases now pass:
+
+1. Queued agents cannot dispatch after the measured token budget is exhausted.
+2. Failed attempts count toward that budget.
+3. Answering one checkpoint preserves `waiting` when another remains unanswered.
+4. Concurrent checkpoint responses replay in their recorded order after restart.
+5. An exposed failure remains a failure on replay, preserving the script's fallback branch.
+6. A crash after an accepted report requires explicit same-worker resolution.
+7. Saved scripts accept new arguments and retain pinned nested source after restart.
+8. Composition helpers execute through the native service.
+9. Saved commands register and refresh.
+10. A fifth nested workflow boundary fails.
+11. A writer and verifier use the same retained worktree.
+12. A CPU-bound script reaches its deadline while service RPC remains responsive.
+
+The hard-crash fixture appends one line, blocks before its report, and kills the service. After restart, no provider request is allowed until explicit recovery. Resume preserves the uncertain write. A follow-up asks the same worker to inspect and report its existing effect; the final file still has exactly one line.
+
+Checkpoint responses and settlement order are committed atomically. Focused tests reject oversized responses before persistence, allow a smaller retry, and retain a concurrently committed agent settlement. Legacy external journals remain preserved during migration. Payload admission reserves diagnostic space while retaining the 16 MiB hard limit.
+
+The macOS runtime soak starts and cancels 35 CPU-bound interpreters. Native thread count returns from 25 to 25, and the following idle second consumes 2.157 ms of process CPU. The check uses the real CodeMode interpreter inside terminable Bun workers.
 
 ## Independent review
 
-A read-only auditor from a second model family reviewed confinement, permission enforcement, durable execution, and native evidence. The final verdict was **PASS** after fixes for pause/checkpoint ordering, sticky stop, permit release, delivery serialization, deleted-worker replay, automatic native recovery, and authorization expiry.
+Independent review is a release gate. The initial audit rejected unqualified readiness and supplied executable counterexamples. Later review found a constructor-failure capacity leak, checkpoint journal poisoning, insufficient control headroom, and recovery failures that affected healthy sibling runs. Those findings received focused regression tests and fixes.
 
-The native Threads regression suite also caught a conflicting-report acknowledgment regression. The report path now compares the submitted report with the original synthetic message before accepting a retry. The full native Threads suite passes with that fix.
+The final integrated engine/store review returned **PASS WITH NOTES**, with no blocking findings. Its remaining timer-cleanup finding was reproduced and fixed: a full legacy journal now clears the deadline and notifies the owner even when failure persistence also fails. The focused test preserves both original records.
+
+A separate UI reviewer identified the stale navigator snapshot, then returned **PASS WITH NOTES** after the fix. Explicit refreshes are serialized, background requests coalesce, and responses are guarded across owner navigation. The native terminal suite passes all 27 checks. The A→B→A generation guard has source review but no dedicated navigation regression.
+
+Accepted review limits include unsupported selective deletion of journal records, replay-order mismatches waiting until the run deadline, and reliance on a single loaded scheduler implementation. Checkpoint responses appear both in the checkpoint and its settlement entry, so they count twice toward the journal limit. A nearly full run can reject even a small response while preserving the unanswered checkpoint. Passing implementation-worker reports alone are not treated as independent approval.
 
 ## Real-model verification
 
-`python3 scripts/verify-workflows-model.py` passed against the installed plugin and existing VERA profiles. The coordinator loaded the authoring skill, wrote its own script, started two parallel read-only steps, and inspected the completed run after its automatic notification.
+Run `wfr_8eafe136e930d91c0127b44532be49a4` completed through coordinator `ses_f35910071ffe0I7E0NR3Bzfvfk`, using `vera-core`:
 
-- Run: `wfr_fa3abb0a913820bc056153e06c6dc044`
-- Coordinator: `ses_f36654328ffeZe1BaN23llwapK`, `vera-core`
-- `vera-operator-readonly`: `openai/gpt-5.6-sol#low`, read `src/workflow-types.ts`
-- `vera-engineer-readonly`: `openai/gpt-5.6-sol#medium`, read `src/workflow-rpc.ts`
-- Validated result: `{"limits":{"concurrency":3,"maxAgents":4},"controls":["pause","resume","stop"]}`
+- `vera-operator-readonly`, `openai/gpt-5.6-sol#low`, read `src/workflow-types.ts`.
+- `vera-engineer-readonly`, `openai/gpt-5.6-sol#medium`, read `src/workflow-rpc.ts`.
+- Validated result: `{"limits":{"concurrency":3,"maxAgents":4},"controls":["pause","resume","stop"]}`.
 
-Both native worker session models matched the configured profiles and journal records. Their transcripts contain successful source reads and accepted results. The coordinator delivered a final PASS receipt. Detailed local evidence is in `.audit/workflow-model/evidence.json`.
+Both worker models matched their profiles and journal records. Their transcripts contain successful reads and accepted results. After the automatic notification, the coordinator inspected the run and delivered a PASS receipt.
 
 ## Execution boundaries
 
-- One OpenCode service owns scheduling. The journal survives service restarts; multiple service processes sharing the same storage are not a supported scheduler topology.
-- Interrupted writes require inspection and same-worker resolution. A missing native worker does not authorize repeating its effects.
-- Script and nested-script contents are pinned to a run. Changes require a new run key.
-- Native failures and explicit `FAIL` or `INCONCLUSIVE` reports prevent workflow completion. Logical retries use validated task data.
-- Token budgets govern admission using reported usage. In-flight work can exceed the remaining budget; unmeasured usage blocks further budgeted admission.
-- Worktrees remain available for inspection and integration. The root coordinator owns integration and the final engineering verdict.
+- One OpenCode service with one loaded scheduler implementation owns scheduling. Multiple services or duplicate module instances sharing storage are unsupported.
+- Interrupted writes require inspection and same-worker resolution. A missing worker does not authorize repeating its effects.
+- Scripts, arguments, and nested scripts are immutable within a run. Changes require a new run key.
+- Native failures and explicit `FAIL` or `INCONCLUSIVE` reports prevent completion, even when the script catches them.
+- Token budgets govern dispatch using reported usage. In-flight work can exceed the threshold; unmeasured usage blocks further budgeted dispatch.
+- Old journals without checkpoint settlement order cannot replay answered checkpoints deterministically. They fail with a diagnostic rather than inventing an order.
+- Corrupt and exact-limit legacy records retain their evidence and produce owner-visible diagnostics. A full legacy record may require explicit repair or a new run key.
+- Selectively deleting a run record while retaining its legacy completion journal is unsupported. Both records belong to the same run identity.
+- An inconsistent settlement order can wait until the run deadline. Recovery does not invent missing completions to make the script advance.
+- Interpreter termination stops script CPU work. Parent-side host effects remain subject to native interruption and uncertain-write recovery.
+- Worktrees remain available for inspection and integration. The coordinator owns the final engineering verdict.
+
+The [capacity findings](workflow-capacity-findings.md) distinguish cumulative sessions, concurrent agents, interpreter calls, and measured operating limits.

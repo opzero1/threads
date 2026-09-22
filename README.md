@@ -12,19 +12,23 @@ Read [Run a dynamic workflow](docs/workflows.md) for progress, pause, stop, resu
 
 See [verification evidence](docs/workflows-verification.md) for the native checks and recovery guarantees.
 
-## Install
+See [capacity and limits](docs/workflow-capacity-findings.md) for total agent steps, concurrent workers, and measured load.
 
-Install the plugin globally:
+## Install dynamic workflows
+
+Clone the implementation branch and install its dependencies:
 
 ```sh
-opencode plugin add @op1/threads
+git clone --branch dynamic-workflows https://github.com/opzero1/threads.git op-threads
+cd op-threads
+bun install
 ```
 
-Or add it to `plugins` in `~/.config/opencode/opencode.jsonc`:
+Add the checkout's absolute path to `plugins` in `~/.config/opencode/opencode.jsonc`:
 
 ```jsonc
 {
-  "plugins": ["@op1/threads"]
+  "plugins": ["/absolute/path/to/op-threads"]
 }
 ```
 
@@ -32,7 +36,7 @@ Keep the other entries in your plugin list. Open a fresh TUI to load the termina
 
 The `skills/managed-sessions` directory contains the VERA delegation guide. Copy or link it into `~/.config/opencode/skills/managed-sessions` to make it available to agents.
 
-For local development, clone [opzero1/threads](https://github.com/opzero1/threads), run `bun install`, and use the clone's absolute path as the plugin entry instead. The internal plugin ID remains `op-threads`, so switching between local and published installs preserves worker records.
+The internal plugin ID remains `op-threads`, so switching between local and published installs preserves worker records. The historical `v0.1.8` release contains managed Threads without dynamic workflows. Its registry installation command is `opencode plugin add @op1/threads`.
 
 ## Delegate work
 

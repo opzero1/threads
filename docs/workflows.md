@@ -12,9 +12,11 @@ The run has a stable ID. Your conversation stays available while its agents work
 
 1. Run `/workflows`.
 2. Select a run to open its panel.
-3. Click a step to open its native worker conversation.
+3. Select a step with the arrow keys and press **Enter**, or click it, to open its native worker conversation.
 
-The panel shows phases, step outcomes, verdicts, evidence, retained directories, recorded usage, and the final result. Press `f` for the full-screen view or `Esc` to close the panel.
+The panel shows phases, step outcomes, verdicts, evidence, retained directories, recorded usage, and the final result. Step counts include work recorded so far; a dynamic script can add more steps. Press `f` for the full-screen view or `Esc` to close the panel.
+
+The navigator lists every run owned by the current coordinator session, including completed and failed runs. The detail panel shows one selected run. Other coordinator sessions have their own run lists.
 
 Ask the agent to inspect the run when you need its complete saved script or structured handoffs:
 
@@ -31,6 +33,8 @@ Press `x` to stop the run and interrupt its active workers. Completed results an
 Press `r` to resume. For a waiting checkpoint, enter a JSON response. For example, enter `true`, `42`, or a quoted string.
 
 After a service restart, reopen the original conversation and select the run with `/workflows`. Resume reconciles its existing sessions before scheduling more work. It does not assume that an interrupted write left the directory unchanged.
+
+For an uncertain write, ask the agent to inspect the retained worker and directory. Send the resolution request to that same worker. After the worker reports and finishes, resume the run. Use the [recovery contract](../skills/workflow-authoring/references/runtime.md#start-and-control) for crash and legacy-journal limits.
 
 ## Save a useful workflow
 

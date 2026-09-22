@@ -97,6 +97,11 @@ def script(name, body):
     return f'export const meta = {{ name: "{name}", description: "Live workflow verification" }};\n{body}'
 
 
+def close_workflow_panel():
+    os.write(terminal.master, b"\x1b")
+    terminal.wait_for_match(lambda display: "Dynamic workflows" not in display and "Build · Fixture" in display, "workflow panel closed", 40, False)
+
+
 try:
     settings = config(target, provider)
     settings["plugins"].append(str(root / "scripts" / "workflow-probe"))
@@ -411,14 +416,14 @@ return await pipeline(args.items, item => agent(item.prompt, {{
     terminal.wait_for("native-parallel")
     passed("the actual TUI exposes the workflow navigator after server restart")
     os.write(terminal.master, b"native-parallel")
-    terminal.wait_for("2/2 steps")
+    terminal.wait_for("2/2 recorded steps")
     os.write(terminal.master, b"\r")
-    terminal.wait_for("p pause")
+    terminal.wait_for("s save")
     terminal.wait_for("fixture-reader")
     os.write(terminal.master, b"f")
     terminal.wait_for("Result:")
     passed("the terminal panel renders worker reports and the final result with fullscreen control")
-    os.write(terminal.master, b"\x1b")
+    close_workflow_panel()
     ui_start = decoded(run_tool(owner, "workflows_start", {
         "key": "ui-checkpoint", "script": script("ui-checkpoint", 'return await checkpoint("Enter checkpoint response", {key:"ui"});'),
     }))
@@ -449,6 +454,73 @@ return await pipeline(args.items, item => agent(item.prompt, {{
     terminal.wait_for("Saved")
     assert (sandbox.directory / ".opencode/workflows/ui-saved.js").is_file()
     passed("the terminal save control writes a reusable workflow script")
+    close_workflow_panel()
+    provider.release.clear()
+    report("WORKFLOW_UI_PAUSE", True, wait=True)
+    ui_pause = decoded(run_tool(owner, "workflows_start", {
+        "key": "ui-pause", "script": script("ui-pause", '''await agent("WORKFLOW_UI_PAUSE", {key:"held",agent:"fixture-reader"});
+            return await checkpoint("Resume paused UI run", {key:"ui-resume"});'''),
+    }))
+    eventually(lambda: any(step["status"] == "running" for step in inspect(owner, ui_pause["id"])["steps"]))
+    os.write(terminal.master, b"/workflows")
+    terminal.wait_for("Open dynamic workflows")
+    os.write(terminal.master, b"\r")
+    terminal.wait_for("Dynamic workflows")
+    os.write(terminal.master, b"ui-pause")
+    terminal.wait_for("ui-pause · running")
+    os.write(terminal.master, b"\r")
+    terminal.wait_for("p pause")
+    os.write(terminal.master, b"p")
+    settled(owner, ui_pause["id"], "pausing")
+    provider.release.set()
+    settled(owner, ui_pause["id"], "paused")
+    terminal.wait_for("ui-pause · paused")
+    terminal.wait_for("Waiting: Resume paused UI run")
+    os.write(terminal.master, b"r")
+    terminal.wait_for("JSON response")
+    os.write(terminal.master, b"true\r")
+    assert settled(owner, ui_pause["id"])["result"] is True
+    terminal.wait_for("ui-pause · completed")
+    passed("the terminal pause key drains work and resumes its checkpoint")
+    close_workflow_panel()
+    provider.release.clear()
+    report("WORKFLOW_UI_STOP", True, wait=True)
+    ui_stop = decoded(run_tool(owner, "workflows_start", {
+        "key": "ui-stop", "script": script("ui-stop", 'return await agent("WORKFLOW_UI_STOP", {key:"held",agent:"fixture-reader"});'),
+    }))
+    eventually(lambda: any(step["status"] == "running" for step in inspect(owner, ui_stop["id"])["steps"]))
+    os.write(terminal.master, b"/workflows")
+    terminal.wait_for("Open dynamic workflows")
+    os.write(terminal.master, b"\r")
+    terminal.wait_for("Dynamic workflows")
+    os.write(terminal.master, b"ui-stop")
+    terminal.wait_for("ui-stop · running")
+    os.write(terminal.master, b"\r")
+    terminal.wait_for("x stop")
+    os.write(terminal.master, b"x")
+    settled(owner, ui_stop["id"], "stopped")
+    provider.release.set()
+    terminal.wait_for("ui-stop · stopped")
+    passed("the terminal stop key interrupts active workflow work")
+    close_workflow_panel()
+    os.write(terminal.master, b"/workflows")
+    terminal.wait_for("Open dynamic workflows")
+    os.write(terminal.master, b"\r")
+    terminal.wait_for("Dynamic workflows")
+    os.write(terminal.master, b"native-parallel")
+    terminal.wait_for("2/2 recorded steps")
+    os.write(terminal.master, b"\r")
+    terminal.wait_for("Enter open worker")
+    os.write(terminal.master, b"\x1b[B")
+    terminal.wait_for(f'› {recovered["steps"][1]["key"]}')
+    os.write(terminal.master, b"\r")
+    def selected_worker():
+        try:
+            return json.loads((artifacts / "tabs.json").read_text()).get("route", {}).get("sessionID") == recovered["steps"][1]["workerID"]
+        except (FileNotFoundError, json.JSONDecodeError):
+            return False
+    eventually(selected_worker)
+    passed("keyboard step selection opens the selected native worker conversation")
     assert source_hash() == verified_source, "Implementation changed during verification; rerun against the final source"
     (artifacts / "evidence.json").write_text(json.dumps({"checks": checks, "run": recovered, "providerRequests": len(provider.requests), "sourceHash": verified_source, "target": str(target)}, indent=2))
 finally:
