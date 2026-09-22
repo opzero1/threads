@@ -5,7 +5,14 @@ import { SessionMessage } from "@opencode/schema/session-message";
 import Ajv from "ajv";
 import { parseWorkflow, executeWorkflow, type WorkflowHost } from "./workflow-runtime";
 import { requireDelegation } from "./permissions";
-import { serialized, type threads, WorkflowWorker, workerIdentity, workerLink } from "./threads";
+import {
+  serialized,
+  type threads,
+  WorkflowWorker,
+  workerIdentity,
+  workerLink,
+  workflowExecutionAuthorized,
+} from "./threads";
 import { workflowHash, workflowStore } from "./workflow-store";
 import {
   Json,
@@ -55,6 +62,7 @@ function errorText(error: unknown) {
 }
 
 class UncertainWriteError extends Error {}
+class SchedulingDeferred extends Error {}
 
 function usage(session: Awaited<ReturnType<Plugin.Context["session"]["get"]>>) {
   const tokens = session.tokens;
@@ -88,35 +96,37 @@ export function workflowEngine(
   }
 
   async function deliver(runID: string) {
-    const run = await store.get(runID);
-    if (!terminal.has(run.status) || run.delivered) return run;
-    const completed = run.steps.filter(isCompleted);
-    const report = {
-      runID: run.id,
-      status: run.status,
-      ...(run.error === undefined ? {} : { error: bounded(run.error, 600) }),
-      counts: {
-        total: run.steps.length,
-        completed: completed.length,
-        failed: run.steps.filter((step) => step.status === "failed").length,
-      },
-      evidence: completed.slice(0, 6).map((step) => ({
-        key: step.key,
-        verdict: step.report.verdict,
-        summary: bounded(step.report.summary, 160),
-        evidence: step.report.evidence.slice(0, 2).map((item) => bounded(item, 160)),
-      })),
-    };
-    const compact = bounded(JSON.stringify(report), 7_000);
-    await ctx.session.synthetic({
-      sessionID: run.ownerID,
-      id: SessionMessage.ID.make(run.deliveryID),
-      text: `Workflow ${run.name} (${run.id}) finished:\n${compact}\nUse workflows_inspect with runID ${run.id} for the full durable result and step details.`,
-      metadata: { opWorkflowDelivery: Json.parse(report), runID: run.id },
-      delivery: "queue",
-      resume: true,
+    return serialized(`workflow-delivery:${runID}`, async () => {
+      const run = await store.get(runID);
+      if (!terminal.has(run.status) || run.delivered) return run;
+      const completed = run.steps.filter(isCompleted);
+      const report = {
+        runID: run.id,
+        status: run.status,
+        ...(run.error === undefined ? {} : { error: bounded(run.error, 600) }),
+        counts: {
+          total: run.steps.length,
+          completed: completed.length,
+          failed: run.steps.filter((step) => step.status === "failed").length,
+        },
+        evidence: completed.slice(0, 6).map((step) => ({
+          key: step.key,
+          verdict: step.report.verdict,
+          summary: bounded(step.report.summary, 160),
+          evidence: step.report.evidence.slice(0, 2).map((item) => bounded(item, 160)),
+        })),
+      };
+      const compact = bounded(JSON.stringify(report), 7_000);
+      await ctx.session.synthetic({
+        sessionID: run.ownerID,
+        id: SessionMessage.ID.make(run.deliveryID),
+        text: `Workflow ${run.name} (${run.id}) finished:\n${compact}\nUse workflows_inspect with runID ${run.id} for the full durable result and step details.`,
+        metadata: { opWorkflowDelivery: Json.parse(report), runID: run.id },
+        delivery: "queue",
+        resume: true,
+      });
+      return store.update(run.id, (current) => { current.delivered = true; });
     });
-    return store.update(run.id, (current) => { current.delivered = true; });
   }
 
   async function recover(ownerID: string) {
@@ -125,6 +135,14 @@ export function workflowEngine(
       recoveredOwners.add(ownerID);
       for (const run of runs) {
         if (activeStatus.has(run.status) && !leases.has(run.id)) {
+          if (run.status === "stopping") {
+            await interruptWorkflowWorkers(workers, ownerID, run);
+            await store.update(run.id, (current) => {
+              current.status = "stopped";
+              current.error = "Workflow stop was recovered after server restart.";
+            });
+            continue;
+          }
           await store.update(run.id, (current) => {
             current.status = "interrupted";
             current.error = "OpenCode stopped while this workflow was active. Inspect its recorded steps, then resume explicitly.";
@@ -276,8 +294,9 @@ export function workflowEngine(
           : previous.directory;
         const spawnKey = previous.spawnKey;
         const dispatch = async () => {
-          await waitUntilRunnable(run.id, controller.signal);
-          let current = (await store.get(run.id)).steps.find((step) => step.key === key)!;
+          const admitted = await store.get(run.id);
+          if (admitted.status !== "running") throw new SchedulingDeferred();
+          let current = admitted.steps.find((step) => step.key === key)!;
           const ensureWorker = () => workers.spawnWorkflow(run.ownerID, {
             key: spawnKey,
             title: input.label ?? `Workflow: ${key}`,
@@ -448,7 +467,7 @@ export function workflowEngine(
         };
         active++;
         try {
-          const perform = () => withWorkflowSlot(
+          const attempt = () => withWorkflowSlot(
             run.ownerID,
             maxWorkers,
             run.id,
@@ -456,12 +475,22 @@ export function workflowEngine(
             controller.signal,
             dispatch,
           );
-          const pending = input.access === "write" && input.isolation === "shared"
-            ? serialized(`workflow-write:${directory}`, perform)
-            : perform();
+          const perform = async (): Promise<Json> => {
+            for (;;) {
+              await waitUntilRunnable(run.id, controller.signal);
+              try {
+                return await (input.access === "write" && input.isolation === "shared"
+                  ? serialized(`workflow-write:${directory}`, attempt)
+                  : attempt()) as Json;
+              } catch (error) {
+                if (!(error instanceof SchedulingDeferred)) throw error;
+              }
+            }
+          };
+          const pending = perform();
           pendingAgents.add(pending);
           try {
-            return await orderedResult(key, await pending as Json);
+            return await orderedResult(key, await pending);
           } finally {
             pendingAgents.delete(pending);
           }
@@ -504,7 +533,7 @@ export function workflowEngine(
           const checkpoint = current.checkpoints.find((item) => item.key === key);
           if (checkpoint && checkpoint.prompt !== prompt) throw new Error(`Checkpoint ${key} changed on resume`);
           if (!checkpoint) current.checkpoints.push({ key, prompt });
-          if (checkpoint?.response === undefined) current.status = "waiting";
+          if (checkpoint?.response === undefined && current.status === "running") current.status = "waiting";
         });
         const recorded = checkpoint.checkpoints.find((item) => item.key === key)!;
         if (recorded.response !== undefined) return recorded.response;
@@ -702,6 +731,24 @@ export function workflowEngine(
     },
     async preparePrompt(sessionID: string, messageID: string) {
       await workers.prepareWorkflowPrompt(sessionID, messageID);
+    },
+    async prepareContext(sessionID: string) {
+      const session = await ctx.session.get({ sessionID });
+      const metadata = WorkflowWorker.safeParse(session.metadata?.opWorkflow);
+      if (!metadata.success) return;
+      workerLink(session);
+      const run = await owned(metadata.data.ownerID, metadata.data.runID);
+      const step = run.steps.find((item) =>
+        item.workerID === sessionID && item.key === metadata.data.stepKey
+      );
+      if (!step) throw new Error("Workflow worker context does not match its durable step");
+      const lease = leases.get(run.id);
+      const leased = lease !== undefined && !lease.controller.signal.aborted && !terminal.has(run.status);
+      if (!leased && !workflowExecutionAuthorized(sessionID)) {
+        throw new Error(
+          "Workflow worker generation is blocked until its owning workflow is explicitly resumed or the owner sends an authorized follow-up.",
+        );
+      }
     },
     async dispose() {
       disposed = true;

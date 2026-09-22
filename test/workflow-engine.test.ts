@@ -6,14 +6,14 @@ import type { Plugin } from "@opencode/plugin";
 import { Session } from "@opencode/schema/session";
 import { SessionMessage } from "@opencode/schema/session-message";
 import { workflowEngine } from "../src/workflow-engine";
-import { threads, workerIdentity } from "../src/threads";
+import { authorizeWorkflowExecution, threads, workerIdentity } from "../src/threads";
 import { WorkflowAgentInput, WorkflowRun, WorkflowStart } from "../src/workflow-types";
 import { withWorkflowSlot, workflowDirectoryPlan } from "../src/workflow-worker";
 
 const temporary: string[] = [];
 afterEach(async () => Promise.all(temporary.splice(0).map((path) => rm(path, { recursive: true, force: true }))));
 
-async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | "manual" | "unmeasured") {
+async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | "manual" | "unmeasured", maxWorkers = 2) {
   const directory = await mkdtemp(join(tmpdir(), "workflow-engine-"));
   temporary.push(directory);
   const file = join(directory, "storage.json");
@@ -125,7 +125,7 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
     async prepareWorkflowPrompt() {},
   } as unknown as ReturnType<typeof threads>;
   const engine = () => workflowEngine(ctx, fakeWorkers, {
-    maxWorkers: 2,
+    maxWorkers,
     loadSaved: async (name) => {
       const value = saved.get(name);
       if (value === undefined) throw new Error(`saved workflow ${name} not found`);
@@ -145,6 +145,13 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
         (session.metadata as { opWorkflow?: { stepKey?: string } } | undefined)?.opWorkflow?.stepKey === stepKey
       );
       if (found) sessions.delete(found[0]);
+    },
+    workerID: (stepKey: string) => {
+      const found = [...sessions.entries()].find(([, session]) =>
+        (session.metadata as { opWorkflow?: { stepKey?: string } } | undefined)?.opWorkflow?.stepKey === stepKey
+      );
+      if (!found) throw new Error(`worker ${stepKey} not found`);
+      return found[0];
     },
     mutateRun: async (runID: string, mutate: (run: WorkflowRun) => void) => {
       const key = `workflows/runs/${runID}`;
@@ -538,5 +545,119 @@ return await agent("write", { key: "write", agent: "analyst", access: "write" })
     expect(run.steps[0].status).toBe("running");
     expect(fixture.spawns()).toBe(1);
     await reopened.dispose();
+  });
+
+  test("blocks automatic worker context restoration without a live lease or explicit authorization", async () => {
+    const fixture = await harness("manual");
+    const read = `
+export const meta = { name: "context-gate", description: "restart gate" };
+return await agent("read", { key: "read", agent: "analyst" });`;
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "context-gate", script: read, args: null }), {
+      agent: "caller", model: { providerID: "test", id: "model" },
+    });
+    while (!fixture.spawnedStepKeys.includes("read")) await Bun.sleep(2);
+    const workerID = fixture.workerID("read");
+    await expect(fixture.api.prepareContext(workerID)).resolves.toBeUndefined();
+    await fixture.api.dispose();
+    const reopened = fixture.reopen();
+    await expect(reopened.prepareContext(workerID)).rejects.toThrow("explicitly resumed");
+    authorizeWorkflowExecution(workerID);
+    await expect(reopened.prepareContext(workerID)).resolves.toBeUndefined();
+    expect((await reopened.get(fixture.ownerID, started.id)).status).toBe("interrupted");
+    await reopened.dispose();
+  });
+
+  test("a checkpoint reached while draining pause cannot erase pause intent", async () => {
+    const fixture = await harness("manual");
+    const checkpointAfterAgent = `
+export const meta = { name: "pause-checkpoint", description: "pause intent" };
+await agent("read", { key: "read", agent: "analyst" });
+return await checkpoint("Continue?", { key: "continue" });`;
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "pause-checkpoint", script: checkpointAfterAgent, args: null }), {
+      agent: "caller", model: { providerID: "test", id: "model" },
+    });
+    while (!fixture.spawnedStepKeys.includes("read")) await Bun.sleep(2);
+    await fixture.api.control(fixture.ownerID, { runID: started.id, action: "pause" });
+    await fixture.complete("read");
+    let paused = await reaches(fixture.api, fixture.ownerID, started.id, "paused");
+    for (let count = 0; count < 100 && paused.checkpoints.length === 0; count++) {
+      await Bun.sleep(2);
+      paused = await fixture.api.get(fixture.ownerID, started.id);
+    }
+    expect(paused.status).toBe("paused");
+    expect(paused.checkpoints).toEqual([{ key: "continue", prompt: "Continue?" }]);
+    await fixture.api.control(fixture.ownerID, { runID: started.id, action: "resume", checkpointKey: "continue", response: "yes" });
+    expect((await settled(fixture.api, fixture.ownerID, started.id)).result).toBe("yes");
+    await fixture.api.dispose();
+  });
+
+  test("recovers a crash during stopping as a sticky stopped run", async () => {
+    const fixture = await harness("manual");
+    const read = `
+export const meta = { name: "sticky-stop", description: "stop recovery" };
+return await agent("read", { key: "read", agent: "analyst" });`;
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "sticky-stop", script: read, args: null }), {
+      agent: "caller", model: { providerID: "test", id: "model" },
+    });
+    while (!fixture.spawnedStepKeys.includes("read")) await Bun.sleep(2);
+    await fixture.api.dispose();
+    await fixture.mutateRun(started.id, (run) => {
+      run.status = "stopping";
+      run.delivered = false;
+    });
+    const reopened = fixture.reopen();
+    const run = await reopened.get(fixture.ownerID, started.id);
+    expect(run.status).toBe("stopped");
+    await expect(reopened.control(fixture.ownerID, { runID: started.id, action: "resume" })).rejects.toThrow("Cannot resume");
+    expect(fixture.spawns()).toBe(1);
+    await reopened.dispose();
+  });
+
+  test("paused queued work releases the owner permit for another run", async () => {
+    const fixture = await harness("manual", 1);
+    const parallel = `
+export const meta = { name: "permit-a", description: "paused queue" };
+return await parallel([
+  () => agent("a", { key: "a", agent: "analyst" }),
+  () => agent("b", { key: "b", agent: "analyst" })
+]);`;
+    const first = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "permit-a", script: parallel, args: null, concurrency: 1 }), {
+      agent: "caller", model: { providerID: "test", id: "model" },
+    });
+    while (fixture.spawnedStepKeys.length < 1) await Bun.sleep(2);
+    const activeKey = fixture.spawnedStepKeys[0];
+    await fixture.api.control(fixture.ownerID, { runID: first.id, action: "pause" });
+    await fixture.complete(activeKey);
+    await reaches(fixture.api, fixture.ownerID, first.id, "paused");
+
+    const secondScript = `
+export const meta = { name: "permit-b", description: "other run" };
+return await agent("c", { key: "c", agent: "analyst" });`;
+    const second = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "permit-b", script: secondScript, args: null }), {
+      agent: "caller", model: { providerID: "test", id: "model" },
+    });
+    for (let count = 0; count < 100 && !fixture.spawnedStepKeys.includes("c"); count++) await Bun.sleep(2);
+    expect(fixture.spawnedStepKeys).toContain("c");
+    await fixture.complete("c");
+    expect((await settled(fixture.api, fixture.ownerID, second.id)).status).toBe("completed");
+    await fixture.api.control(fixture.ownerID, { runID: first.id, action: "stop" });
+    await fixture.api.dispose();
+  });
+
+  test("serializes concurrent final delivery attempts", async () => {
+    const fixture = await harness("valid");
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "delivery", script: `export const meta = { name: "delivery", description: "single delivery" }; return true;`, args: null }), {
+      agent: "caller", model: { providerID: "test", id: "model" },
+    });
+    await settled(fixture.api, fixture.ownerID, started.id);
+    await fixture.mutateRun(started.id, (run) => { run.delivered = false; });
+    const before = fixture.deliveries.length;
+    await Promise.all([
+      fixture.api.get(fixture.ownerID, started.id),
+      fixture.api.get(fixture.ownerID, started.id),
+      fixture.api.get(fixture.ownerID, started.id),
+    ]);
+    expect(fixture.deliveries.length).toBe(before + 1);
+    await fixture.api.dispose();
   });
 });
