@@ -3,6 +3,7 @@ import type { SessionContext } from "@opencode/plugin/promise/session";
 import { z } from "zod";
 import { Report, ThreadsRpc, WorkerView } from "./src/rpc";
 import { Send, Spawn, WorkerTarget, threads } from "./src/threads";
+import { workflows } from "./src/workflows";
 
 export default Plugin.define({
   id: "op-threads",
@@ -121,5 +122,6 @@ export default Plugin.define({
         },
       });
     });
+    return workflows(ctx, workers, models, limit);
   },
 });

@@ -4,6 +4,7 @@ import { createEffect, createSignal } from "solid-js";
 import { z } from "zod";
 import { ThreadsRpc } from "./src/rpc";
 import { activity } from "./src/activity";
+import { workflowUI } from "./src/workflow-ui";
 import { cleanRoleTitle } from "./src/activity-model";
 import {
   BoxRenderable,
@@ -18,6 +19,7 @@ const CoordinatorRef = z.object({ coordinatorID: z.string() });
 export default Plugin.define({
   id: "op-threads",
   setup(ctx) {
+    const stopWorkflows = workflowUI(ctx);
     const rpc = ctx.client.rpc(ThreadsRpc);
     const sidebar = activity(
       ctx,
@@ -226,6 +228,7 @@ export default Plugin.define({
     });
     refresh();
     return () => {
+      stopWorkflows();
       stopped = true;
       abort.abort();
       sidebar.dispose();

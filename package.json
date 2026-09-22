@@ -1,14 +1,14 @@
 {
   "name": "@op1/threads",
   "version": "0.1.8",
-  "description": "Visible top-level worker sessions for OpenCode V2, with native tabs and durable reports.",
+  "description": "Visible worker sessions and durable dynamic workflows for OpenCode V2.",
   "type": "module",
   "main": "./index.ts",
   "exports": {
     ".": "./index.ts",
     "./tui": "./tui.ts"
   },
-  "files": ["index.ts", "tui.ts", "src/", "skills/"],
+  "files": ["index.ts", "tui.ts", "src/", "skills/", "docs/workflows.md", "docs/dynamic-workflows-plan.md"],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/opzero1/threads.git"
@@ -28,13 +28,16 @@
     "verify:roles": "python3 scripts/verify-roles.py",
     "verify:idle-tabs": "uv run --with pyte python scripts/verify-idle-tabs.py",
     "verify:tabs": "uv run --with pyte python scripts/verify-tab-groups.py",
-    "verify:activity": "uv run --with pyte python scripts/verify-activity.py"
+    "verify:activity": "uv run --with pyte python scripts/verify-activity.py",
+    "verify:workflows": "uv run --with pyte python scripts/verify-workflows.py"
   },
   "dependencies": {
     "@opencode/codemode": "2.0.12",
     "@opencode/plugin": "2.0.7",
     "@opencode/schema": "2.0.7",
+    "acorn": "8.15.0",
     "ajv": "8.17.1",
+    "effect": "4.0.0-rc.112",
     "fuzzysort": "3.1.0",
     "zod": "4.1.8"
   },

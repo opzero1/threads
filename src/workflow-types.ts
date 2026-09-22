@@ -108,7 +108,7 @@ export const WorkflowRun = z.object({
   delivered: z.boolean(),
 });
 export type WorkflowRun = z.infer<typeof WorkflowRun>;
-export const WorkflowSummary = WorkflowRun.omit({ script: true, args: true, steps: true, logs: true, checkpoints: true, fingerprint: true, callerAgent: true, deliveryID: true, delivered: true }).extend({
+export const WorkflowSummary = WorkflowRun.omit({ script: true, args: true, result: true, steps: true, logs: true, checkpoints: true, fingerprint: true, callerAgent: true, deliveryID: true, delivered: true }).extend({
   counts: z.object({ completed: z.number(), running: z.number(), failed: z.number(), total: z.number() }),
   usage: WorkflowUsage,
 });

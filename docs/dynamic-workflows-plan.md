@@ -34,7 +34,7 @@ Use the published `@opencode/codemode` package pinned to `2.0.12` for confined e
 
 The journal records a run, its script and arguments, each named step's request fingerprint, worker identity, execution outcome, validated result, and evidence. A restart does not blindly replay user-visible effects. Resume first reconciles an existing worker and any recorded result. An interrupted write with uncertain state requires inspection rather than an automatic fresh worker.
 
-Script control flow uses only arguments and recorded step results. Reject clock and randomness access. Editing a run invalidates the changed call and subsequent recorded calls conservatively; named keys make the affected work identifiable. Worktree paths and results survive completion. Integration is a distinct verified action.
+Script control flow uses only arguments and recorded step results. Reject clock and randomness access. A run's script and arguments are immutable. Resume reuses matching named steps; a changed request under the same key fails closed. An edited saved script starts a new run. This avoids reusing results whose dependencies changed through untracked script control flow. Worktree paths and results survive completion. Integration is a distinct verified action.
 
 ## Reference guidance
 

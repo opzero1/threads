@@ -28,7 +28,10 @@ class Provider:
                 ]
                 position, selected = matches[-1] if matches else (-1, None)
                 tools = [message for message in messages[position + 1:] if message.get("role") == "tool"]
-                if selected and not tools:
+                sequence = selected.get("sequence") if selected else None
+                if sequence:
+                    selected = sequence[len(tools)] if len(tools) < len(sequence) else None
+                if selected and (sequence or not tools):
                     if selected.get("wait"):
                         provider.release.wait(90)
                     delta = {

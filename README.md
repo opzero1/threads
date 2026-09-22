@@ -1,6 +1,12 @@
 # @op1/threads
 
-Managed top-level worker sessions for OpenCode 2.0.7. The server entrypoint is `index.ts`; the terminal entrypoint is `tui.ts`.
+Managed top-level worker sessions and dynamic workflows for OpenCode V2. Dynamic workflows target OpenCode 2.0.12. The server entrypoint is `index.ts`; the terminal entrypoint is `tui.ts`.
+
+## Dynamic workflows
+
+Use `/workflow-run <task>` to have OpenCode author a JavaScript workflow with parallel agents, structured handoffs, and a durable run journal. `/workflows` opens the run navigator. Workers use native OpenCode conversations and configured agent profiles, including VERA roles.
+
+Read [Run a dynamic workflow](docs/workflows.md) for progress, pause, stop, resume, worktree, and saved-script usage. The [runtime contract](skills/workflow-authoring/references/runtime.md) documents the authoring API and execution limits.
 
 ## Install
 
@@ -182,6 +188,8 @@ Run `bun run verify:tabs` to verify project grouping across real git worktrees, 
 Run `bun run verify:activity` to exercise Activity enabled against an isolated instance of the installed OpenCode version. The suite clears its own `.audit/activity` artifacts, uses the deterministic model fixture, and reads actual renderer bounds through the test-only TUI probe. It checks layout, click and keyboard navigation, one-click pin and close controls, and native prompt responses. It also covers section and worker-stack collapse, aggregated worker status, title cleanup, worker restoration, fallback layouts, reloads, and restart persistence. `verify:tabs` and `verify:idle-tabs` explicitly disable Activity to inspect native ordering.
 
 Run `bun run verify:roles` to verify named profiles against the native server and deterministic model endpoint. It checks actual system prompts, model variants, native delegation, read-only execution, reporting, and role-aware retries.
+
+Run `bun run verify:workflows` to exercise dynamic scripts through real OpenCode tools and sessions. The isolated fixture checks structured pipelines, exact retries, role restrictions, ownership, checkpoints, saved scripts, retained worktrees, service restart, and the terminal navigator.
 
 Run `bun run verify:idle-tabs` to open two native terminals on different idle sessions in the same directory and verify that their shared tab order stays stable.
 

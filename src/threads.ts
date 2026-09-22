@@ -253,6 +253,7 @@ export function threads(
       const recorded = Link.parse(session.metadata.opThreads);
       if (session.parentID !== undefined || recorded.workerID !== session.id) return;
       const link = workerLink(session);
+      if (await initialized(session, link)) return;
       await prepareRole(session, link, messageID, z.string().min(1).parse(callerAgent));
     },
     async prepareWorkflowPrompt(actor: string, messageID: string) {

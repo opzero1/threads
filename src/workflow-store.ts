@@ -17,6 +17,13 @@ export function workflowHash(value: unknown): string {
 
 export function workflowStore(storage: Plugin.Context["storage"]) {
   const key = (id: string) => `workflows/runs/${id}`;
+  async function persist(run: WorkflowRun) {
+    const value = Json.parse(run);
+    if (Buffer.byteLength(JSON.stringify(value), "utf8") > 16 * 1024 * 1024) {
+      throw new Error("Workflow journal exceeds 16 MiB; return concise results and artifact paths");
+    }
+    await storage.set(key(run.id), value);
+  }
   async function get(id: string) {
     const raw = await storage.get(key(id));
     if (raw === undefined) throw new Error(`Workflow ${id} not found`);
@@ -32,7 +39,7 @@ export function workflowStore(storage: Plugin.Context["storage"]) {
           if (previous.fingerprint !== run.fingerprint) throw new Error("This workflow key belongs to a different request");
           return previous;
         }
-        await storage.set(key(run.id), Json.parse(run));
+        await persist(run);
         return run;
       });
     },
@@ -42,7 +49,7 @@ export function workflowStore(storage: Plugin.Context["storage"]) {
         update(run);
         run.updated = Date.now();
         const next = WorkflowRun.parse(run);
-        await storage.set(key(id), Json.parse(next));
+        await persist(next);
         return next;
       });
     },
