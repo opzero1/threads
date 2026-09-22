@@ -108,17 +108,31 @@ describe("real CodeMode workflow execution", () => {
       return { accepted, found };
     `);
     expect(value).toEqual({ accepted: 2, found: [{ id: "a" }, { id: "b" }, { id: "c" }] });
+    expect(await run(`return gate(() => "yes", () => ({ ok: true }));`)).toBe("yes");
+    expect((await failure(run(`return gate(() => "no", () => ({ ok: false, feedback: "bad evidence" }), { attempts: 1 });`))).message)
+      .toContain("bad evidence");
+    expect((await failure(run(`return gate(() => "no", () => ({ truthy: true }), { attempts: 1 });`))).message)
+      .toContain("boolean or { ok");
   });
 
   test("cancels an in-flight real tool through Effect.runPromise signal", async () => {
     const controller = new AbortController();
+    let hostCancelled = false;
     let started!: () => void;
     const didStart = new Promise<void>((resolve) => { started = resolve; });
     const promise = executeWorkflow({ script: `${meta}\nreturn await agent("wait");`, args: null, signal: controller.signal,
-      host: host({ agent: async () => { started(); await new Promise(() => {}); } }) });
+      host: host({ agent: async () => {
+        started();
+        try {
+          await new Promise((_, reject) => controller.signal.addEventListener("abort", () => reject(new Error("host cancelled")), { once: true }));
+        } finally {
+          hostCancelled = true;
+        }
+      } }) });
     await didStart;
     controller.abort();
     expect(await failure(promise)).toBeInstanceOf(Error);
+    expect(hostCancelled).toBe(true);
   });
 
   test("rejects invalid scripts before any host call", async () => {
@@ -129,12 +143,36 @@ describe("real CodeMode workflow execution", () => {
       `const M = Math; return M["random"]();`,
       `let M; M = Math; return M.random();`,
       `const { random } = Math; return random();`,
+      `return (m => m.random())(Math);`,
+      `const container = { m: Math }; return container.m.random();`,
+      `const container = [Math]; return container[0].random();`,
+      `const selected = true ? Math : Object; return selected.random();`,
+      `const { random: r } = Math; return r();`,
+      `const container = { Math }; return container.Math.random();`,
       `return mystery();`,
+      `return { mystery };`,
       `return tools.runtime.agent({ prompt: "bypass" });`,
       `return import("x");`,
     ]) {
       let called = false;
       expect(await failure(run(body, { host: host({ agent: async () => { called = true; } }) }))).toBeInstanceOf(Error);
+      expect(called).toBe(false);
+    }
+  });
+
+  test("allows deterministic direct Math and Symbol constants but blocks prototype escapes before tools", async () => {
+    expect(await run(`return { floor: Math.floor(1.9), symbolStable: Symbol.iterator === Symbol.iterator };`))
+      .toEqual({ floor: 1, symbolStable: true });
+    for (const body of [
+      `return ({}).constructor.constructor("return process")();`,
+      `return ({})["__proto__"];`,
+      `return Object.getPrototypeOf({});`,
+    ]) {
+      let called = false;
+      const error = await failure(run(`await agent("must not run"); ${body}`, {
+        host: host({ agent: async () => { called = true; } }),
+      }));
+      expect(error).toBeInstanceOf(Error);
       expect(called).toBe(false);
     }
   });
@@ -145,5 +183,8 @@ describe("real CodeMode workflow execution", () => {
     expect((await failure(run(`await log("a"); await log("b"); return true;`, { maxCalls: 1 }))).message).toContain("call limit");
     expect((await failure(run(`return true;`, { maxCalls: 0 }))).message).toContain("positive integer");
     expect((await failure(run(`while (true) {}`, { timeoutMs: 10 }))).message).toMatch(/Timeout|timed out/);
+    expect((await failure(run(`return await agent("large");`, {
+      host: host({ agent: async () => "x".repeat(2 * 1024 * 1024) }),
+    }))).message).toContain("truncated");
   });
 });

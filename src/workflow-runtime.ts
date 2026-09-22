@@ -41,6 +41,18 @@ const safeGlobals = new Set([
   "SyntaxError", "ReferenceError", "AggregateError",
 ]);
 
+const deterministicMathProperties = new Set([
+  "PI", "E", "LN2", "LN10", "LOG2E", "LOG10E", "SQRT2", "SQRT1_2",
+  "max", "min", "hypot", "abs", "acos", "acosh", "asin", "asinh", "atan",
+  "atan2", "atanh", "floor", "ceil", "round", "trunc", "sign", "sqrt", "cbrt",
+  "pow", "cos", "cosh", "sin", "sinh", "tan", "tanh", "log", "log2", "log10",
+  "log1p", "exp", "expm1", "f16round", "fround", "clz32", "imul", "sumPrecise",
+]);
+
+const prototypeEscapeProperties = new Set([
+  "constructor", "prototype", "__proto__", "getPrototypeOf", "setPrototypeOf",
+]);
+
 const forbiddenGlobals = new Set([
   "Date", "performance", "crypto", "process", "fetch", "require", "globalThis",
   "window", "self", "eval", "Function", "WebAssembly", "tools", "search", "console",
@@ -148,7 +160,8 @@ function isReference(node: Node, parent?: Node): boolean {
   if ((parent.type === "VariableDeclarator" && parent.id === node) ||
       ((parent.type === "FunctionDeclaration" || parent.type === "FunctionExpression" || parent.type === "ArrowFunctionExpression") &&
        (parent.id === node || (parent.params as Node[]).includes(node))) ||
-      ((parent.type === "Property" || parent.type === "MethodDefinition") && parent.key === node && !parent.computed) ||
+      ((parent.type === "Property" || parent.type === "MethodDefinition") && parent.key === node && !parent.computed &&
+       !(parent.type === "Property" && parent.shorthand && parent.value === node)) ||
       (parent.type === "MemberExpression" && parent.property === node && !parent.computed) ||
       (parent.type === "LabeledStatement" || parent.type === "BreakStatement" || parent.type === "ContinueStatement") ||
       (parent.type === "CatchClause" && parent.param === node)) return false;
@@ -173,37 +186,27 @@ function validateBody(body: string): void {
   for (const name of declared)
     if (injected.has(name) || name === "tools" || name === "search") throw new Error(`Workflow cannot shadow injected binding ${name}`);
 
-  const mathAliases = new Set(["Math"]);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const { node } of nodes) {
-      const target = node.type === "VariableDeclarator" ? node.id as Node : node.type === "AssignmentExpression" ? node.left as Node : undefined;
-      const source = node.type === "VariableDeclarator" ? node.init as Node | null : node.type === "AssignmentExpression" ? node.right as Node : undefined;
-      if (target?.type === "Identifier" && source?.type === "Identifier" && mathAliases.has(source.name as string) && !mathAliases.has(target.name as string)) {
-        mathAliases.add(target.name as string); changed = true;
-      }
-    }
-  }
   for (const { node, parent } of nodes) {
     if (node.type === "ImportDeclaration" || node.type === "ImportExpression" || node.type.startsWith("Export"))
       throw new Error("Imports and exports are not supported in workflow bodies");
     if (node.type === "Identifier" && isReference(node, parent)) {
       const name = node.name as string;
       if (forbiddenGlobals.has(name)) throw new Error(`Workflow cannot access ${name}`);
+      if (name === "Math") {
+        if (parent?.type !== "MemberExpression" || parent.object !== node)
+          throw new Error("Workflow may only use Math through a deterministic static property");
+        const property = parent.property as Node;
+        const propertyName = parent.computed ? (property.type === "Literal" ? property.value : undefined) : property.name;
+        if (typeof propertyName !== "string" || !deterministicMathProperties.has(propertyName))
+          throw new Error(`Workflow cannot access nondeterministic or unknown Math property ${String(propertyName)}`);
+      }
       if (!declared.has(name) && !safeGlobals.has(name) && !injected.has(name)) throw new Error(`Unknown workflow global: ${name}`);
     }
-    if (node.type === "MemberExpression" && (node.object as Node).type === "Identifier" && mathAliases.has((node.object as Node).name as string)) {
+    if (node.type === "MemberExpression") {
       const property = node.property as Node;
       const name = node.computed ? (property.type === "Literal" ? property.value : undefined) : property.name;
-      if (name === "random" || (node.computed && name === undefined)) throw new Error("Workflow cannot access Math.random");
-    }
-    if (node.type === "VariableDeclarator" && (node.id as Node).type === "ObjectPattern" &&
-        (node.init as Node | null)?.type === "Identifier" && mathAliases.has(((node.init as Node).name as string))) {
-      for (const property of (node.id as Node).properties as Node[]) {
-        const key = property.key as Node;
-        if ((key.type === "Identifier" ? key.name : key.value) === "random") throw new Error("Workflow cannot alias Math.random");
-      }
+      if (typeof name === "string" && prototypeEscapeProperties.has(name))
+        throw new Error(`Workflow cannot access prototype escape property ${name}`);
     }
   }
 }
@@ -242,7 +245,14 @@ const retry = async (thunk, options = {}) => {
 };
 const gate = async (thunk, validator, options = {}) => retry(async (attempt) => {
   const value = await thunk(attempt);
-  if (!await validator(value, attempt)) throw new Error("Workflow gate rejected the result");
+  const verdict = await validator(value, attempt);
+  const accepted = verdict === true || (verdict !== null && typeof verdict === "object" && verdict.ok === true);
+  if (verdict !== true && verdict !== false && (verdict === null || typeof verdict !== "object" || typeof verdict.ok !== "boolean"))
+    throw new TypeError("Workflow gate validator must return a boolean or { ok, feedback? }");
+  if (!accepted) {
+    const feedback = verdict !== null && typeof verdict === "object" && typeof verdict.feedback === "string" ? ": " + verdict.feedback : "";
+    throw new Error("Workflow gate rejected the result" + feedback);
+  }
   return value;
 }, options);
 const loopUntilDry = async ({ round, key, consecutiveEmpty = 2, maxRounds = 10 }) => {
@@ -275,6 +285,7 @@ function positiveOption(value: number | undefined, name: string): number | undef
 export async function executeWorkflow(input: {
   script: string;
   args: unknown;
+  /** Host operations must observe this same signal; cancellation waits for them to settle. */
   signal: AbortSignal;
   host: WorkflowHost;
   maxCalls?: number;
@@ -286,12 +297,19 @@ export async function executeWorkflow(input: {
   const timeoutMs = positiveOption(input.timeoutMs, "timeoutMs");
   if (input.signal.aborted) throw input.signal.reason ?? new DOMException("Aborted", "AbortError");
   let calls = 0;
+  const pending = new Set<Promise<void>>();
   const safeMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
   const effect = <T>(operation: () => Promise<T>) => Effect.flatMap(
-    Effect.promise(() => operation().then(
+    Effect.promise(() => {
+      const settled = operation().then(
       (value) => ({ ok: true as const, value }),
       (error) => ({ ok: false as const, error }),
-    )),
+      );
+      const completion = settled.then(() => {});
+      pending.add(completion);
+      void completion.then(() => pending.delete(completion));
+      return settled;
+    }),
     (settled) => settled.ok ? Effect.succeed(settled.value) : Effect.fail(toolError(safeMessage(settled.error))),
   );
   const call = <T>(operation: () => Promise<T>) => effect(async () => {
@@ -307,7 +325,7 @@ export async function executeWorkflow(input: {
       execute: (value) => counted ? call(() => execute(value)) : effect(() => execute(value)),
     });
   const runtime = CodeMode.make({
-    limits: { timeoutMs },
+    limits: { timeoutMs, maxOutputBytes: 1024 * 1024 },
     tools: { runtime: {
       args: tool("Return the workflow arguments", objectSchema({}), () => Promise.resolve(input.args), false),
       agent: tool("Run an agent", objectSchema({ prompt: { type: "string" } }, ["prompt"]), async (value) => {
@@ -333,7 +351,13 @@ export async function executeWorkflow(input: {
       }),
     } },
   });
-  const result = await Effect.runPromise(runtime.execute(`${prelude}\n${body}`), { signal: input.signal });
+  let result: CodeMode.Result;
+  try {
+    result = await Effect.runPromise(runtime.execute(`${prelude}\n${body}`), { signal: input.signal });
+  } catch (error) {
+    await Promise.allSettled([...pending]);
+    throw error;
+  }
   if (!result.ok) throw new Error(`${result.error.kind}: ${result.error.message}`);
   if (result.truncated || result.warnings?.some((warning) => warning.kind === "Truncated" || warning.kind === "TimeoutExceeded"))
     throw new Error("Workflow execution was truncated or timed out");
