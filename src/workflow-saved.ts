@@ -5,7 +5,8 @@ import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import { parseWorkflow } from "./workflow-runtime";
 
-const Name = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/);
+const Name = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/)
+  .refine((name) => name !== "run" && name !== "refresh", "This name is reserved for a workflow command");
 export const SavedWorkflow = z.object({
   name: Name,
   description: z.string(),

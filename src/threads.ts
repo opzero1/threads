@@ -68,13 +68,23 @@ export const fingerprint = (input: z.infer<typeof Spawn>) =>
   ]);
 
 const locks = new Map<string, Promise<void>>();
-const workflowState = globalThis as typeof globalThis & { __opWorkflowExecutionGrants?: Set<string> };
-const workflowExecutionGrants = workflowState.__opWorkflowExecutionGrants ??= new Set<string>();
+type WorkflowExecutionGrant = { watching: boolean };
+const workflowState = globalThis as typeof globalThis & { __opWorkflowExecutionGrantsV2?: Map<string, WorkflowExecutionGrant> };
+const workflowExecutionGrants = workflowState.__opWorkflowExecutionGrantsV2 ??= new Map<string, WorkflowExecutionGrant>();
 export function authorizeWorkflowExecution(workerID: string) {
-  workflowExecutionGrants.add(workerID);
+  workflowExecutionGrants.set(workerID, { watching: false });
 }
 export function workflowExecutionAuthorized(workerID: string) {
   return workflowExecutionGrants.has(workerID);
+}
+export function watchWorkflowExecution(workerID: string, untilIdle: () => Promise<void>) {
+  const grant = workflowExecutionGrants.get(workerID);
+  if (!grant || grant.watching) return;
+  grant.watching = true;
+  const revoke = () => {
+    if (workflowExecutionGrants.get(workerID) === grant) workflowExecutionGrants.delete(workerID);
+  };
+  void untilIdle().then(revoke, revoke);
 }
 export async function serialized<T>(
   key: string,
@@ -196,6 +206,9 @@ export function threads(
         resume: true,
       });
       canonical = Report.parse(admitted.payload.metadata?.opThreadsReport);
+      if (JSON.stringify(canonical) !== JSON.stringify(Report.parse(input))) {
+        throw new Error("This worker already has a different report. Start a new task with a new spawn key.");
+      }
     }
     const existing = await ctx.storage.get(reportKey(link));
     if (existing !== undefined && JSON.stringify(Report.parse(existing)) !== JSON.stringify(canonical)) {
@@ -455,6 +468,10 @@ export function threads(
           reportMessageID: SessionMessage.ID.create(),
         });
         if (!session) {
+          const existing = await list(actor);
+          if (existing.filter((worker) => !worker.report && worker.outcome !== "failed" && worker.outcome !== "interrupted").length >= limit) {
+            throw new Error(`Coordinator worker limit reached (${limit}); wait for existing managed work before starting another workflow`);
+          }
           const inherited = await callerPermissions(coordinator, runtime.agent);
           requireDelegation(inherited, input.agent);
           const restrictions = workflowPermissions(inherited, workflow.access === "read" ? [] : undefined);

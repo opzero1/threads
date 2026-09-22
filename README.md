@@ -6,7 +6,11 @@ Managed top-level worker sessions and dynamic workflows for OpenCode V2. Dynamic
 
 Use `/workflow-run <task>` to have OpenCode author a JavaScript workflow with parallel agents, structured handoffs, and a durable run journal. `/workflows` opens the run navigator. Workers use native OpenCode conversations and configured agent profiles, including VERA roles.
 
+Load this implementation from a local checkout using its absolute path in `plugins`. The `v0.1.8` tag preserves the pre-workflow release.
+
 Read [Run a dynamic workflow](docs/workflows.md) for progress, pause, stop, resume, worktree, and saved-script usage. The [runtime contract](skills/workflow-authoring/references/runtime.md) documents the authoring API and execution limits.
+
+See [verification evidence](docs/workflows-verification.md) for the native checks and recovery guarantees.
 
 ## Install
 

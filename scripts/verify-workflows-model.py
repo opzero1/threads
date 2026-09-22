@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import sys
 import time
+from urllib.parse import urlencode
 
 
 root = Path(__file__).resolve().parent.parent
@@ -14,10 +15,11 @@ binary = shutil.which("opencode2") or shutil.which("opencode")
 
 
 def api(method, path, data=None):
+    path += ("&" if "?" in path else "?") + urlencode({"location[directory]": str(directory)})
     command = [binary, "api", method, path]
     if data is not None:
         command.extend(["--data", json.dumps(data)])
-    result = subprocess.run(command, cwd=directory, text=True, capture_output=True, check=True)
+    result = subprocess.run(command, cwd=directory, text=True, capture_output=True, check=True, timeout=60)
     return json.loads(result.stdout) if result.stdout.strip() else None
 
 
@@ -25,8 +27,11 @@ def rpc(method, data):
     return api("post", f"/api/rpc/workflows/{method}", {"input": data})["output"]
 
 
+profile = api("get", "/api/agent/vera-core")["data"]
 session = api("post", "/api/session", {
     "title": "Dynamic workflow real-model verification",
+    "agent": "vera-core",
+    "model": profile["model"],
     "location": {"directory": str(directory)},
     "permissions": [
         {"action": "shell", "resource": "*", "effect": "deny"},
@@ -60,6 +65,8 @@ while time.monotonic() < deadline:
         run = rpc("inspect", {"ownerID": owner, "runID": matching[0]["id"]})
         if run["status"] in ["completed", "failed", "stopped"]:
             break
+    elif api("get", f"/api/session/{owner}")["data"].get("outcome") == "failed":
+        break
     time.sleep(1)
 if run is None or run["status"] != "completed":
     api("post", f"/api/session/{owner}/interrupt", {"resume": False})
@@ -74,6 +81,17 @@ assert len(run["steps"]) == 2 and all(step["status"] == "completed" for step in 
 assert all(step["report"]["verdict"] in ["PASS", "PASS WITH NOTES"] for step in run["steps"])
 assert all(step["report"]["evidence"] for step in run["steps"])
 assert all(step["model"]["providerID"] != "fixture" for step in run["steps"])
-evidence = {"ownerID": owner, "run": run}
+workers = []
+for step in run["steps"]:
+    worker = api("get", f'/api/session/{step["workerID"]}')["data"]
+    configured = api("get", f'/api/agent/{step["input"]["agent"]}')["data"]["model"]
+    assert step["model"] == worker["model"] == configured, step
+    messages = api("get", f'/api/session/{step["workerID"]}/message?limit=30')["data"]
+    reads = [part for message in messages if message["type"] == "assistant"
+             for part in message["content"] if part["type"] == "tool" and part["name"] == "read"
+             and part["state"]["status"] == "completed"]
+    assert reads, f'Worker {step["workerID"]} did not perform a successful source read'
+    workers.append({"id": worker["id"], "model": worker["model"], "reads": [part["state"]["input"] for part in reads]})
+evidence = {"ownerID": owner, "run": run, "workers": workers}
 (artifacts / "evidence.json").write_text(json.dumps(evidence, indent=2))
 print(json.dumps({"status": run["status"], "runID": run["id"], "result": run["result"], "models": [step["model"] for step in run["steps"]], "evidence": str(artifacts / "evidence.json")}, indent=2))

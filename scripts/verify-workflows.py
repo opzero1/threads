@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -16,6 +17,18 @@ provider = Provider()
 sandbox = None
 terminal = None
 checks = []
+
+
+def source_hash():
+    digest = hashlib.sha256()
+    paths = [target / "index.ts", target / "tui.ts", target / "package.json", *sorted((target / "src").glob("*.ts")), *sorted((target / "src").glob("*.tsx"))]
+    for path in paths:
+        digest.update(str(path.relative_to(target)).encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+verified_source = source_hash()
 
 
 class WorkflowSandbox(Sandbox):
@@ -68,7 +81,7 @@ def inspect(owner, run_id):
 def settled(owner, run_id, status="completed"):
     def result():
         run = inspect(owner, run_id)
-        if run["status"] == "failed" and status != "failed":
+        if run["status"] in ["completed", "failed", "stopped"] and run["status"] != status:
             raise AssertionError(run)
         return run if run["status"] == status else None
     return eventually(result, timeout=60)
@@ -86,9 +99,14 @@ def script(name, body):
 
 try:
     settings = config(target, provider)
+    settings["plugins"].append(str(root / "scripts" / "workflow-probe"))
+    settings["providers"]["fixture"]["models"]["role"] = {
+        **settings["providers"]["fixture"]["models"]["fixture"], "name": "Role model",
+        "variants": [{"id": "deep", "body": {"role_variant_probe": "deep"}}],
+    }
     settings["agents"] = {
         "fixture-reader": {
-            "mode": "subagent", "steps": 8, "model": "fixture/fixture",
+            "mode": "subagent", "steps": 8, "model": "fixture/role#deep",
             "system": "FIXTURE_WORKFLOW_READER. Return the assigned structured workflow result.",
             "permissions": [
                 {"action": "*", "resource": "*", "effect": "deny"},
@@ -99,6 +117,11 @@ try:
             "mode": "subagent", "steps": 8, "system": "FIXTURE_WORKFLOW_WRITER.",
             "permissions": [{"action": "*", "resource": "*", "effect": "allow"}],
         },
+        "fixture-coordinator": {
+            "mode": "primary", "steps": 8,
+            "permissions": [{"action": "shell", "resource": "*", "effect": "deny"}],
+        },
+        "fixture-default-reader": {"mode": "subagent", "steps": 8},
     }
     sandbox = WorkflowSandbox(settings, artifacts)
     sandbox.await_plugin()
@@ -120,6 +143,13 @@ return await pipeline(args.items, item => agent(item.prompt, {{
     assert run["result"] == [{"value": 1}, {"value": 2}], run
     assert len(run["steps"]) == 2 and all(step["status"] == "completed" for step in run["steps"]), run
     assert all(step["model"]["providerID"] == "fixture" for step in run["steps"]), run
+    for step in run["steps"]:
+        actual_model = sandbox.api("GET", f'/api/session/{step["workerID"]}')["data"]["model"]
+        assert step["model"] == actual_model == {"providerID": "fixture", "id": "role", "variant": "deep"}, step
+        assert any(part["name"] == "workflows_result" and part["state"]["status"] == "completed"
+                   for message in messages(step["workerID"]) if message["type"] == "assistant"
+                   for part in message["content"] if part["type"] == "tool"), step
+    assert any(request.get("model") == "role" and request.get("role_variant_probe") == "deep" for request in provider.requests)
     assert any("FIXTURE_WORKFLOW_READER" in json.dumps(request) for request in provider.requests)
     passed("a native tool starts a background pipeline with named profiles and validated structured results")
 
@@ -137,6 +167,47 @@ return await pipeline(args.items, item => agent(item.prompt, {{
     assert nested["state"]["status"] == "error", nested
     passed("workflow readers cannot write or create another workflow")
 
+    broad = decoded(run_tool(owner, "workflows_start", {
+        "key": "read-access-broad-profile", "script": script("read-access-broad-profile", '''return await agent("WORKFLOW_A", {
+            key: "read", agent: "fixture-writer", access: "read"
+        });'''),
+    }))
+    broad_run = settled(owner, broad["id"])
+    denied = run_tool(broad_run["steps"][0]["workerID"], "workflow_probe_mutate", {})
+    assert denied["state"]["status"] == "error" and not (sandbox.directory / "forbidden-plugin-write").exists(), denied
+    passed("read access blocks unfamiliar side-effecting plugin tools even under a permissive profile")
+
+    restricted_owner = sandbox.api("POST", "/api/session", {
+        "agent": "fixture-coordinator", "location": {"directory": str(sandbox.directory)},
+    })["data"]["id"]
+    inherited = decoded(run_tool(restricted_owner, "workflows_start", {
+        "key": "parent-agent-restriction", "script": script("parent-agent-restriction", '''return await agent("WORKFLOW_A", {
+            key: "worker", agent: "fixture-writer", access: "write"
+        });'''),
+    }))
+    inherited_run = settled(restricted_owner, inherited["id"])
+    denied = run_tool(inherited_run["steps"][0]["workerID"], "shell", {"command": f"touch '{forbidden}'"})
+    assert denied["state"]["status"] == "error" and not forbidden.exists(), denied
+    passed("a workflow worker inherits restrictions from the coordinator agent as well as its session")
+
+    provider.responses["WORKFLOW_DEFAULT_READ"] = {"sequence": [
+        {"name": "read", "arguments": {"path": str(sandbox.directory / "README.md")}},
+        {"name": "workflows_result", "arguments": {
+            "verdict": "PASS", "summary": "Read fixture file", "evidence": ["README.md"], "result": "read",
+        }},
+    ]}
+    default_read = decoded(run_tool(owner, "workflows_start", {
+        "key": "default-read-rules", "script": script("default-read-rules", '''return await agent("WORKFLOW_DEFAULT_READ", {
+            key: "read", agent: "fixture-default-reader"
+        });'''),
+    }))
+    default_read_run = settled(owner, default_read["id"])
+    reads = [part for message in messages(default_read_run["steps"][0]["workerID"]) if message["type"] == "assistant"
+             for part in message["content"] if part["type"] == "tool" and part["name"] == "read"]
+    assert len(reads) == 1 and reads[0]["state"]["status"] == "completed", reads
+    assert "Native workflow fixture" in json.dumps(reads[0]["state"]["content"]), reads
+    passed("a profile relying on default permissions retains its actual native read capability")
+
     outsider = sandbox.api("POST", "/api/session", {"location": {"directory": str(sandbox.directory)}})["data"]["id"]
     denied = run_tool(outsider, "workflows_inspect", {"runID": begun["id"]})
     assert denied["state"]["status"] == "error", denied
@@ -152,6 +223,27 @@ return await pipeline(args.items, item => agent(item.prompt, {{
     failed = settled(owner, invalid["id"], "failed")
     assert not any(step["status"] == "completed" for step in failed["steps"]), failed
     passed("an invalid result schema fails without claiming a successful step")
+
+    provider.responses["WORKFLOW_REPAIR_RESULT"] = {"sequence": [
+        {"name": "workflows_result", "arguments": {
+            "verdict": "PASS", "summary": "First invalid attempt", "evidence": ["fixture"], "result": {"value": "wrong"},
+        }},
+        {"name": "workflows_result", "arguments": {
+            "verdict": "PASS", "summary": "Repaired result", "evidence": ["fixture"], "result": {"value": 7},
+        }},
+    ]}
+    repair = decoded(run_tool(owner, "workflows_start", {
+        "key": "repair-result", "script": script("repair-result", f'''return await agent("WORKFLOW_REPAIR_RESULT", {{
+            key: "repair", agent: "fixture-reader", schema: {json.dumps(schema)}
+        }});'''),
+    }))
+    repaired = settled(owner, repair["id"])
+    assert repaired["result"] == {"value": 7}, repaired
+    report_attempts = [part for message in messages(repaired["steps"][0]["workerID"]) if message["type"] == "assistant"
+                       for part in message["content"] if part["type"] == "tool" and part["name"] == "workflows_result"]
+    report_attempts.sort(key=lambda part: part["time"]["created"])
+    assert [part["state"]["status"] for part in report_attempts] == ["error", "completed"], report_attempts
+    passed("native result validation rejects bad data and lets the original worker repair it")
 
     checkpoint = decoded(run_tool(owner, "workflows_start", {
         "key": "checkpoint", "script": script("checkpoint", '''const answer = await checkpoint("Choose a value", { key: "choice" });
@@ -227,16 +319,83 @@ return await pipeline(args.items, item => agent(item.prompt, {{
     assert len(capped_run["steps"]) == 1, capped_run
     passed("the run-wide agent limit blocks additional dispatch instead of silently truncating results")
 
-    eventually(lambda: inspect(owner, capped["id"])["delivered"])
+    parallel_cap = decoded(run_tool(owner, "workflows_start", {
+        "key": "parallel-agent-cap", "maxAgents": 1,
+        "script": script("parallel-agent-cap", '''return await parallel([
+            () => agent("WORKFLOW_A", { key: "one", agent: "fixture-reader" }),
+            () => agent("WORKFLOW_B", { key: "two", agent: "fixture-reader" })
+        ]);'''),
+    }))
+    cap_result = settled(owner, parallel_cap["id"], "failed")
+    assert len(cap_result["steps"]) <= 1, cap_result
+    eventually(lambda: all(step["workerID"] not in sandbox.api("GET", "/api/session/active")["data"] for step in cap_result["steps"]))
+    passed("parallel agent admission cannot race past the shared run limit")
+
+    tree_checkpoint = decoded(run_tool(owner, "workflows_start", {
+        "key": "worktree-checkpoint", "script": script("worktree-checkpoint", '''const written = await agent("WORKFLOW_WRITE", {
+            key: "write", agent: "fixture-writer", access: "write", isolation: "worktree"
+        });
+        await checkpoint("Inspect retained worktree", {key:"verified"}); return written;'''),
+    }))
+    tree_waiting = settled(owner, tree_checkpoint["id"], "waiting")
+
+    eventually(lambda: inspect(owner, parallel_cap["id"])["delivered"])
     eventually(lambda: not sandbox.api("GET", "/api/session/active")["data"])
+    provider.release.clear()
+    provider.responses["WORKFLOW_UNCERTAIN_WRITE"] = {"sequence": [
+        {"name": "shell", "arguments": {"command": "printf 'one effect\\n' >> uncertain-write.txt"}},
+        {"name": "workflows_result", "wait": True, "arguments": {
+            "verdict": "PASS", "summary": "Write completed", "evidence": ["uncertain-write.txt"], "result": "written",
+        }},
+    ]}
+    uncertain = decoded(run_tool(owner, "workflows_start", {
+        "key": "uncertain-write", "script": script("uncertain-write", '''return await agent("WORKFLOW_UNCERTAIN_WRITE", {
+            key: "write", agent: "fixture-writer", access: "write"
+        });'''),
+    }))
+    effect = sandbox.directory / "uncertain-write.txt"
+    eventually(lambda: effect.exists())
+    uncertain_worker = eventually(lambda: next((step["workerID"] for step in inspect(owner, uncertain["id"])["steps"] if step["status"] == "running"), None))
+    eventually(lambda: any(request.get("messages", []) and any(
+        message.get("role") == "tool" and "one effect" not in str(message.get("content", ""))
+        for message in request["messages"]
+    ) and "WORKFLOW_UNCERTAIN_WRITE" in json.dumps(request) for request in provider.requests))
     before = len(provider.requests)
+    sandbox.process.kill()
+    sandbox.process.wait()
     sandbox.stop()
+    provider.release.set()
     sandbox.start()
     sandbox.await_plugin()
     recovered = inspect(owner, begun["id"])
     assert recovered["result"] == run["result"] and recovered["status"] == "completed", recovered
     assert len(provider.requests) == before
-    passed("completed run results survive a real OpenCode service restart without new provider work")
+    passed("completed run results survive a hard OpenCode service restart without new provider work")
+
+    crashed = inspect(owner, uncertain["id"])
+    assert crashed["status"] == "interrupted", crashed
+    decoded(run_tool(owner, "workflows_control", {"runID": uncertain["id"], "action": "resume"}))
+    reconciled = settled(owner, uncertain["id"], "interrupted")
+    assert "uncertain" in reconciled["error"].lower(), reconciled
+    assert effect.read_text() == "one effect\n"
+    report("WORKFLOW_RESOLVE_WRITE", "written")
+    decoded(run_tool(owner, "threads_send", {
+        "workerID": uncertain_worker, "key": "explicit-write-resolution",
+        "text": "WORKFLOW_RESOLVE_WRITE. The existing write was inspected and verified. Submit the result without repeating it.",
+    }))
+    eventually(lambda: uncertain_worker not in sandbox.api("GET", "/api/session/active")["data"])
+    decoded(run_tool(owner, "workflows_control", {"runID": uncertain["id"], "action": "resume"}))
+    resolved = settled(owner, uncertain["id"])
+    assert resolved["steps"][0]["workerID"] == uncertain_worker and effect.read_text() == "one effect\n", resolved
+    passed("a crash after a write requires explicit same-worker resolution and never duplicates the effect")
+
+    decoded(run_tool(owner, "workflows_control", {
+        "runID": tree_checkpoint["id"], "action": "resume", "checkpointKey": "verified", "response": True,
+    }))
+    tree_resumed = settled(owner, tree_checkpoint["id"])
+    assert tree_resumed["steps"][0]["workerID"] == tree_waiting["steps"][0]["workerID"], tree_resumed
+    assert tree_resumed["result"] == {"changed": "workflow-proof.txt"}, tree_resumed
+    passed("a checkpoint resumes across a cold retained-worktree location without replaying its completed write")
 
     decoded(run_tool(owner, "workflows_control", {"runID": paused_start["id"], "action": "resume"}))
     resumed = settled(owner, paused_start["id"])
@@ -259,7 +418,39 @@ return await pipeline(args.items, item => agent(item.prompt, {{
     os.write(terminal.master, b"f")
     terminal.wait_for("Result:")
     passed("the terminal panel renders worker reports and the final result with fullscreen control")
-    (artifacts / "evidence.json").write_text(json.dumps({"checks": checks, "run": recovered, "providerRequests": len(provider.requests)}, indent=2))
+    os.write(terminal.master, b"\x1b")
+    ui_start = decoded(run_tool(owner, "workflows_start", {
+        "key": "ui-checkpoint", "script": script("ui-checkpoint", 'return await checkpoint("Enter checkpoint response", {key:"ui"});'),
+    }))
+    settled(owner, ui_start["id"], "waiting")
+    os.write(terminal.master, b"/workflows")
+    terminal.wait_for("Open dynamic workflows")
+    os.write(terminal.master, b"\r")
+    terminal.wait_for("Dynamic workflows")
+    os.write(terminal.master, b"ui-checkpoint")
+    terminal.wait_for("ui-checkpoint · waiting")
+    os.write(terminal.master, b"\r")
+    terminal.wait_for("Waiting: Enter checkpoint response")
+    os.write(terminal.master, b"r")
+    terminal.wait_for("JSON response")
+    os.write(terminal.master, b"42")
+    terminal.wait_for("42")
+    os.write(terminal.master, b"\r")
+    assert settled(owner, ui_start["id"])["result"] == 42
+    passed("the terminal resume control supplies a checkpoint response to the live workflow")
+    terminal.wait_for("ui-checkpoint · completed")
+    os.write(terminal.master, b"s")
+    terminal.wait_for("Save workflow")
+    os.write(terminal.master, b"ui-saved")
+    terminal.wait_for("ui-saved")
+    os.write(terminal.master, b"\r")
+    terminal.wait_for("Save location")
+    os.write(terminal.master, b"\r")
+    terminal.wait_for("Saved")
+    assert (sandbox.directory / ".opencode/workflows/ui-saved.js").is_file()
+    passed("the terminal save control writes a reusable workflow script")
+    assert source_hash() == verified_source, "Implementation changed during verification; rerun against the final source"
+    (artifacts / "evidence.json").write_text(json.dumps({"checks": checks, "run": recovered, "providerRequests": len(provider.requests), "sourceHash": verified_source, "target": str(target)}, indent=2))
 finally:
     (artifacts / "provider-requests.json").write_text(json.dumps(provider.requests, indent=2))
     if terminal:

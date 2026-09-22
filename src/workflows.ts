@@ -17,7 +17,11 @@ export async function workflows(
   maxWorkers: number,
 ) {
   const saved = savedWorkflows(ctx.location.directory, ctx.location.project.canonical);
-  const engine = workflowEngine(ctx, workers, { maxWorkers, loadSaved: (name: string) => saved.load(name) });
+  const engine = workflowEngine(ctx, workers, {
+    maxWorkers,
+    loadSaved: (name: string) => saved.load(name),
+    warmWorker: (sessionID: string) => ctx.session.command({ sessionID, name: "workflow-refresh", text: "" }),
+  });
   const rpc = await ctx.rpc.register(WorkflowsRpc, {
     snapshot: async ({ ownerID }) => ({ runs: (await engine.list(ownerID)).map(workflowSummary) }),
     inspect: ({ ownerID, runID }) => engine.get(ownerID, runID),
@@ -34,6 +38,7 @@ export async function workflows(
     },
   });
   await ctx.session.hook("prompt", (event) => engine.preparePrompt(event.sessionID, event.messageID));
+  await ctx.session.hook("context", (event) => engine.prepareContext(event.sessionID));
   await ctx.tool.transform((editor) => {
     editor.namespace({ name: "workflows", description: "Durable background JavaScript workflows using native OpenCode agents" });
     editor.add({
@@ -133,6 +138,11 @@ export async function workflows(
   }));
   let commands = await saved.list();
   await ctx.command.transform((editor) => {
+    editor.add({
+      name: "workflow-refresh",
+      description: "Reload saved workflow commands for this location",
+      execute: refreshCommands,
+    });
     editor.add({
       name: "workflow-run",
       description: "Ask the current agent to author and start a dynamic workflow",

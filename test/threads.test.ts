@@ -8,6 +8,9 @@ import {
   serialized,
   workerIdentity,
   workerLink,
+  authorizeWorkflowExecution,
+  workflowExecutionAuthorized,
+  watchWorkflowExecution,
 } from "../src/threads";
 import { Report, ThreadsRpc } from "../src/rpc";
 
@@ -20,6 +23,23 @@ const link = Link.parse({
   fingerprint: "task-fingerprint",
   initialMessageID: SessionMessage.ID.create(),
   reportMessageID: SessionMessage.ID.create(),
+});
+
+test("explicit workflow execution grants expire at idle without revoking a newer follow-up", async () => {
+  const id = Session.ID.create();
+  let finish = () => {};
+  let finishNext = () => {};
+  authorizeWorkflowExecution(id);
+  watchWorkflowExecution(id, () => new Promise<void>((resolve) => { finish = resolve; }));
+  expect(workflowExecutionAuthorized(id)).toBe(true);
+  authorizeWorkflowExecution(id);
+  watchWorkflowExecution(id, () => new Promise<void>((resolve) => { finishNext = resolve; }));
+  finish();
+  await Promise.resolve();
+  expect(workflowExecutionAuthorized(id)).toBe(true);
+  finishNext();
+  await Promise.resolve();
+  expect(workflowExecutionAuthorized(id)).toBe(false);
 });
 
 describe("native identity and caller boundaries", () => {

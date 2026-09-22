@@ -12,6 +12,7 @@ import {
   workerIdentity,
   workerLink,
   workflowExecutionAuthorized,
+  watchWorkflowExecution,
 } from "./threads";
 import { workflowHash, workflowStore } from "./workflow-store";
 import {
@@ -79,7 +80,7 @@ function usage(session: Awaited<ReturnType<Plugin.Context["session"]["get"]>>) {
 export function workflowEngine(
   ctx: Plugin.Context,
   workers: Threads,
-  options: { maxWorkers?: number; loadSaved?: (name: string) => Promise<string> } = {},
+  options: { maxWorkers?: number; loadSaved?: (name: string) => Promise<string>; warmWorker?: (workerID: string) => Promise<void> } = {},
 ) {
   const store = workflowStore(ctx.storage);
   const maxWorkers = options.maxWorkers ?? 4;
@@ -88,6 +89,15 @@ export function workflowEngine(
   const recoveredOwners = new Set<string>();
   const engineOwner = Symbol("workflow-engine");
   let disposed = false;
+
+  async function nativeWorker(workerID: string) {
+    try {
+      return await ctx.session.get({ sessionID: workerID });
+    } catch (error) {
+      if (typeof error === "object" && error !== null && "_tag" in error && error._tag === "Session.NotFoundError" && "sessionID" in error && error.sessionID === workerID) return undefined;
+      throw error;
+    }
+  }
 
   async function owned(ownerID: string, runID: string) {
     const run = await store.get(runID);
@@ -244,6 +254,11 @@ export function workflowEngine(
         const owner = await ctx.session.get({ sessionID: beforeAdmission.ownerID });
         const caller = await ctx.agent.get({ agentID: beforeAdmission.callerAgent, location: owner.location });
         requireDelegation([...caller.data.permissions, ...(owner.permissions ?? [])], input.agent);
+        const sourceWorker = beforeAdmission.steps.find((step) => step.directory === source);
+        if (sourceWorker && options.warmWorker) {
+          const existing = await nativeWorker(sourceWorker.workerID);
+          if (existing) await options.warmWorker(existing.id);
+        }
         const sourceProfile = await ctx.agent.get({ agentID: input.agent, location: { directory: source } });
         const sourceModel = sourceProfile.data.model ?? beforeAdmission.model;
         const sourceProfileFingerprint = workflowHash({
@@ -308,6 +323,7 @@ export function workflowEngine(
             callerAgent: run.callerAgent, access: input.access,
           });
           const finalizeProfile = async () => {
+            if (options.warmWorker && await nativeWorker(current.workerID)) await options.warmWorker(current.workerID);
             const profile = await ctx.agent.get({ agentID: input.agent, location: { directory } });
             const model = profile.data.model ?? run.model;
             const profileFingerprint = workflowHash({ model, permissions: profile.data.permissions, system: profile.data.system ?? null });
@@ -744,6 +760,7 @@ export function workflowEngine(
       if (!step) throw new Error("Workflow worker context does not match its durable step");
       const lease = leases.get(run.id);
       const leased = lease !== undefined && !lease.controller.signal.aborted && !terminal.has(run.status);
+      watchWorkflowExecution(sessionID, () => ctx.session.wait({ sessionID }));
       if (!leased && !workflowExecutionAuthorized(sessionID)) {
         throw new Error(
           "Workflow worker generation is blocked until its owning workflow is explicitly resumed or the owner sends an authorized follow-up.",

@@ -24,6 +24,7 @@ test("saved workflow round trip preserves script and refuses overwrite or traver
   expect((await saved.list()).find((item) => item.name === "audit")?.scope).toBe("project");
   await expect(saved.save("audit", script + "\n", "project")).rejects.toThrow();
   await expect(saved.save("../escape", script, "project")).rejects.toThrow();
+  await expect(saved.save("refresh", script, "project")).rejects.toThrow("reserved");
   expect(await readFile(output.path, "utf8")).toBe(script);
 });
 

@@ -89,8 +89,8 @@ class Sandbox:
                 registration = self.root / "state" / "opencode" / "service.json"
                 if registration.exists():
                     info = json.loads(registration.read_text())
-                    self.password = info.get("password")
-                    self.url = info["url"]
+                    if info.get("url", "").rstrip("/") == self.url.rstrip("/"):
+                        self.password = info.get("password")
                 content = (self.artifacts / "server.log").read_bytes()[start:].decode()
                 match = re.search(r"server password (\S+)", content)
                 if not match and not self.password:

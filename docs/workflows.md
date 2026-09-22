@@ -45,6 +45,8 @@ Invoke `/workflow-<name>` to reuse the script with new input. Project scripts li
 
 An edited script starts a new run. A run's script and arguments remain fixed so resuming it cannot silently reuse results from different instructions.
 
+After editing a saved file directly, run `/workflow-refresh` to reload its command. The names `run` and `refresh` are reserved.
+
 ## Use VERA roles
 
 Ask for VERA when the task needs its engineering and evidence rules. The workflow chooses configured role IDs such as `vera-engineer` and `vera-auditor-readonly`; `/setup-vera` remains the place to change their models.
