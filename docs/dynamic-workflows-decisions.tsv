@@ -1,0 +1,3 @@
+ts	phase	decision	why	evidence	result
+2026-09-22T13:28:00Z	baseline	Confirmed Threads v0.1.8 is already pushed and captured the test baseline	Preserve a recoverable setup before adding workflows	git:df7686af1c6601ae7d05ae607bc584f185109231; bun test; bun run typecheck	33 tests pass; typecheck passes
+2026-09-22T13:28:07Z	architecture	Use published CodeMode 2.0.12 and share the Threads worker service	Published V2 confinement avoids a new JavaScript sandbox and shared ownership avoids a second session manager	docs/dynamic-workflows-plan.md; node_modules/@opencode/codemode/dist/codemode.d.ts	Design selected; implementation pending

@@ -31,8 +31,10 @@
     "verify:activity": "uv run --with pyte python scripts/verify-activity.py"
   },
   "dependencies": {
+    "@opencode/codemode": "2.0.12",
     "@opencode/plugin": "2.0.7",
     "@opencode/schema": "2.0.7",
+    "ajv": "8.17.1",
     "fuzzysort": "3.1.0",
     "zod": "4.1.8"
   },
