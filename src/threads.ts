@@ -48,6 +48,12 @@ export const Send = z
   })
   .strict();
 export const WorkerTarget = z.object({ workerID: sessionID }).strict();
+export const WorkflowWorker = z.object({
+  ownerID: sessionID,
+  runID: z.string().min(1),
+  stepKey: z.string().min(1),
+  callerAgent: z.string().min(1),
+}).strict();
 
 const digest = (parts: string[]) =>
   createHash("sha256").update(JSON.stringify(parts)).digest("hex");
@@ -117,6 +123,61 @@ export function threads(
   async function callerPermissions(session: NativeSession, agentID: string) {
     const agent = await ctx.agent.get({ agentID, location: session.location });
     return [...agent.data.permissions, ...(session.permissions ?? [])];
+  }
+
+  async function prepareRole(
+    session: NativeSession,
+    link: z.infer<typeof Link>,
+    messageID: string,
+    callerAgent: string,
+  ) {
+    if (await initialized(session, link)) return;
+    if (link.initialMessageID !== messageID || session.agent === undefined) {
+      throw new Error(
+        "Worker initialization is pending. Retry the original dispatch request.",
+      );
+    }
+    const coordinator = await ctx.session.get({ sessionID: link.coordinatorID });
+    requireDelegation(
+      await callerPermissions(coordinator, callerAgent),
+      session.agent,
+    );
+    const agent = await ctx.agent.get({
+      agentID: session.agent,
+      location: session.location,
+    });
+    if (agent.data.model) {
+      await ctx.session.switchModel({
+        sessionID: session.id,
+        model: agent.data.model,
+      });
+    }
+  }
+
+  async function journalReport(
+    session: NativeSession,
+    link: z.infer<typeof Link>,
+    input: z.infer<typeof Report>,
+    silent: boolean,
+  ) {
+    let canonical = Report.parse(input);
+    if (!silent) {
+      const admitted = await ctx.session.synthetic({
+        sessionID: link.coordinatorID,
+        id: link.reportMessageID,
+        text: `Managed worker ${link.workerID} (${link.key}) report:\n${JSON.stringify(input)}`,
+        metadata: { opThreadsReport: input, workerID: link.workerID },
+        delivery: "queue",
+        resume: true,
+      });
+      canonical = Report.parse(admitted.payload.metadata?.opThreadsReport);
+    }
+    const existing = await ctx.storage.get(reportKey(link));
+    if (existing !== undefined && JSON.stringify(Report.parse(existing)) !== JSON.stringify(canonical)) {
+      throw new Error("This worker already has a different report. Start a new task with a new spawn key.");
+    }
+    await ctx.storage.set(reportKey(link), canonical);
+    return canonical;
   }
 
   async function view(
@@ -192,27 +253,14 @@ export function threads(
       const recorded = Link.parse(session.metadata.opThreads);
       if (session.parentID !== undefined || recorded.workerID !== session.id) return;
       const link = workerLink(session);
-      if (await initialized(session, link)) return;
-      if (link.initialMessageID !== messageID || session.agent === undefined) {
-        throw new Error(
-          "Worker initialization is pending. Retry the original threads_spawn request.",
-        );
-      }
-      const coordinator = await ctx.session.get({ sessionID: link.coordinatorID });
-      requireDelegation(
-        await callerPermissions(coordinator, z.string().min(1).parse(callerAgent)),
-        session.agent,
-      );
-      const agent = await ctx.agent.get({
-        agentID: session.agent,
-        location: session.location,
-      });
-      if (agent.data.model) {
-        await ctx.session.switchModel({
-          sessionID: session.id,
-          model: agent.data.model,
-        });
-      }
+      await prepareRole(session, link, messageID, z.string().min(1).parse(callerAgent));
+    },
+    async prepareWorkflowPrompt(actor: string, messageID: string) {
+      const session = await ctx.session.get({ sessionID: actor });
+      const workflow = WorkflowWorker.safeParse(session.metadata?.opWorkflow);
+      if (!workflow.success) return;
+      const link = workerLink(session);
+      await prepareRole(session, link, messageID, workflow.data.callerAgent);
     },
     async hide(actor: string, input: z.infer<typeof WorkerTarget>) {
       const { session, link } = await owned(actor, input.workerID);
@@ -330,6 +378,91 @@ export function threads(
         return view(await ctx.session.get({ sessionID: workerID }));
       });
     },
+    async spawnWorkflow(
+      actor: string,
+      input: z.infer<typeof Spawn>,
+      runtime: Pick<ToolContext, "agent"> & Pick<SessionContext, "model">,
+      workflow: z.infer<typeof WorkflowWorker> & { access: "read" | "write" },
+    ) {
+      return serialized(actor, async () => {
+        const workflowMetadata = WorkflowWorker.parse({
+          ownerID: workflow.ownerID,
+          runID: workflow.runID,
+          stepKey: workflow.stepKey,
+          callerAgent: workflow.callerAgent,
+        });
+        const coordinator = await ctx.session.get({ sessionID: actor });
+        if (workflow.ownerID !== actor || workflow.callerAgent !== runtime.agent) {
+          throw new Error("Workflow worker ownership must be server-derived");
+        }
+        if (coordinator.parentID !== undefined || coordinator.metadata?.opThreads !== undefined) {
+          throw new Error("Native subagents and managed workers cannot start workflow workers");
+        }
+        if (!isAbsolute(input.directory) || !(await stat(input.directory)).isDirectory()) {
+          throw new Error("directory must be an existing absolute directory");
+        }
+        if (input.agent === undefined) throw new Error("Workflow workers require an explicit role agent");
+        const workerID = workerIdentity(actor, input.key);
+        let session = await ctx.session.get({ sessionID: workerID }).catch((error: unknown) => {
+          const missing = MissingSession.safeParse(error);
+          if (!missing.success || missing.data.sessionID !== workerID) throw error;
+          return undefined;
+        });
+        const proposed = Link.parse({
+          workerID,
+          coordinatorID: actor,
+          key: input.key,
+          fingerprint: fingerprint(input),
+          initialMessageID: SessionMessage.ID.create(),
+          reportMessageID: SessionMessage.ID.create(),
+        });
+        if (!session) {
+          const inherited = await callerPermissions(coordinator, runtime.agent);
+          requireDelegation(inherited, input.agent);
+          const restrictions: Permission.Ruleset = [
+            ...(coordinator.permissions ?? [])
+              .filter((rule) => rule.effect !== "allow")
+              .map((rule) => ({ ...rule, effect: "deny" as const })),
+            { action: "subagent", resource: "*", effect: "deny" },
+            { action: "threads_*", resource: "*", effect: "deny" },
+            { action: "workflows_*", resource: "*", effect: "deny" },
+            ...(workflow.access === "read" ? [
+              { action: "shell", resource: "*", effect: "deny" as const },
+              { action: "edit", resource: "*", effect: "deny" as const },
+              { action: "write", resource: "*", effect: "deny" as const },
+              { action: "patch", resource: "*", effect: "deny" as const },
+            ] : []),
+            { action: "workflows_result", resource: "*", effect: "allow" },
+          ];
+          session = await ctx.session.create({
+            id: workerID,
+            title: input.title,
+            location: { directory: input.directory },
+            agent: input.agent,
+            model: runtime.model,
+            permissions: restrictions,
+            metadata: { opThreads: proposed, opThreadsRole: true, opWorkflow: workflowMetadata },
+          });
+        }
+        const link = workerLink(session);
+        const recorded = WorkflowWorker.parse(session.metadata?.opWorkflow);
+        if (link.fingerprint !== proposed.fingerprint || JSON.stringify(recorded) !== JSON.stringify(workflowMetadata)) {
+          throw new Error("This workflow spawn identity belongs to a different request");
+        }
+        await ctx.storage.set(indexKey(link), link);
+        if (!await initialized(session, link)) {
+          await ctx.session.prompt({
+            sessionID: link.workerID,
+            id: link.initialMessageID,
+            delivery: "queue",
+            metadata: { opThreadsCallerAgent: runtime.agent, opWorkflowRunID: workflow.runID },
+            text: `${input.task}\n\nYou are a leaf workflow worker. Do not delegate, spawn or control other workers, or operate workflow controls. Work only in ${input.directory}. Finish by calling workflows_result exactly once with a verdict, concise summary, evidence, and a result matching the requested JSON schema. Native completion without that validated report is not success.`,
+          });
+          await ctx.storage.set(initializedKey(link), true);
+        }
+        return view(await ctx.session.get({ sessionID: workerID }));
+      });
+    },
     async send(actor: string, input: z.infer<typeof Send>) {
       const { session, link } = await owned(actor, input.workerID);
       if (!await initialized(session, link)) {
@@ -365,22 +498,15 @@ export function threads(
     async report(actor: string, input: z.infer<typeof Report>) {
       const session = await ctx.session.get({ sessionID: actor });
       const link = workerLink(session);
-      const admitted = await ctx.session.synthetic({
-        sessionID: link.coordinatorID,
-        id: link.reportMessageID,
-        text: `Managed worker ${link.workerID} (${link.key}) report:\n${JSON.stringify(input)}`,
-        metadata: { opThreadsReport: input, workerID: link.workerID },
-        delivery: "queue",
-        resume: true,
-      });
-      const canonical = Report.parse(
-        admitted.payload.metadata?.opThreadsReport,
-      );
-      await ctx.storage.set(reportKey(link), canonical);
-      if (JSON.stringify(canonical) !== JSON.stringify(input)) {
-        throw new Error("This worker already has a different report. Start a new task with a new spawn key.");
-      }
+      if (session.metadata?.opWorkflow !== undefined) throw new Error("Workflow workers must call workflows_result");
+      const canonical = await journalReport(session, link, input, false);
       return { workerID: link.workerID, report: canonical };
+    },
+    async reportWorkflow(actor: string, input: z.infer<typeof Report>) {
+      const session = await ctx.session.get({ sessionID: actor });
+      WorkflowWorker.parse(session.metadata?.opWorkflow);
+      const link = workerLink(session);
+      return { workerID: link.workerID, report: await journalReport(session, link, input, true) };
     },
   };
 }
