@@ -4,6 +4,17 @@ The hardening pass targets the seven defects reproduced against `5858de1`, plus 
 
 Current verification uses OpenCode `2.0.14`, Bun `1.4.0`, and published `@opencode/codemode` `2.0.12`. Earlier baseline and failing-before evidence used OpenCode `2.0.12`.
 
+## Version 0.2.1 packaging correction
+
+The published 0.2.0 package omitted `tsconfig.json`. In a clean TUI, its TSX modules were compiled with React defaults and failed with `Cannot find package 'react'`. The earlier native suites loaded a test-only TUI probe and did not catch this packaging failure. Their results did not establish that the published terminal entrypoint could load by itself.
+
+Version 0.2.1 includes the existing JSX configuration in the npm package. The focused `verify:package-ui` regression removes the probe before starting the TUI and requires a published package or an extracted package outside the source checkout:
+
+- Published 0.2.0 reproduced the React import failure and missing Activity rail.
+- The extracted 0.2.1 tarball, with fresh production dependencies, passed Activity rendering, the `/activities` picker, and `/workflows` command registration.
+- Typecheck and all 109 unit tests / 407 assertions passed.
+- Independent static review returned **PASS WITH NOTES**, with no release-blocking findings. Artifact execution was verified by the release coordinator.
+
 ## Version 0.2.0 release verification
 
 The release adds configurable `workflowConcurrency` and `workflowMaxAgents` defaults for new runs. Explicit run values take precedence, and resumed records retain their original limits. The persisted schema defaults remain 3 concurrent agents and 4 total steps.

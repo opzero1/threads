@@ -1,6 +1,6 @@
 {
   "name": "@op1/threads",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Visible worker sessions and durable dynamic workflows for OpenCode V2.",
   "type": "module",
   "main": "./index.ts",
@@ -8,7 +8,7 @@
     ".": "./index.ts",
     "./tui": "./tui.ts"
   },
-  "files": ["index.ts", "tui.ts", "src/", "skills/", "docs/workflows.md", "docs/workflows-verification.md", "docs/workflow-capacity-findings.md", "docs/dynamic-workflows-plan.md"],
+  "files": ["index.ts", "tui.ts", "tsconfig.json", "src/", "skills/", "docs/workflows.md", "docs/workflows-verification.md", "docs/workflow-capacity-findings.md", "docs/dynamic-workflows-plan.md"],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/opzero1/threads.git"
@@ -25,6 +25,7 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "verify:live": "uv run --with pyte python scripts/verify-live.py",
+    "verify:package-ui": "uv run --with pyte python scripts/verify-package-ui.py",
     "verify:roles": "python3 scripts/verify-roles.py",
     "verify:idle-tabs": "uv run --with pyte python scripts/verify-idle-tabs.py",
     "verify:tabs": "uv run --with pyte python scripts/verify-tab-groups.py",

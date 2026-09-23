@@ -19,18 +19,20 @@ See [capacity and limits](docs/workflow-capacity-findings.md) for total agent st
 Install the versioned plugin globally:
 
 ```sh
-opencode plugin add @op1/threads@0.2.0
+opencode plugin add @op1/threads@0.2.1
 ```
 
 Or add it to `plugins` in `~/.config/opencode/opencode.jsonc`:
 
 ```jsonc
 {
-  "plugins": ["@op1/threads@0.2.0"]
+  "plugins": ["@op1/threads@0.2.1"]
 }
 ```
 
 Keep the other entries in your plugin list. Open a fresh TUI to load the terminal entrypoint. Session tabs must be enabled.
+
+Version 0.2.1 fixes the published TUI failing to load because 0.2.0 omitted its JSX configuration. Upgrade if Activity and `/activities` are missing after installing 0.2.0.
 
 The `skills/managed-sessions` directory contains the VERA delegation guide. Copy or link it into `~/.config/opencode/skills/managed-sessions` to make it available to agents.
 
@@ -194,6 +196,8 @@ Run `bun run typecheck`, `bun test`, and `bun run verify:live`. The live check r
 Run `bun run verify:tabs` to verify project grouping across real git worktrees, activity-based ordering, permission prompts, completed and resumed workers, focus preservation, and TUI reopening.
 
 Run `bun run verify:activity` to exercise Activity enabled against an isolated instance of the installed OpenCode version. The suite clears its own `.audit/activity` artifacts, uses the deterministic model fixture, and reads actual renderer bounds through the test-only TUI probe. It checks layout, click and keyboard navigation, one-click pin and close controls, and native prompt responses. It also covers section and worker-stack collapse, aggregated worker status, title cleanup, worker restoration, fallback layouts, reloads, and restart persistence. `verify:tabs` and `verify:idle-tabs` explicitly disable Activity to inspect native ordering.
+
+Before publishing, run `bun run verify:package-ui /absolute/path/to/extracted/package` after installing production dependencies in an extracted npm tarball outside this checkout. This check starts a clean TUI without the probe plugin and verifies Activity, `/activities`, and `/workflows`. It also accepts a published package such as `@op1/threads@0.2.1`.
 
 Run `bun run verify:roles` to verify named profiles against the native server and deterministic model endpoint. It checks actual system prompts, model variants, native delegation, read-only execution, reporting, and role-aware retries.
 
