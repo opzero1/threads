@@ -4,6 +4,29 @@ The hardening pass targets the seven defects reproduced against `5858de1`, plus 
 
 Current verification uses OpenCode `2.0.14`, Bun `1.4.0`, and published `@opencode/codemode` `2.0.12`. Earlier baseline and failing-before evidence used OpenCode `2.0.12`.
 
+## Release procedure
+
+1. Run typecheck, unit tests, and the native checks appropriate to the change.
+2. Run `npm pack --json --pack-destination <existing-artifact-directory>`. Keep its manifest and integrity hash. The `prepack` hook must build `tui.js`; verify that the tarball includes it and excludes root `tui.ts`.
+3. Run `bun run verify:package-ui /absolute/path/to/package.tgz`. This installs the artifact under `node_modules`, without a TUI probe or project JSX configuration. Require all four checks, including pin/unpin, Escape, and the workflow result panel.
+4. Publish that exact tarball. If any packed content changes, repack and repeat the artifact check.
+5. Wait for npm's package index to expose the new version. Download its tarball and compare integrity with the verified artifact. A successful `npm publish` can precede registry availability.
+6. Run `bun run verify:package-ui @op1/threads@<version>` against the registry package before switching a working global installation.
+7. Preserve existing options when updating the global plugin entry. Confirm the server reports the intended version as active, then verify Activity and its commands in the live TUI. Record those observations separately.
+
+`prepack` builds the UI automatically. The clean-install checks are explicit release gates; publishing does not run them automatically. Keep the manifest, integrity comparison, command results, and UI evidence together under `.audit/release-<version>/`.
+
+### Early failure signals
+
+| Observation | Next check |
+| --- | --- |
+| Activity and `/activities` are both missing | Inspect TUI plugin loading and `role=cli` logs. Server activation alone does not establish TUI activation. |
+| `Cannot find package 'react'` from a plugin TSX file | Check the installed package entrypoint. Local JSX configuration and probe-assisted tests can hide missing Solid compilation. |
+| The picker renders, but its shortcut hint is missing or Escape does nothing | Check that the installed entrypoint reaches Solid-compiled code. A JSX import directive alone does not supply Solid's reactive bindings. |
+| Server load fails with `No matching version found` | Check npm propagation and the resolver's view of the version before changing UI settings. Publication acceptance is not installation readiness. |
+
+Reopening a TUI only addresses a reload problem after the installed package has passed a clean-start check. Do not recommend it as a confirmed fix based on server state or probe-assisted rendering alone.
+
 ## Version 0.2.2 compiled TUI
 
 The npm package now ships a Solid-compiled `tui.js`, built by `prepack`, rather than loading TSX at runtime. The host's Solid transform excludes `node_modules`; raw JSX there does not receive the reactive bindings that the picker and workflow panel need. External runtime packages remain imports so OpenCode can supply its own renderer and Solid instance.
@@ -17,6 +40,8 @@ The corrected verifier installs the tarball into `node_modules` outside the chec
 
 Typecheck passed. Runtime source logic is unchanged from the 109-test / 407-assertion pass. The release artifacts and failed 0.2.1 baseline are retained under `.audit/release-0.2.2/`.
 
+The registry-installed 0.2.2 package also passed all four checks. Its downloaded tarball matched the verified artifact. The global server activated 0.2.2 with the user's 32/8/8 limits, and a live terminal capture confirmed Activity after the switch.
+
 Precompiled candidates must replace the conventional TUI entrypoint too. Changing only the package export while retaining root `tui.ts` did not test the bundle when the harness passed the installed directory as a local plugin. The final package includes `tui.js` and omits root `tui.ts`.
 
 ## Version 0.2.1 packaging correction
@@ -25,7 +50,7 @@ This attempted correction was insufficient. The published registry install still
 
 The published 0.2.0 package omitted `tsconfig.json`. In a clean TUI, its TSX modules were compiled with React defaults and failed with `Cannot find package 'react'`. The earlier native suites loaded a test-only TUI probe and did not catch this packaging failure. Their results did not establish that the published terminal entrypoint could load by itself.
 
-Version 0.2.1 includes the existing JSX configuration in the npm package. The focused `verify:package-ui` regression removes the probe before starting the TUI and requires a published package or an extracted package outside the source checkout:
+Version 0.2.1 included the existing JSX configuration in the npm package. At that point, `verify:package-ui` removed the probe but still accepted an extracted package outside the checkout. The following checks passed without catching the installed-package failure:
 
 - Published 0.2.0 reproduced the React import failure and missing Activity rail.
 - The extracted 0.2.1 tarball, with fresh production dependencies, passed Activity rendering, the `/activities` picker, and `/workflows` command registration.
