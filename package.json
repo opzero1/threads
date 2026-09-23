@@ -1,6 +1,6 @@
 {
   "name": "@op1/threads",
-  "version": "0.1.8",
+  "version": "0.2.0",
   "description": "Visible worker sessions and durable dynamic workflows for OpenCode V2.",
   "type": "module",
   "main": "./index.ts",

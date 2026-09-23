@@ -6,7 +6,7 @@ Managed top-level worker sessions and dynamic workflows for OpenCode V2. Dynamic
 
 Use `/workflow-run <task>` to have OpenCode author a JavaScript workflow with parallel agents, structured handoffs, and a durable run journal. `/workflows` opens the run navigator. Workers use native OpenCode conversations and configured agent profiles, including VERA roles.
 
-Load this implementation from a local checkout using its absolute path in `plugins`. The `v0.1.8` tag preserves the pre-workflow release.
+Dynamic workflows are included in `@op1/threads` 0.2.0. The `v0.1.8` tag preserves the pre-workflow release.
 
 Read [Run a dynamic workflow](docs/workflows.md) for progress, pause, stop, resume, worktree, and saved-script usage. The [runtime contract](skills/workflow-authoring/references/runtime.md) documents the authoring API and execution limits.
 
@@ -16,19 +16,17 @@ See [capacity and limits](docs/workflow-capacity-findings.md) for total agent st
 
 ## Install dynamic workflows
 
-Clone the implementation branch and install its dependencies:
+Install the versioned plugin globally:
 
 ```sh
-git clone --branch dynamic-workflows https://github.com/opzero1/threads.git op-threads
-cd op-threads
-bun install
+opencode plugin add @op1/threads@0.2.0
 ```
 
-Add the checkout's absolute path to `plugins` in `~/.config/opencode/opencode.jsonc`:
+Or add it to `plugins` in `~/.config/opencode/opencode.jsonc`:
 
 ```jsonc
 {
-  "plugins": ["/absolute/path/to/op-threads"]
+  "plugins": ["@op1/threads@0.2.0"]
 }
 ```
 
@@ -36,7 +34,7 @@ Keep the other entries in your plugin list. Open a fresh TUI to load the termina
 
 The `skills/managed-sessions` directory contains the VERA delegation guide. Copy or link it into `~/.config/opencode/skills/managed-sessions` to make it available to agents.
 
-The internal plugin ID remains `op-threads`, so switching between local and published installs preserves worker records. The historical `v0.1.8` release contains managed Threads without dynamic workflows. Its registry installation command is `opencode plugin add @op1/threads`.
+The internal plugin ID remains `op-threads`, so switching between local and published installs preserves worker records. For local development, clone the `dynamic-workflows` branch, run `bun install`, and use the checkout's absolute path as the plugin entry.
 
 ## Delegate work
 
@@ -101,6 +99,8 @@ Send keys are scoped to the worker and determine a stable message ID. A retry wi
 `hidden` is the desired idle-tab visibility. Current activity, input requests, or selection can keep that tab open.
 
 Plugin option `maxWorkers` defaults to 4 and accepts integers from 1 through 32. Admission is serialized by coordinator within the loaded server process. A worker without a report continues to occupy a slot unless its native outcome is `failed` or `interrupted`. A successful run without a report does not silently free its slot.
+
+Plugin option `workflowConcurrency` sets the default concurrency for new workflows. It accepts integers from 1 through 8 and defaults to 3. Plugin option `workflowMaxAgents` sets their total agent-step limit, accepts integers from 1 through 1,000, and defaults to 4. Explicit `workflows_start` values override these defaults. Existing runs retain their recorded limits. For eight concurrent agents with eight total steps, configure `"options": { "maxWorkers": 32, "workflowConcurrency": 8, "workflowMaxAgents": 8 }` on the plugin entry.
 
 ## Terminal and RPC
 

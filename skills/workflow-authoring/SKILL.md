@@ -45,6 +45,6 @@ const findings = await pipeline(args.modules, module => agent(
 return findings;
 ```
 
-Invoke with structured arguments, for example `args: { modules: ["src/auth", "src/billing"], check: "missing authorization checks" }`. Set `maxAgents` to cover the named slices and any verification steps. The default is four total agents and three concurrent agents.
+Invoke with structured arguments, for example `args: { modules: ["src/auth", "src/billing"], check: "missing authorization checks" }`. Set `maxAgents` to cover the named slices and any verification steps. Built-in defaults are four total agents and three concurrent agents; plugin options can override them. The `workflows_start` schema shows the configured defaults.
 
 The example returns candidate findings. Add an independent confirmation stage when the task requires a verified report.

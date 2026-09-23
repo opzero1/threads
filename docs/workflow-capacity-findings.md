@@ -4,8 +4,8 @@ The native load harness uses an isolated OpenCode service and a deterministic lo
 
 ## Exact bounds
 
-- Workflow concurrency defaults to 3 and accepts 1–8.
-- A workflow defaults to 4 agents and accepts 1–1,000 total agent steps.
+- Workflow concurrency defaults to 3 and accepts 1–8. The plugin option `workflowConcurrency` overrides the default for new runs; explicit run values take precedence.
+- A workflow defaults to 4 agents and accepts 1–1,000 total agent steps. The plugin option `workflowMaxAgents` overrides the default for new runs; explicit run values take precedence.
 - Worker and run timeouts accept 1 second through 7 days. Defaults are 30 minutes per worker and 24 hours per run.
 - Threads `maxWorkers` defaults to 4 and accepts 1–32. It is both the unfinished managed-worker admission limit and the owner-wide workflow execution limit. A run's effective concurrency is therefore `min(concurrency, maxWorkers)`, with `maxWorkers` shared by simultaneous workflows owned by one session.
 - Workflow workers are top-level native OpenCode sessions. Workflow workers cannot delegate, start workflows, or spawn managed workers. Managed Threads workers may use native subagents if their permissions allow it, but cannot spawn another managed worker.
@@ -44,4 +44,4 @@ The inspected V2 schema defines agent `steps` as a positive integer and exposes 
 
 Use at most eight workflow workers per owner, keep the default four for ordinary interactive use, and increase to eight only for an isolated load or known I/O-bound work. Prefer batches of 100–250 concise steps even though 1,000 are admitted. Store large evidence in artifact files and return paths. Keep reports far below 1 MiB so the 16 MiB aggregate journal retains headroom. Do not treat the configured maximum of 32 managed workers as a verified operating target.
 
-The harness writes measured evidence to `.audit/workflow-capacity/evidence.json`. The user's installed plugin retains the default `maxWorkers: 4`; the capacity fixture explicitly configures eight.
+The harness writes measured evidence to `.audit/workflow-capacity/evidence.json`. The capacity fixture explicitly configures eight workers. The plugin's four-worker default can be overridden with `maxWorkers`.

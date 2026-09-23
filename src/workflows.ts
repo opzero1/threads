@@ -8,7 +8,7 @@ import { threads } from "./threads";
 import { workflowEngine } from "./workflow-engine";
 import { WorkflowControl, WorkflowsRpc } from "./workflow-rpc";
 import { savedWorkflows, SavedWorkflow } from "./workflow-saved";
-import { WorkflowResult, WorkflowRun, WorkflowStart, WorkflowSummary, workflowSummary } from "./workflow-types";
+import { WorkflowLimits, WorkflowResult, WorkflowRun, WorkflowStart, WorkflowSummary, workflowSummary } from "./workflow-types";
 
 export async function workflows(
   ctx: Plugin.Context,
@@ -16,6 +16,12 @@ export async function workflows(
   models: Map<SessionContext["sessionID"], SessionContext["model"]>,
   maxWorkers: number,
 ) {
+  const concurrency = WorkflowLimits.shape.concurrency.parse(ctx.options.workflowConcurrency);
+  const maxAgents = WorkflowLimits.shape.maxAgents.parse(ctx.options.workflowMaxAgents);
+  const startInput = WorkflowStart.safeExtend({
+    concurrency: WorkflowLimits.shape.concurrency.default(concurrency),
+    maxAgents: WorkflowLimits.shape.maxAgents.default(maxAgents),
+  });
   const saved = savedWorkflows(ctx.location.directory, ctx.location.project.canonical);
   const engine = workflowEngine(ctx, workers, {
     maxWorkers,
@@ -44,13 +50,13 @@ export async function workflows(
     editor.add({
       name: "start",
       description: "Start a dynamic JavaScript workflow in the background. Load workflow-authoring first. Supply script or a saved name, a stable retry key, and optional JSON args. The runner owns parallel agents, structured results, checkpoints, and resumable progress. Keep the same key and identical inputs for an exact retry. Configured role permissions apply to every agent. Returns immediately; inspect/control using the run ID.",
-      input: WorkflowStart,
+      input: startInput,
       output: WorkflowSummary,
       options: { namespace: "workflows", codemode: false },
       execute: async (input, tool) => {
         const model = models.get(tool.sessionID);
         if (!model) throw new Error("Workflow start requires a resolved session model");
-        const run = await engine.start(tool.sessionID, input, { agent: tool.agent, model });
+        const run = await engine.start(tool.sessionID, startInput.parse(input), { agent: tool.agent, model });
         await rpc.events.emit("updated", { ownerID: tool.sessionID, runID: run.id });
         const output = workflowSummary(run);
         return { content: JSON.stringify(output), output };

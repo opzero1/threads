@@ -56,6 +56,8 @@ Errors remain errors unless the script explicitly handles them. Do not discard f
 | `timeoutMs` | 24 hours | 1 second–7 days |
 | `tokenBudget` | Unset | Positive integer |
 
+The plugin options `workflowConcurrency` and `workflowMaxAgents` override the default concurrency and total agent-step limit for new runs. The registered `workflows_start` schema advertises the configured defaults. Explicit run values override them, and existing runs retain their recorded limits. To use eight concurrent agents, the total agent-step limit must also be at least eight.
+
 `tokenBudget` measures cumulative native input and output tokens across worker turns. It is an admission threshold, not a hard generation cap: workers already running can exceed it before the next dispatch checks their usage. Multi-turn code investigation can consume much more than the final answer's token count. Choose the threshold for the whole run, including review steps, or omit it and use the agent and time limits.
 
 The cumulative host-call cap is `maxAgents * 8 + 100`, including agent, phase, log, checkpoint, and nested-workflow calls. Nested saved workflows share that cap and the parent agent budget. Nesting is limited to four child levels.

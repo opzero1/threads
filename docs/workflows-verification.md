@@ -4,7 +4,20 @@ The hardening pass targets the seven defects reproduced against `5858de1`, plus 
 
 Current verification uses OpenCode `2.0.14`, Bun `1.4.0`, and published `@opencode/codemode` `2.0.12`. Earlier baseline and failing-before evidence used OpenCode `2.0.12`.
 
-## Automated checks
+## Version 0.2.0 release verification
+
+The release adds configurable `workflowConcurrency` and `workflowMaxAgents` defaults for new runs. Explicit run values take precedence, and resumed records retain their original limits. The persisted schema defaults remain 3 concurrent agents and 4 total steps.
+
+Release verification passed on OpenCode 2.0.14:
+
+- `bun run typecheck` and all 109 unit tests / 407 assertions.
+- 13 native regression cases against the extracted npm package, including configured 8/8 defaults, explicit 2/2 overrides, eight completed steps, and resumed 3/4 limits.
+- 27 native workflow/TUI checks and 27 managed-session checks against the extracted package with fresh production dependencies.
+- Independent source review: **PASS WITH NOTES**, with no release-blocking findings.
+
+The packed source hash is `3b5b77f200d79164227c3caeb86eeab95f4c1188b8f7d5c1f689296e1022df72`. The package includes both entrypoints, all runtime worker modules, and the authoring skill with its runtime reference. Local release artifacts are in `.audit/release-0.2.0/`.
+
+## Hardening checkpoint checks
 
 | Command | Result | Coverage |
 | --- | --- | --- |

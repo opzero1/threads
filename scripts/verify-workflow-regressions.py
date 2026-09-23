@@ -332,6 +332,41 @@ def worktree_handoff():
     return {"run": final, "verificationShell": shells[0]}
 
 
+def configured_defaults():
+    previous = start("previous-default", 'return await checkpoint("Continue", {key:"continue"});')
+    previous_limits = settled(previous, "waiting")["limits"]
+    assert previous_limits["concurrency"] == 3 and previous_limits["maxAgents"] == 4
+    config_path = sandbox.root / "config/opencode/opencode.json"
+    original = config_path.read_text()
+    configured = json.loads(original)
+    configured["plugins"] = [
+        {"package": entry, "options": {"workflowConcurrency": 8, "workflowMaxAgents": 8}} if entry == str(target) else entry
+        for entry in configured["plugins"]
+    ]
+    sandbox.stop()
+    config_path.write_text(json.dumps(configured))
+    try:
+        sandbox.start()
+        sandbox.await_plugin()
+        for index in range(8):
+            report(f"CONFIG_DEFAULT_{index}", index)
+        inherited = settled(start("configured-default", '''return await parallel(Array.from({length:8}, (_, i) =>
+            () => agent("CONFIG_DEFAULT_"+i, {key:"item:"+i, agent:"regression-role"})));'''))
+        explicit = settled(start("explicit-defaults", "return true;", concurrency=2, maxAgents=2))
+        assert inherited["limits"]["concurrency"] == 8 and inherited["limits"]["maxAgents"] == 8, inherited
+        assert inherited["result"] == list(range(8)) and len(inherited["steps"]) == 8, inherited
+        assert explicit["limits"]["concurrency"] == 2 and explicit["limits"]["maxAgents"] == 2, explicit
+        control(previous, action="resume", checkpointKey="continue", response=True)
+        resumed = settled(previous)
+        assert resumed["limits"] == previous_limits and resumed["result"] is True, resumed
+        return {"configured": inherited, "explicit": explicit, "resumed": resumed}
+    finally:
+        sandbox.stop()
+        config_path.write_text(original)
+        sandbox.start()
+        sandbox.await_plugin()
+
+
 def runtime_deadline():
     run = start("cpu-deadline", 'await log("cpu-started"); while (true) { /^(a+)+$/.test(' + json.dumps("a" * 34 + "!") + '); }', timeoutMs=1000)
     eventually(lambda: any(entry["text"] == "cpu-started" for entry in inspect(run)["logs"]))
@@ -358,6 +393,7 @@ cases = {
     "nesting-limit": nesting_limit,
     "worktree-handoff": worktree_handoff,
     "runtime-deadline": runtime_deadline,
+    "configured-defaults": configured_defaults,
 }
 selected = options.case or list(cases)
 assert all(name in cases for name in selected), selected
