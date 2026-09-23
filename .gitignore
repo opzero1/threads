@@ -2,3 +2,4 @@ node_modules/
 .audit/
 .sandbox/
 __pycache__/
+/tui.js

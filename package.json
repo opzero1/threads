@@ -1,14 +1,14 @@
 {
   "name": "@op1/threads",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Visible worker sessions and durable dynamic workflows for OpenCode V2.",
   "type": "module",
   "main": "./index.ts",
   "exports": {
     ".": "./index.ts",
-    "./tui": "./tui.ts"
+    "./tui": "./tui.js"
   },
-  "files": ["index.ts", "tui.ts", "tsconfig.json", "src/", "skills/", "docs/workflows.md", "docs/workflows-verification.md", "docs/workflow-capacity-findings.md", "docs/dynamic-workflows-plan.md"],
+  "files": ["index.ts", "tui.js", "tsconfig.json", "src/", "skills/", "docs/workflows.md", "docs/workflows-verification.md", "docs/workflow-capacity-findings.md", "docs/dynamic-workflows-plan.md"],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/opzero1/threads.git"
@@ -22,6 +22,8 @@
     "registry": "https://registry.npmjs.org/"
   },
   "scripts": {
+    "build:tui": "bun scripts/build-tui.ts",
+    "prepack": "bun run build:tui",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "verify:live": "uv run --with pyte python scripts/verify-live.py",

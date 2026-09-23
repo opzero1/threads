@@ -4,7 +4,24 @@ The hardening pass targets the seven defects reproduced against `5858de1`, plus 
 
 Current verification uses OpenCode `2.0.14`, Bun `1.4.0`, and published `@opencode/codemode` `2.0.12`. Earlier baseline and failing-before evidence used OpenCode `2.0.12`.
 
+## Version 0.2.2 compiled TUI
+
+The npm package now ships a Solid-compiled `tui.js`, built by `prepack`, rather than loading TSX at runtime. The host's Solid transform excludes `node_modules`; raw JSX there does not receive the reactive bindings that the picker and workflow panel need. External runtime packages remain imports so OpenCode can supply its own renderer and Solid instance.
+
+The corrected verifier installs the tarball into `node_modules` outside the checkout and removes the test-only TUI probe. Its checks passed on OpenCode 2.0.14:
+
+- Activity renders from the installed package.
+- `/activities` registers keyboard shortcuts, pins and unpins the selected conversation, and closes with Escape.
+- `/workflows` reports the empty state.
+- A native `workflows_start` call completes a script; its result panel renders the phase and returned JSON and closes with Escape.
+
+Typecheck passed. Runtime source logic is unchanged from the 109-test / 407-assertion pass. The release artifacts and failed 0.2.1 baseline are retained under `.audit/release-0.2.2/`.
+
+Precompiled candidates must replace the conventional TUI entrypoint too. Changing only the package export while retaining root `tui.ts` did not test the bundle when the harness passed the installed directory as a local plugin. The final package includes `tui.js` and omits root `tui.ts`.
+
 ## Version 0.2.1 packaging correction
+
+This attempted correction was insufficient. The published registry install still failed with the React import error, although the extracted-directory check below passed. Loading from `node_modules` must be tested directly; the verifier now installs a tarball there rather than accepting an extracted directory.
 
 The published 0.2.0 package omitted `tsconfig.json`. In a clean TUI, its TSX modules were compiled with React defaults and failed with `Cannot find package 'react'`. The earlier native suites loaded a test-only TUI probe and did not catch this packaging failure. Their results did not establish that the published terminal entrypoint could load by itself.
 

@@ -1,6 +1,6 @@
 # @op1/threads
 
-Managed top-level worker sessions and dynamic workflows for OpenCode V2. Dynamic workflows target OpenCode 2.0.12. The server entrypoint is `index.ts`; the terminal entrypoint is `tui.ts`.
+Managed top-level worker sessions and dynamic workflows for OpenCode V2. Dynamic workflows target OpenCode 2.0.12. The server entrypoint is `index.ts`; the terminal source is `tui.ts`, compiled to `tui.js` for npm publication.
 
 ## Dynamic workflows
 
@@ -19,20 +19,22 @@ See [capacity and limits](docs/workflow-capacity-findings.md) for total agent st
 Install the versioned plugin globally:
 
 ```sh
-opencode plugin add @op1/threads@0.2.1
+opencode plugin add @op1/threads@0.2.2
 ```
 
 Or add it to `plugins` in `~/.config/opencode/opencode.jsonc`:
 
 ```jsonc
 {
-  "plugins": ["@op1/threads@0.2.1"]
+  "plugins": ["@op1/threads@0.2.2"]
 }
 ```
 
 Keep the other entries in your plugin list. Open a fresh TUI to load the terminal entrypoint. Session tabs must be enabled.
 
-Version 0.2.1 fixes the published TUI failing to load because 0.2.0 omitted its JSX configuration. Upgrade if Activity and `/activities` are missing after installing 0.2.0.
+Versions 0.2.0 and 0.2.1 can fail to load the published TUI with a React import error. Version 0.2.1 added the package's JSX configuration, but that alone did not fix loading from `node_modules`.
+
+Version 0.2.2 publishes precompiled Solid UI code. `npm pack` builds `tui.js` automatically; local checkouts keep using `tui.ts`.
 
 The `skills/managed-sessions` directory contains the VERA delegation guide. Copy or link it into `~/.config/opencode/skills/managed-sessions` to make it available to agents.
 
@@ -197,7 +199,7 @@ Run `bun run verify:tabs` to verify project grouping across real git worktrees, 
 
 Run `bun run verify:activity` to exercise Activity enabled against an isolated instance of the installed OpenCode version. The suite clears its own `.audit/activity` artifacts, uses the deterministic model fixture, and reads actual renderer bounds through the test-only TUI probe. It checks layout, click and keyboard navigation, one-click pin and close controls, and native prompt responses. It also covers section and worker-stack collapse, aggregated worker status, title cleanup, worker restoration, fallback layouts, reloads, and restart persistence. `verify:tabs` and `verify:idle-tabs` explicitly disable Activity to inspect native ordering.
 
-Before publishing, run `bun run verify:package-ui /absolute/path/to/extracted/package` after installing production dependencies in an extracted npm tarball outside this checkout. This check starts a clean TUI without the probe plugin and verifies Activity, `/activities`, and `/workflows`. It also accepts a published package such as `@op1/threads@0.2.1`.
+Before publishing, run `bun run verify:package-ui /absolute/path/to/package.tgz`. The check installs the tarball under `node_modules` outside this checkout, starts a clean TUI without the probe plugin, and verifies Activity, `/activities`, and `/workflows`. It also accepts a published package such as `@op1/threads@0.2.2`. An extracted directory is not equivalent to an installed package for JSX loading.
 
 Run `bun run verify:roles` to verify named profiles against the native server and deterministic model endpoint. It checks actual system prompts, model variants, native delegation, read-only execution, reporting, and role-aware retries.
 
