@@ -275,8 +275,8 @@ export function workflowEngine(
     }
   }
 
-  async function resolveWorktree(run: WorkflowRun, input: WorkflowAgentInput, key: string) {
-    return serialized(`workflow-worktree:${run.id}:${key}`, () => workflowDirectory(ctx, run, input, key));
+  async function resolveWorktree(run: WorkflowRun, input: WorkflowAgentInput, key: string, projectID: string) {
+    return serialized(`workflow-worktree:${run.id}:${key}`, () => workflowDirectory(ctx, run, input, key, projectID));
   }
 
   function launch(runID: string, runtime: Runtime, recovering = false) {
@@ -361,6 +361,17 @@ export function workflowEngine(
     };
     const nestedIndexes = new Map<string, number>();
     let active = 0;
+    const agentProfile = async (agentID: string, directory: string) => {
+      for (let attempt = 0;; attempt++) {
+        if (controller.signal.aborted) throw controller.signal.reason;
+        try {
+          return await ctx.agent.get({ agentID, location: { directory } });
+        } catch (error) {
+          if (attempt >= 49 || !String(error).includes(`Agent not found: ${agentID}`)) throw error;
+          await Bun.sleep(100);
+        }
+      }
+    };
     const hostFor = (prefix: string, depth: number): WorkflowHost => ({
       agent: async (raw) => {
         countCall();
@@ -382,7 +393,7 @@ export function workflowEngine(
           const existing = await nativeWorker(sourceWorker.workerID);
           if (existing) await options.warmWorker(existing.id);
         }
-        const sourceProfile = await ctx.agent.get({ agentID: input.agent, location: { directory: source } });
+        const sourceProfile = await agentProfile(input.agent, source);
         const sourceModel = sourceProfile.data.model ?? beforeAdmission.model;
         const sourceProfileFingerprint = workflowHash({
           model: sourceModel,
@@ -422,7 +433,7 @@ export function workflowEngine(
         if (priorSettlement?.kind === "agent" && priorSettlement.outcome === "failure") {
           let expectedFingerprint = `pending:${sourceProfileFingerprint}`;
           if (!previous.profileFingerprint.startsWith("pending:")) {
-            const replayProfile = await ctx.agent.get({ agentID: input.agent, location: { directory: previous.directory } });
+            const replayProfile = await agentProfile(input.agent, previous.directory);
             const replayModel = replayProfile.data.model ?? run.model;
             expectedFingerprint = workflowHash({ model: replayModel, permissions: replayProfile.data.permissions, system: replayProfile.data.system ?? null });
           }
@@ -432,9 +443,53 @@ export function workflowEngine(
           const settlement = await consumeSettlement("agent", key);
           throw new Error(settlement.kind === "agent" ? settlement.error ?? `Workflow step ${key} previously failed` : `Workflow step ${key} previously failed`);
         }
-        const directory = previous.profileFingerprint.startsWith("pending:")
-          ? await resolveWorktree(run, directoryInput, key)
-          : previous.directory;
+        let directory = previous.directory;
+        const prepareDirectory = async () => {
+          if (!previous.profileFingerprint.startsWith("pending:")) return;
+          if (previous.status !== "prepared") {
+            try {
+              await ctx.session.get({ sessionID: previous.workerID });
+            } catch (error) {
+              const missing = typeof error === "object" && error !== null &&
+                "_tag" in error && error._tag === "Session.NotFoundError" &&
+                "sessionID" in error && error.sessionID === previous.workerID;
+              if (!missing) throw error;
+              const message = input.access === "write"
+                ? "Previously dispatched write worker is missing. Its external state is ambiguous, so it will not be recreated or replayed."
+                : "Previously dispatched worker is missing and cannot be safely recreated under the same durable identity.";
+              await store.update(run.id, (value) => {
+                if (input.access === "write") {
+                  value.status = "interrupted";
+                  value.error = message;
+                  return;
+                }
+                const index = value.steps.findIndex((step) => step.key === key);
+                value.steps[index] = { ...value.steps[index], status: "failed", error: message, retryable: false } as WorkflowStep;
+              }, "control");
+              throw new Error(message);
+            }
+          }
+          const sourceProjectID = input.isolation === "worktree"
+            ? await workers.reserveWorkflow(run.ownerID, {
+              key: spawnKey,
+              title: input.label ?? `Workflow: ${key}`,
+              directory: previous.directory,
+              task: workflowTask(input),
+              agent: input.agent,
+            }, source, runtime as Parameters<Threads["reserveWorkflow"]>[3], {
+              ownerID: Session.ID.make(run.ownerID), runID: run.id, stepKey: key,
+              callerAgent: run.callerAgent, access: input.access,
+            })
+            : run.projectID;
+          try {
+            directory = await resolveWorktree(run, directoryInput, key, sourceProjectID);
+          } catch (error) {
+            if (input.isolation === "worktree") {
+              await workers.interrupt(run.ownerID, { workerID: Session.ID.make(previous.workerID) }).catch(() => {});
+            }
+            throw error;
+          }
+        };
         const dispatch = async () => {
           let admitted = await store.get(run.id);
           if (admitted.status !== "running") throw new SchedulingDeferred();
@@ -467,6 +522,8 @@ export function workflowEngine(
               throw new AdmissionDenied(`Workflow token budget reached (${tokenBudget}); in-flight usage may overshoot the soft budget`);
             }
           }
+          await prepareDirectory();
+          if (controller.signal.aborted) throw controller.signal.reason;
           let current = admitted.steps.find((step) => step.key === key)!;
           const ensureWorker = () => workers.spawnWorkflow(run.ownerID, {
             key: spawnKey,
@@ -480,7 +537,7 @@ export function workflowEngine(
           });
           const finalizeProfile = async () => {
             if (options.warmWorker && await nativeWorker(current.workerID)) await options.warmWorker(current.workerID);
-            const profile = await ctx.agent.get({ agentID: input.agent, location: { directory } });
+            const profile = await agentProfile(input.agent, directory);
             const model = profile.data.model ?? run.model;
             const profileFingerprint = workflowHash({ model, permissions: profile.data.permissions, system: profile.data.system ?? null });
             run = await store.update(run.id, (value) => {
@@ -501,12 +558,18 @@ export function workflowEngine(
           }
           const fresh = current.status === "prepared";
           if (fresh) {
+            let deferred = false;
             run = await store.update(run.id, (value) => {
+              if (value.status !== "running") {
+                deferred = true;
+                return;
+              }
               const index = value.steps.findIndex((step) => step.key === key);
               if (value.steps[index].status === "prepared") {
                 value.steps[index] = { ...value.steps[index], status: "running" } as WorkflowStep;
               }
             }, "control");
+            if (deferred) throw new SchedulingDeferred();
             current = run.steps.find((step) => step.key === key)!;
           } else {
             try {

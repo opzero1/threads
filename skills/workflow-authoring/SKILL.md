@@ -7,6 +7,8 @@ description: Author and run durable dynamic JavaScript workflows in OpenCode wit
 
 Use a workflow for broad independent work or a pipeline whose later steps consume earlier results. Keep small, tightly coupled tasks with one owner.
 
+For work across repositories, put the coordinator session in a directory that contains the intended sources, then set each step's `directory` to its repository. The worker uses that repository's OpenCode project for worktree isolation. Choose the scoped common ancestor before starting the run; a prompt mentioning another absolute path does not grant directory access.
+
 1. Define the result, named slices, and verification predicate. For VERA tasks, retain the selected protocol and role profiles.
 2. Read [the runtime contract](references/runtime.md). Write a script with a literal `export const meta` first, named agent steps, and a final JSON result.
 3. Call `workflows_start` with a unique task key, `script` or saved `name`, JSON `args`, and the smallest useful concurrency and agent limit. It returns immediately.

@@ -120,6 +120,25 @@ export function workerLink(
   return link;
 }
 
+export function workflowPermissions(inherited: Permission.Ruleset, readProfile?: Permission.Ruleset): Permission.Ruleset {
+  const readActions = ["read", "glob", "grep", "webfetch", "websearch", "skill", "external_directory"];
+  return [
+    ...(readProfile === undefined ? [] : [
+      { action: "*", resource: "*", effect: "deny" as const },
+      ...inherited.filter((rule) => rule.effect === "ask").map((rule) => ({ ...rule, effect: "deny" as const })),
+      ...readProfile.flatMap((rule) => readActions
+        .filter((action) => permissionMatches(rule.action, action))
+        .map((action) => ({ ...rule, action }))),
+    ]),
+    ...inherited.filter((rule) => readProfile === undefined ? rule.effect !== "allow" : rule.effect === "deny")
+      .map((rule) => ({ ...rule, effect: "deny" as const })),
+    { action: "subagent", resource: "*", effect: "deny" },
+    { action: "threads_*", resource: "*", effect: "deny" },
+    { action: "workflows_*", resource: "*", effect: "deny" },
+    { action: "workflows_result", resource: "*", effect: "allow" },
+  ];
+}
+
 export function threads(
   ctx: Pick<Plugin.Context, "session" | "agent" | "storage">,
   limit = 4,
@@ -141,23 +160,6 @@ export function threads(
   async function callerPermissions(session: NativeSession, agentID: string) {
     const agent = await ctx.agent.get({ agentID, location: session.location });
     return [...agent.data.permissions, ...(session.permissions ?? [])];
-  }
-
-  function workflowPermissions(inherited: Permission.Ruleset, readProfile?: Permission.Ruleset): Permission.Ruleset {
-    const readActions = ["read", "glob", "grep", "webfetch", "websearch", "skill", "external_directory"];
-    return [
-      ...(readProfile === undefined ? [] : [
-        { action: "*", resource: "*", effect: "deny" as const },
-        ...readProfile.flatMap((rule) => readActions
-          .filter((action) => permissionMatches(rule.action, action))
-          .map((action) => ({ ...rule, action }))),
-      ]),
-      ...inherited.filter((rule) => rule.effect !== "allow").map((rule) => ({ ...rule, effect: "deny" as const })),
-      { action: "subagent", resource: "*", effect: "deny" },
-      { action: "threads_*", resource: "*", effect: "deny" },
-      { action: "workflows_*", resource: "*", effect: "deny" },
-      { action: "workflows_result", resource: "*", effect: "allow" },
-    ];
   }
 
   async function prepareRole(
@@ -429,6 +431,67 @@ export function threads(
         return view(await ctx.session.get({ sessionID: workerID }));
       });
     },
+    async reserveWorkflow(
+      actor: string,
+      input: z.infer<typeof Spawn>,
+      sourceDirectory: string,
+      runtime: Pick<ToolContext, "agent"> & Pick<SessionContext, "model">,
+      workflow: { ownerID: Session.ID; runID: string; stepKey: string; callerAgent: string; access: "read" | "write" },
+    ) {
+      return serialized(actor, async () => {
+        const coordinator = await ctx.session.get({ sessionID: actor });
+        if (workflow.ownerID !== actor || workflow.callerAgent !== runtime.agent) {
+          throw new Error("Workflow worker ownership must be server-derived");
+        }
+        if (coordinator.parentID !== undefined || coordinator.metadata?.opThreads !== undefined) {
+          throw new Error("Native subagents and managed workers cannot start workflow workers");
+        }
+        if (!isAbsolute(sourceDirectory) || !(await stat(sourceDirectory)).isDirectory()) {
+          throw new Error("Workflow source must be an existing absolute directory");
+        }
+        if (input.agent === undefined) throw new Error("Workflow workers require an explicit role agent");
+        const workerID = workerIdentity(actor, input.key);
+        const proposed = Link.parse({
+          workerID, coordinatorID: actor, key: input.key, fingerprint: fingerprint(input),
+          initialMessageID: SessionMessage.ID.create(), reportMessageID: SessionMessage.ID.create(),
+        });
+        let session = await ctx.session.get({ sessionID: workerID }).catch((error: unknown) => {
+          const missing = MissingSession.safeParse(error);
+          if (!missing.success || missing.data.sessionID !== workerID) throw error;
+          return undefined;
+        });
+        if (!session) {
+          const existing = await list(actor);
+          if (existing.filter((worker) => !worker.report && worker.outcome !== "failed" && worker.outcome !== "interrupted").length >= limit) {
+            throw new Error(`Coordinator worker limit reached (${limit}); wait for existing managed work before starting another workflow`);
+          }
+          const inherited = await callerPermissions(coordinator, runtime.agent);
+          requireDelegation(inherited, input.agent);
+          session = await ctx.session.create({
+            id: workerID, title: input.title, location: { directory: sourceDirectory },
+            model: runtime.model,
+            permissions: workflowPermissions(inherited, workflow.access === "read" ? [] : undefined),
+            metadata: {
+              opThreads: proposed, opThreadsRole: true,
+              opWorkflow: { ownerID: workflow.ownerID, runID: workflow.runID, stepKey: workflow.stepKey, callerAgent: workflow.callerAgent },
+              opWorkflowAccess: workflow.access,
+            },
+          });
+        }
+        const link = workerLink(session);
+        const recorded = WorkflowWorker.parse(session.metadata?.opWorkflow);
+        if (link.fingerprint !== proposed.fingerprint || recorded.ownerID !== workflow.ownerID ||
+          recorded.runID !== workflow.runID || recorded.stepKey !== workflow.stepKey ||
+          recorded.callerAgent !== workflow.callerAgent || session.metadata?.opWorkflowAccess !== workflow.access) {
+          throw new Error("This workflow reservation belongs to a different request");
+        }
+        if (await initialized(session, link) && session.location.directory !== input.directory) {
+          throw new Error("Initialized workflow worker cannot change its assigned directory");
+        }
+        await ctx.storage.set(indexKey(link), link);
+        return session.projectID;
+      });
+    },
     async spawnWorkflow(
       actor: string,
       input: z.infer<typeof Spawn>,
@@ -489,6 +552,16 @@ export function threads(
         const recorded = WorkflowWorker.parse(session.metadata?.opWorkflow);
         if (link.fingerprint !== proposed.fingerprint || JSON.stringify(recorded) !== JSON.stringify(workflowMetadata)) {
           throw new Error("This workflow spawn identity belongs to a different request");
+        }
+        if (session.location.directory !== input.directory) {
+          if (await initialized(session, link)) throw new Error("Initialized workflow worker cannot change its assigned directory");
+          await ctx.session.move({ sessionID: link.workerID, directory: input.directory });
+          session = await ctx.session.get({ sessionID: link.workerID });
+        }
+        if (session.agent !== input.agent) {
+          if (await initialized(session, link)) throw new Error("Initialized workflow worker cannot change its role agent");
+          await ctx.session.switchAgent({ sessionID: link.workerID, agent: input.agent });
+          session = await ctx.session.get({ sessionID: link.workerID });
         }
         await ctx.storage.set(indexKey(link), link);
         if (!await initialized(session, link)) {

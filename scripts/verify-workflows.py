@@ -127,6 +127,21 @@ try:
             "permissions": [{"action": "shell", "resource": "*", "effect": "deny"}],
         },
         "fixture-default-reader": {"mode": "subagent", "steps": 8},
+        "fixture-external-coordinator": {
+            "mode": "primary", "steps": 8,
+            "permissions": [
+                {"action": "*", "resource": "*", "effect": "allow"},
+                {"action": "external_directory", "resource": "*", "effect": "ask"},
+            ],
+        },
+        "fixture-external-reader": {
+            "mode": "subagent", "steps": 8,
+            "permissions": [
+                {"action": "*", "resource": "*", "effect": "deny"},
+                {"action": "read", "resource": "*", "effect": "allow"},
+                {"action": "external_directory", "resource": "*external-source*", "effect": "allow"},
+            ],
+        },
     }
     sandbox = WorkflowSandbox(settings, artifacts)
     sandbox.await_plugin()
@@ -213,6 +228,30 @@ return await pipeline(args.items, item => agent(item.prompt, {{
     assert "Native workflow fixture" in json.dumps(reads[0]["state"]["content"]), reads
     passed("a profile relying on default permissions retains its actual native read capability")
 
+    external_source = sandbox.root / "external-source"
+    external_source.mkdir()
+    (external_source / "proof.txt").write_text("authorized external read\n")
+    external_owner = sandbox.api("POST", "/api/session", {
+        "agent": "fixture-external-coordinator", "location": {"directory": str(sandbox.directory)},
+    })["data"]["id"]
+    provider.responses["WORKFLOW_EXTERNAL_READ"] = {"sequence": [
+        {"name": "read", "arguments": {"path": str(external_source / "proof.txt")}},
+        {"name": "workflows_result", "arguments": {
+            "verdict": "PASS", "summary": "Read authorized external file", "evidence": ["proof.txt"], "result": "external-read",
+        }},
+    ]}
+    external_start = decoded(run_tool(external_owner, "workflows_start", {
+        "key": "explicit-external-read", "script": script("explicit-external-read", '''return await agent("WORKFLOW_EXTERNAL_READ", {
+            key: "read", agent: "fixture-external-reader", access: "read"
+        });'''),
+    }))
+    external_run = settled(external_owner, external_start["id"])
+    external_reads = [part for message in messages(external_run["steps"][0]["workerID"]) if message["type"] == "assistant"
+                      for part in message["content"] if part["type"] == "tool" and part["name"] == "read"]
+    assert len(external_reads) == 1 and external_reads[0]["state"]["status"] == "completed", external_reads
+    assert "authorized external read" in json.dumps(external_reads[0]["state"]["content"]), external_reads
+    passed("an explicit read-profile grant survives the coordinator's external-directory ask")
+
     outsider = sandbox.api("POST", "/api/session", {"location": {"directory": str(sandbox.directory)}})["data"]["id"]
     denied = run_tool(outsider, "workflows_inspect", {"runID": begun["id"]})
     assert denied["state"]["status"] == "error", denied
@@ -286,6 +325,30 @@ return await pipeline(args.items, item => agent(item.prompt, {{
     assert checkout != sandbox.directory and (checkout / "workflow-proof.txt").read_text() == "verified isolated edit\n", isolated
     assert not (sandbox.directory / "workflow-proof.txt").exists()
     passed("an actual native writer edits a retained worktree without changing the coordinator checkout")
+
+    nested = sandbox.directory / "nested-source"
+    nested.mkdir()
+    subprocess.run(["git", "init", "-b", "main", str(nested)], check=True, capture_output=True)
+    (nested / "source.txt").write_text("nested project\n")
+    subprocess.run(["git", "add", "source.txt"], cwd=nested, check=True)
+    subprocess.run(["git", "-c", "user.name=Workflow fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "Nested baseline"], cwd=nested, check=True, capture_output=True)
+    provider.responses["WORKFLOW_NESTED_WRITE"] = {"sequence": [
+        {"name": "shell", "arguments": {"command": "printf 'nested edit\\n' > nested-proof.txt"}},
+        {"name": "workflows_result", "arguments": {
+            "verdict": "PASS", "summary": "Created nested proof", "evidence": ["nested-proof.txt"], "result": {"changed": "nested-proof.txt"},
+        }},
+    ]}
+    nested_start = decoded(run_tool(owner, "workflows_start", {
+        "key": "nested-project-write", "script": script("nested-project-write", f'''return await agent("WORKFLOW_NESTED_WRITE", {{
+            key: "nested", agent: "fixture-writer", access: "write", isolation: "worktree", directory: {json.dumps(str(nested))}
+        }});'''),
+    }))
+    nested_run = settled(owner, nested_start["id"])
+    nested_checkout = Path(nested_run["steps"][0]["directory"])
+    assert (nested_checkout / "source.txt").read_text() == "nested project\n", nested_run
+    assert (nested_checkout / "nested-proof.txt").read_text() == "nested edit\n", nested_run
+    assert not (nested / "nested-proof.txt").exists(), nested_run
+    passed("a nested repository uses its own native project worktree and completes worker dispatch")
 
     report("WORKFLOW_PAUSE_FIRST", {"value": 3}, wait=True)
     report("WORKFLOW_PAUSE_SECOND", {"value": 4})

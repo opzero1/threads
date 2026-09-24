@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Plugin } from "@opencode/plugin";
@@ -51,6 +51,8 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
   const deliveryTexts: string[] = [];
   let profileSystem = "profile-v1";
   const saved = new Map<string, string>();
+  const worktreeProjects: string[] = [];
+  let worktreeGate: { entered: () => void; wait: Promise<void> } | undefined;
   const ctx = {
     storage,
     session: {
@@ -77,7 +79,19 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
         } };
       },
     },
-    worktree: { async list() { return []; }, async create() { throw new Error("not used"); } },
+    worktree: {
+      async list() { return []; },
+      async create(input: { projectID: string; directory: string; name: string }) {
+        worktreeProjects.push(input.projectID);
+        if (worktreeGate) {
+          const gate = worktreeGate;
+          worktreeGate = undefined;
+          gate.entered();
+          await gate.wait;
+        }
+        return { directory: join(input.directory, input.name) };
+      },
+    },
   } as unknown as Plugin.Context;
   let api: ReturnType<typeof workflowEngine>;
   let spawns = 0;
@@ -86,7 +100,9 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
   const spawnedStepKeys: string[] = [];
   const workerEvents: string[] = [];
   const validationErrors: string[] = [];
+  const reservations: string[] = [];
   const fakeWorkers = {
+    async reserveWorkflow(_actor: string, input: { key: string }) { reservations.push(input.key); return "source-project"; },
     async spawnWorkflow(actor: string, input: { key: string }, _runtime: unknown, metadata: Record<string, unknown>) {
       spawns++;
       workerEvents.push("spawn");
@@ -173,12 +189,20 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
   });
   api = engine();
   return {
-    api, ownerID, directory, deliveries, deliveryTexts, writes, validationErrors, spawns: () => spawns, file,
+    api, ownerID, directory, deliveries, deliveryTexts, writes, validationErrors, worktreeProjects, reservations, spawns: () => spawns, file,
     reopen: engine,
     setProfileSystem: (value: string) => { profileSystem = value; },
     setSaved: (name: string, value: string) => { saved.set(name, value); },
     spawnedStepKeys,
     workerEvents,
+    blockWorktreeCreation: () => {
+      let entered!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>((resolve) => { entered = resolve; });
+      const wait = new Promise<void>((resolve) => { release = resolve; });
+      worktreeGate = { entered, wait };
+      return { started, release };
+    },
     deleteWorker: (stepKey: string) => {
       const found = [...sessions.entries()].find(([, session]) =>
         (session.metadata as { opWorkflow?: { stepKey?: string } } | undefined)?.opWorkflow?.stepKey === stepKey
@@ -1052,6 +1076,67 @@ return await agent("inspect", { key: "outside", agent: "analyst", directory: ${J
     await fixture.api.dispose();
   });
 
+  test("allocates a nested source project's worktree under its own project ID", async () => {
+    const fixture = await harness("valid");
+    const source = join(fixture.directory, "nested-repository");
+    await mkdir(source);
+    const script = `
+export const meta = { name: "nested", description: "source project" };
+return await agent("check", { key: "nested", agent: "analyst", access: "write", isolation: "worktree", directory: ${JSON.stringify(source)} });`;
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "nested-source", script, args: null }), {
+      agent: "caller", model: { providerID: "test", id: "model" },
+    });
+    const run = await settled(fixture.api, fixture.ownerID, started.id);
+    expect(run.status).toBe("completed");
+    expect(fixture.worktreeProjects).toEqual(["source-project"]);
+    expect(run.steps[0].directory).toContain(".opencode-workflows/workflow-");
+    await fixture.api.dispose();
+  });
+
+  test("queued worktree steps wait for a worker permit before reserving sessions", async () => {
+    const fixture = await harness("manual", 2);
+    const script = `
+export const meta = { name: "queued-worktrees", description: "capacity" };
+return await parallel(["one", "two", "three"].map(key => () => agent(key, {
+  key, agent: "analyst", access: "write", isolation: "worktree"
+})));`;
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "queued-worktrees", script, args: null, concurrency: 1, maxAgents: 3 }), {
+      agent: "caller", model: { providerID: "test", id: "model" },
+    });
+    while (fixture.spawns() < 1) await Bun.sleep(2);
+    expect(fixture.reservations).toHaveLength(1);
+    for (let index = 0; index < 3; index++) {
+      while (fixture.spawns() < index + 1) await Bun.sleep(2);
+      await fixture.complete(fixture.spawnedStepKeys[index]);
+    }
+    expect((await settled(fixture.api, fixture.ownerID, started.id)).status).toBe("completed");
+    expect(fixture.reservations).toHaveLength(3);
+    await fixture.api.dispose();
+  });
+
+  test("pause during worktree allocation does not prompt a worker until resume", async () => {
+    const fixture = await harness("manual");
+    const gate = fixture.blockWorktreeCreation();
+    const script = `
+export const meta = { name: "pause-allocation", description: "dispatch gate" };
+return await agent("write", { key: "write", agent: "analyst", access: "write", isolation: "worktree" });`;
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "pause-allocation", script, args: null }), {
+      agent: "caller", model: { providerID: "test", id: "model" },
+    });
+    await gate.started;
+    await fixture.api.control(fixture.ownerID, { runID: started.id, action: "pause" });
+    await reaches(fixture.api, fixture.ownerID, started.id, "paused");
+    gate.release();
+    await Bun.sleep(20);
+    expect(fixture.spawns()).toBe(0);
+    expect((await fixture.api.get(fixture.ownerID, started.id)).status).toBe("paused");
+    await fixture.api.control(fixture.ownerID, { runID: started.id, action: "resume" });
+    while (fixture.spawns() < 1) await Bun.sleep(2);
+    await fixture.complete("write");
+    expect((await settled(fixture.api, fixture.ownerID, started.id)).status).toBe("completed");
+    await fixture.api.dispose();
+  });
+
   test("fails closed on a token budget after unmeasured native usage", async () => {
     const fixture = await harness("unmeasured");
     const budgeted = `
@@ -1134,6 +1219,29 @@ return await agent("write", { key: "write", agent: "analyst", access: "write" })
     const run = await reaches(reopened, fixture.ownerID, started.id, "interrupted");
     expect(run.error).toContain("external state is ambiguous");
     expect(run.steps[0].status).toBe("running");
+    expect(fixture.spawns()).toBe(1);
+    await reopened.dispose();
+  });
+
+  test("does not reserve a replacement for a missing dispatched worktree worker with a pending profile", async () => {
+    const fixture = await harness("manual");
+    const write = `
+export const meta = { name: "missing-worktree", description: "ambiguous dispatch" };
+return await agent("write", { key: "write", agent: "analyst", access: "write", isolation: "worktree" });`;
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "missing-worktree", script: write, args: null }), {
+      agent: "caller", model: { providerID: "test", id: "model" },
+    });
+    while (!fixture.spawnedStepKeys.includes("write")) await Bun.sleep(2);
+    await fixture.api.dispose();
+    await fixture.mutateRun(started.id, (run) => {
+      run.steps[0].profileFingerprint = `pending:${run.steps[0].profileFingerprint}`;
+    });
+    fixture.deleteWorker("write");
+    const reopened = fixture.reopen();
+    await reopened.control(fixture.ownerID, { runID: started.id, action: "resume" });
+    const run = await reaches(reopened, fixture.ownerID, started.id, "interrupted");
+    expect(run.error).toContain("external state is ambiguous");
+    expect(fixture.reservations).toHaveLength(1);
     expect(fixture.spawns()).toBe(1);
     await reopened.dispose();
   });

@@ -166,14 +166,15 @@ export async function workflowDirectory(
   run: WorkflowRun,
   input: WorkflowAgentInput,
   namespacedKey: string,
+  projectID = run.projectID,
 ): Promise<string> {
   const plan = workflowDirectoryPlan(run, input, namespacedKey);
   if (input.isolation === "shared") return plan.directory;
-  const inventory = await ctx.worktree.list({ projectID: run.projectID });
+  const inventory = await ctx.worktree.list({ projectID });
   if (inventory.some((entry) => entry.directory === plan.directory)) return plan.directory;
   try {
     const created = await ctx.worktree.create({
-      projectID: run.projectID,
+      projectID,
       from: plan.source,
       directory: plan.parent,
       name: plan.name,
@@ -183,7 +184,7 @@ export async function workflowDirectory(
     }
     return created.directory;
   } catch (error) {
-    const reconciled = (await ctx.worktree.list({ projectID: run.projectID }))
+    const reconciled = (await ctx.worktree.list({ projectID }))
       .find((entry) => entry.directory === plan.directory);
     if (reconciled) return reconciled.directory;
     throw error;

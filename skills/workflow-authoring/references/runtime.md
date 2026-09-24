@@ -23,7 +23,7 @@ The body supports top-level `await`, ordinary data transformations, branching, a
 | `schema` | Optional JSON Schema for the result. Invalid schemas fail before dispatch. |
 | `access` | `read` by default: only the profile's permitted read, glob, grep, webfetch, websearch, and skill tools. `write` permits the selected profile's other tools. |
 | `isolation` | `shared` by default, or `worktree` for a retained isolated checkout. Creating a worktree requires `access: "write"`; later readers can use its returned `directory`. |
-| `directory` | Optional existing directory inside the owner project or one of its registered worktrees. Symlinks are resolved before containment checks. |
+| `directory` | Optional existing directory beneath the owner session's directory or in one of its registered worktrees. Symlinks are resolved before containment checks. For another repository beneath that directory, worktree isolation uses the source repository's project and configured worktree strategy. |
 | `timeoutMs` | Optional step timeout, bounded by the run's execution policy. |
 
 Workers submit `workflows_result({ verdict, summary, evidence, result })`. Invalid results return a validation error so the worker can repair its output. A native execution that ends without a result has no task verdict.
