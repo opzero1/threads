@@ -7,6 +7,7 @@ class Provider:
     def __init__(self):
         self.requests = []
         self.responses = {}
+        self.failed_once = set()
         self.cancelled = 0
         self.release = threading.Event()
         provider = self
@@ -20,14 +21,23 @@ class Provider:
                 provider.requests.append(request)
                 messages = request.get("messages", [])
                 matches = [
-                    (index, value)
+                    (index, key, value)
                     for index, message in enumerate(messages)
                     if message.get("role") == "user"
                     for key, value in provider.responses.items()
                     if key in str(message.get("content", ""))
                 ]
-                position, selected = matches[-1] if matches else (-1, None)
+                position, marker, selected = matches[-1] if matches else (-1, None, None)
                 tools = [message for message in messages[position + 1:] if message.get("role") == "tool"]
+                if selected and (selected.get("error_always") or
+                                 (selected.get("error_once_after_tool") and tools and marker not in provider.failed_once)):
+                    provider.failed_once.add(marker)
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"error": {"type": "invalid_request_error", "message":
+                        "This model does not support assistant message prefill. The conversation must end with a user message."}}).encode())
+                    return
                 sequence = selected.get("sequence") if selected else None
                 if sequence:
                     selected = sequence[len(tools)] if len(tools) < len(sequence) else None
