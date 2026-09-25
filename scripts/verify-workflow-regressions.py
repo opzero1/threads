@@ -22,7 +22,9 @@ artifacts.mkdir(parents=True, exist_ok=True)
 
 def source_hash():
     digest = hashlib.sha256()
-    for path in [target / "index.ts", target / "tui.ts", target / "package.json", *sorted((target / "src").glob("*.ts")), *sorted((target / "src").glob("*.tsx"))]:
+    for path in [target / "index.ts", target / "tui.ts", target / "tui.js", target / "package.json", *sorted((target / "src").glob("*.ts")), *sorted((target / "src").glob("*.tsx"))]:
+        if not path.exists():
+            continue
         digest.update(str(path.relative_to(target)).encode())
         digest.update(path.read_bytes())
     return digest.hexdigest()
@@ -98,6 +100,45 @@ def report(marker, value):
     provider.responses[marker] = {"name": "workflows_result", "arguments": {
         "verdict": "PASS", "summary": "Native regression result", "evidence": ["deterministic provider"], "result": value,
     }}
+
+
+def assistant_prefill_repair():
+    marker = "REGRESSION_PREFILL_FAILURE"
+    provider.responses[marker] = {
+        "error_once_after_tool": True,
+        "name": "read",
+        "arguments": {"path": str(sandbox.directory / "README.md")},
+    }
+    report("The provider rejected the previous turn because this model requires a user message", {"recovered": True})
+    run = start("assistant-prefill-repair", f'''return await agent("{marker}", {{key:"prefill",agent:"regression-role",access:"write",directory:"{sandbox.directory}",schema:{{type:"object",properties:{{recovered:{{type:"boolean"}}}},required:["recovered"]}}}});''')
+    final = settled(run)
+    step = final["steps"][0]
+    assert step["report"]["result"] == {"recovered": True}, final
+    worker_messages = messages(step["workerID"])
+    failures = [m for m in worker_messages if m["type"] == "assistant" and "prefill" in str(m.get("error", ""))]
+    assert len(failures) == 1, failures
+    reads = [part for m in worker_messages if m["type"] == "assistant" for part in m["content"]
+             if part["type"] == "tool" and part["name"] == "read"]
+    assert len(reads) == 1, reads
+    return {"worker": step["workerID"], "failures": len(failures), "reads": len(reads)}
+
+
+def assistant_prefill_stops_after_repair():
+    marker = "REGRESSION_PREFILL_PERSISTENT"
+    provider.responses[marker] = {
+        "error_once_after_tool": True,
+        "name": "read",
+        "arguments": {"path": str(sandbox.directory / "README.md")},
+    }
+    provider.responses["The provider rejected the previous turn because this model requires a user message"] = {"error_always": True}
+    run = start("assistant-prefill-stops", f'''return await agent("{marker}", {{key:"prefill",agent:"regression-role",access:"write",directory:"{sandbox.directory}"}});''')
+    final = settled(run, "failed")
+    step = final["steps"][0]
+    worker_messages = messages(step["workerID"])
+    failures = [m for m in worker_messages if m["type"] == "assistant" and "prefill" in str(m.get("error", ""))]
+    repairs = [m for m in worker_messages if m["type"] == "synthetic" and "The provider rejected the previous turn" in m.get("text", "")]
+    assert len(failures) == 2 and len(repairs) == 1 and step["status"] == "failed", final
+    return {"worker": step["workerID"], "failures": len(failures), "repairs": len(repairs)}
 
 
 def restart(hard=False):
@@ -381,6 +422,8 @@ def runtime_deadline():
 
 
 cases = {
+    "assistant-prefill-repair": assistant_prefill_repair,
+    "assistant-prefill-stops": assistant_prefill_stops_after_repair,
     "queued-budget": token_budget,
     "failed-usage": failed_usage,
     "checkpoint-state": checkpoint_state,
