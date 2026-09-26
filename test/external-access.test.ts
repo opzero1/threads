@@ -1,15 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Plugin } from "@opencode/plugin";
 import type { Permission } from "@opencode/schema/permission";
 import { Session } from "@opencode/schema/session";
-import { recordedGrants, resolveGrantedPaths, withResolvedGrants } from "../src/external-access";
+import { projectRoot, recordedGrants, resolveGrantedPaths, withResolvedGrants } from "../src/external-access";
 import { permissionMatches } from "../src/permissions";
 import { threads, workerIdentity } from "../src/threads";
 import { WorkflowAgentInput, type WorkflowRun } from "../src/workflow-types";
-import { workflowSourceDirectory } from "../src/workflow-worker";
+import { assertGrantedProject, workflowSource } from "../src/workflow-worker";
 
 const temporary: string[] = [];
 afterEach(async () => Promise.all(temporary.splice(0).map((path) => rm(path, { recursive: true, force: true }))));
@@ -73,11 +73,81 @@ describe("workflow directory containment", () => {
   test("a step may run inside a granted path but not beside it", async () => {
     const { refs, other, project } = await scratch();
     const step = (directory: string, paths?: string[]) => WorkflowAgentInput.parse({ key: "a", prompt: "p", agent: "reader", directory, paths });
-    expect(await workflowSourceDirectory(ctx(), run(project), step(join(refs, "nested"), [refs]))).toBe(join(refs, "nested"));
-    expect(await workflowSourceDirectory(ctx(), run(project), step(refs, [refs]))).toBe(refs);
-    await expect(workflowSourceDirectory(ctx(), run(project), step(other, [refs]))).rejects.toThrow("or a granted path");
-    await expect(workflowSourceDirectory(ctx(), run(project), step(refs))).rejects.toThrow("inside the owner project");
-    expect(await workflowSourceDirectory(ctx([refs]), run(project), step(refs))).toBe(refs);
+    expect(await workflowSource(ctx(), run(project), step(join(refs, "nested"), [refs]))).toEqual({ directory: join(refs, "nested"), granted: true });
+    expect(await workflowSource(ctx(), run(project), step(refs, [refs]))).toEqual({ directory: refs, granted: true });
+    await expect(workflowSource(ctx(), run(project), step(other, [refs]))).rejects.toThrow("or a granted path");
+    await expect(workflowSource(ctx(), run(project), step(refs))).rejects.toThrow("inside the owner project");
+    expect(await workflowSource(ctx([refs]), run(project), step(refs))).toEqual({ directory: refs, granted: false });
+    // The owner's own project and worktrees need no project check, even when a grant also covers them.
+    expect(await workflowSource(ctx(), run(project), step(project, [project]))).toEqual({ directory: project, granted: false });
+  });
+});
+
+function git(cwd: string, ...args: string[]) {
+  const result = Bun.spawnSync(["git", "-c", "user.name=test", "-c", "user.email=test@example.test", ...args], { cwd, stderr: "pipe" });
+  if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr.toString()}`);
+}
+
+async function repository(path: string) {
+  await mkdir(join(path, "project"), { recursive: true });
+  await mkdir(join(path, "private"));
+  await writeFile(join(path, "top.txt"), "top\n");
+  git(dirname(path), "init", "-q", "-b", "main", path);
+  git(path, "add", "-A");
+  git(path, "commit", "-q", "-m", "base");
+  return path;
+}
+
+describe("worker project scope", () => {
+  // Each expectation repeats what probe_scope.py observed on OpenCode 2.0.16: files under the returned
+  // directory were read without an external_directory check, and files outside it were denied.
+  test("project roots follow git discovery and never fall short of OpenCode's local scope", async () => {
+    const { directory } = await scratch();
+    const plain = join(directory, "plain");
+    await mkdir(join(plain, "inner"), { recursive: true });
+    const repo = await repository(join(directory, "repo"));
+    git(repo, "worktree", "add", "-q", "-b", "linked", join(directory, "repo-wt"));
+    const nested = join(repo, "nested-repo");
+    await mkdir(nested);
+    git(repo, "init", "-q", "-b", "main", nested);
+    await mkdir(join(repo, "invalid-directory", ".git"), { recursive: true });
+    await mkdir(join(repo, "invalid-file"));
+    await writeFile(join(repo, "invalid-file", ".git"), "garbage\n");
+    await mkdir(join(directory, "marker", ".git"), { recursive: true });
+    await mkdir(join(directory, "marker", "inner"));
+
+    expect(await projectRoot(join(plain, "inner"))).toBe(join(plain, "inner"));
+    expect(await projectRoot(join(repo, "project"))).toBe(repo);
+    expect(await projectRoot(join(directory, "repo-wt"))).toBe(join(directory, "repo-wt"));
+    expect(await projectRoot(nested)).toBe(nested);
+    // git skips an invalid .git directory, stops with an error at an invalid .git file, and finds no
+    // repository above a marker outside one.
+    expect(await projectRoot(join(repo, "invalid-directory"))).toBe(repo);
+    expect(await projectRoot(join(repo, "invalid-file"))).toBe(join(repo, "invalid-file"));
+    expect(await projectRoot(join(directory, "marker", "inner"))).toBe(join(directory, "marker", "inner"));
+  });
+
+  test("a step moved into a grant keeps its project inside the grants and clear of explicit denies", async () => {
+    const { directory, refs } = await scratch();
+    const repo = await repository(join(directory, "repo"));
+    const deny = (resource: string, action = "external_directory"): Rule => ({ action, resource, effect: "deny" });
+    // Outside a repository the worker's project is its directory.
+    await assertGrantedProject([], [], [refs], join(refs, "nested"));
+    await assertGrantedProject([deny(`${refs}/other/*`), deny("*", "*")], [], [refs], join(refs, "nested"));
+    await expect(assertGrantedProject([deny(`${refs}/nested/*`)], [], [refs], join(refs, "nested")))
+      .rejects.toThrow(`would make ${join(refs, "nested")} local to its worker, where the explicit external_directory deny (${refs}/nested/*) cannot apply`);
+    await expect(assertGrantedProject([], [deny("*/nested/*")], [refs], refs)).rejects.toThrow("deny (*/nested/*)");
+    await expect(assertGrantedProject([deny(`${refs}/nested/*`, "*")], [], [refs], refs)).rejects.toThrow(`deny (${refs}/nested/*)`);
+    // Inside a repository the whole worktree is local, including paths outside the step's directory.
+    await assertGrantedProject([], [], [repo], join(repo, "project"));
+    await expect(assertGrantedProject([deny(`${repo}/private/*`)], [], [repo], join(repo, "project")))
+      .rejects.toThrow(`would make ${repo} local`);
+    await expect(assertGrantedProject([], [], [join(repo, "project")], join(repo, "project")))
+      .rejects.toThrow(`Workflow directory ${join(repo, "project")} is in project ${repo}, which extends beyond its granted paths`);
+    // A planned worktree checkout becomes the worker's project as well.
+    const checkout = join(directory, ".opencode-workflows", "workflow-checkout");
+    await expect(assertGrantedProject([deny(`${directory}/.opencode-workflows/*`)], [], [repo], repo, checkout))
+      .rejects.toThrow(`would make ${checkout} local`);
   });
 });
 
@@ -192,6 +262,25 @@ describe("managed workers with grants", () => {
     await expect(fixture.api.spawn(fixture.coordinatorID, { ...base, key: "missing", paths: [join(fixture.directory, "missing")] }, fixture.runtime)).rejects.toThrow("existing directory");
     await expect(fixture.api.spawn(fixture.coordinatorID, { ...base, key: "root", paths: ["/"] }, fixture.runtime)).rejects.toThrow("filesystem root");
     await expect(fixture.api.spawn(fixture.coordinatorID, { ...base, key: "guarded", agent: "guarded", paths: [fixture.refs] }, fixture.runtime)).rejects.toThrow("explicit external_directory deny");
+    expect(fixture.created).toHaveLength(0);
+    expect([...fixture.storage.keys()]).toEqual([]);
+  });
+
+  test("an exact deny of a granted directory itself fails before a worker session or index entry exists", async () => {
+    const fixture = await fakeThreads();
+    const exact: Rule = { action: "external_directory", resource: fixture.refs, effect: "deny" };
+    const blocked = `Granted path ${fixture.refs} is blocked by an explicit external_directory deny (${fixture.refs})`;
+    const ownerID = Session.ID.make(fixture.coordinatorID);
+    const base = { title: "Exact", directory: fixture.worker, task: "Read refs", paths: [fixture.refs] };
+    const workflow = (key: string, agent: string, access: "read" | "write") => fixture.api.spawnWorkflow(fixture.coordinatorID,
+      { ...base, key: `workflow:wfr_test:${key}`, agent }, fixture.runtime, { ownerID, runID: "wfr_test", stepKey: key, callerAgent: "build", access });
+    fixture.profiles["root-guarded"] = [...defaults, exact];
+    await expect(fixture.api.spawn(fixture.coordinatorID, { ...base, key: "role", agent: "root-guarded" }, fixture.runtime)).rejects.toThrow(blocked);
+    for (const access of ["read", "write"] as const) await expect(workflow(`role-${access}`, "root-guarded", access)).rejects.toThrow(blocked);
+    fixture.sessions.get(fixture.coordinatorID)!.permissions = [exact];
+    await expect(fixture.api.spawn(fixture.coordinatorID, { ...base, key: "coordinator", agent: "writer" }, fixture.runtime)).rejects.toThrow(blocked);
+    await expect(fixture.api.spawn(fixture.coordinatorID, { ...base, key: "inherited" }, fixture.runtime)).rejects.toThrow(blocked);
+    for (const access of ["read", "write"] as const) await expect(workflow(`coordinator-${access}`, "writer", access)).rejects.toThrow(blocked);
     expect(fixture.created).toHaveLength(0);
     expect([...fixture.storage.keys()]).toEqual([]);
   });

@@ -29,11 +29,12 @@ import {
   type WorkflowSettlement as Settlement,
 } from "./workflow-types";
 import {
+  assertGrantedProject,
   interruptWorkflowWorkers,
   withWorkflowSlot,
   workflowDirectory,
   workflowDirectoryPlan,
-  workflowSourceDirectory,
+  workflowSource,
   workflowTask,
 } from "./workflow-worker";
 
@@ -390,17 +391,22 @@ export function workflowEngine(
         const input = await withResolvedGrants(parsed);
         const requestFingerprint = workflowHash(input);
         const beforeAdmission = await store.get(runID);
-        const source = await workflowSourceDirectory(ctx, beforeAdmission, input);
+        const { directory: source, granted } = await workflowSource(ctx, beforeAdmission, input);
         const directoryInput = { ...input, directory: source };
         const owner = await ctx.session.get({ sessionID: beforeAdmission.ownerID });
         const caller = await ctx.agent.get({ agentID: beforeAdmission.callerAgent, location: owner.location });
-        requireDelegation([...caller.data.permissions, ...(owner.permissions ?? [])], input.agent);
+        const inherited = [...caller.data.permissions, ...(owner.permissions ?? [])];
+        requireDelegation(inherited, input.agent);
         const sourceWorker = beforeAdmission.steps.find((step) => step.directory === source);
         if (sourceWorker && options.warmWorker) {
           const existing = await nativeWorker(sourceWorker.workerID);
           if (existing) await options.warmWorker(existing.id);
         }
         const sourceProfile = await agentProfile(input.agent, source);
+        if (granted) {
+          const worktree = input.isolation === "worktree" ? workflowDirectoryPlan(beforeAdmission, directoryInput, key).directory : undefined;
+          await assertGrantedProject(inherited, sourceProfile.data.permissions, input.paths, source, worktree);
+        }
         const sourceModel = sourceProfile.data.model ?? beforeAdmission.model;
         const sourceProfileFingerprint = workflowHash({
           model: sourceModel,

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Permission } from "@opencode/schema/permission";
 import { assertGrantsReachable, grantAccess, workerRestrictions } from "../src/external-access";
-import { delegationEffect, permissionMatches } from "../src/permissions";
+import { delegationEffect, permissionMatches, permissionReaches } from "../src/permissions";
 import { workflowPermissions } from "../src/threads";
 
 test("named delegation follows ordered action and agent-ID wildcards", () => {
@@ -16,6 +16,22 @@ test("named delegation follows ordered action and agent-ID wildcards", () => {
   expect(delegationEffect(rules, "vera-core")).toBe("allow");
   expect(delegationEffect(rules, "general")).toBe("allow");
   expect(delegationEffect([], "vera-core")).toBe("ask");
+});
+
+test("a pattern reaches a directory when it matches the directory or a path beneath it", () => {
+  const root = "/work/refs";
+  for (const pattern of ["*", "/work/*", "/work/refs", "/work/refs/*", "/work/refs/private/*", "*/private/*", "/work/r?fs/*", "*refs*", "\\work\\refs\\*", "/work/re*/x", "/work/*/private"]) {
+    expect({ pattern, reaches: permissionReaches(pattern, root) }).toEqual({ pattern, reaches: true });
+  }
+  for (const pattern of ["/work/refs-other/*", "/work/ref", "/work/refsX/*", "/elsewhere/*", "/work", "work/refs/*"]) {
+    expect({ pattern, reaches: permissionReaches(pattern, root) }).toEqual({ pattern, reaches: false });
+  }
+  // Reaching patterns match a real value at or beneath the root; the others match none of these.
+  expect(permissionMatches("/work/re*/x", `${root}/x`)).toBe(true);
+  expect(permissionMatches("/work/*/private", `${root}/private`)).toBe(true);
+  for (const value of [root, `${root}/*`, `${root}/private/*`, `${root}/x`]) {
+    for (const pattern of ["/work/refs-other/*", "/work/ref", "/work/refsX/*", "/work", "work/refs/*"]) expect(permissionMatches(pattern, value)).toBe(false);
+  }
 });
 
 test("agent-ID matching is whole-value and regex punctuation is literal", () => {
@@ -192,6 +208,26 @@ describe("coordinator grants", () => {
     expect(() => assertGrantsReachable([...guarded, ...denied], [refs])).toThrow("explicit external_directory deny (/work/*)");
     const baseline = workflowPermissions([...defaults, { action: "*", resource: "*", effect: "deny" }], { access: "read", role: readOnly, paths: [refs] });
     expect(() => assertGrantsReachable([...readOnly, ...baseline], [refs])).not.toThrow();
+  });
+
+  test("an exact deny of the granted directory itself is rejected for the coordinator and the role", () => {
+    const exact: Rule = { action: "external_directory", resource: refs, effect: "deny" };
+    const guarded: Rule[] = [...permissive, exact];
+    for (const access of ["read", "write"] as const) {
+      const coordinator = workflowPermissions([...defaults, exact], { access, role: permissive, paths: [refs] });
+      expect(decide(permissive, coordinator, ...ext(`${refs}/*`))).toBe("allow");
+      expect(() => assertGrantsReachable([...permissive, ...coordinator], [refs])).toThrow(`explicit external_directory deny (${refs})`);
+      const role = workflowPermissions(defaults, { access, role: guarded, paths: [refs] });
+      expect(() => assertGrantsReachable([...guarded, ...role], [refs])).toThrow(`explicit external_directory deny (${refs})`);
+    }
+    const pattern: Rule = { action: "external_directory", resource: "*/refs", effect: "deny" };
+    const managed = [...workerRestrictions(defaults, permissive), ...grantAccess([...defaults, pattern], permissive, [refs])];
+    expect(() => assertGrantsReachable([...permissive, ...managed], [refs])).toThrow("explicit external_directory deny (*/refs)");
+    const managedRole = [...workerRestrictions(defaults, guarded), ...grantAccess(defaults, guarded, [refs])];
+    expect(() => assertGrantsReachable([...guarded, ...managedRole], [refs])).toThrow(`explicit external_directory deny (${refs})`);
+    const inner: Rule = { action: "external_directory", resource: `${refs}/private`, effect: "deny" };
+    const usable = workflowPermissions([...defaults, inner], { access: "write", role: permissive, paths: [refs] });
+    expect(() => assertGrantsReachable([...permissive, ...usable], [refs])).not.toThrow();
   });
 
   test("workers cannot widen grants through their own rules", () => {

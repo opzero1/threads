@@ -1,5 +1,6 @@
-import { realpath, stat } from "node:fs/promises";
-import { dirname, isAbsolute } from "node:path";
+import { constants } from "node:fs";
+import { access, lstat, readFile, realpath, stat } from "node:fs/promises";
+import { dirname, isAbsolute, join } from "node:path";
 import type { Permission } from "@opencode/schema/permission";
 import { z } from "zod";
 import { permissionMatches } from "./permissions";
@@ -79,24 +80,56 @@ export function workerRestrictions(inherited: Permission.Ruleset, role: Permissi
   ];
 }
 
-// Grants follow every restriction so they win over asks and catch-all baselines. Any other
-// external_directory deny from the coordinator or the role is reasserted after them and still wins.
+// A catch-all `* *` deny is a baseline that grants override. Any other external_directory deny from
+// the coordinator or the role is explicit.
+export function explicitDenies(inherited: Permission.Ruleset, role: Permission.Ruleset) {
+  return [...inherited, ...role].filter((rule) =>
+    rule.effect === "deny" && governsExternal(rule) && !(wildcard(rule.action) && wildcard(rule.resource)));
+}
+
+// Grants follow every restriction so they win over asks and catch-all baselines. Explicit denies are
+// reasserted after them and still win.
 export function grantAccess(inherited: Permission.Ruleset, role: Permission.Ruleset, paths: readonly string[] | undefined): Permission.Rule[] {
   if (paths === undefined || paths.length === 0) return [];
-  const explicit = [...inherited, ...role].filter((rule) =>
-    rule.effect === "deny" && governsExternal(rule) && !(wildcard(rule.action) && wildcard(rule.resource)));
   return [
     ...paths.flatMap((path) => [external(path, "allow"), external(`${path}/*`, "allow")]),
-    ...explicit.map((rule) => external(rule.resource, "deny")),
+    ...explicitDenies(inherited, role).map((rule) => external(rule.resource, "deny")),
   ];
 }
 
-// `rules` are the worker's effective rules: its role's rules followed by its session rules.
+// `rules` are the worker's effective rules: its role's rules followed by its session rules. A grant
+// covers its directory and its subtree, so a deny of either one blocks it.
 export function assertGrantsReachable(rules: Permission.Ruleset, paths: readonly string[] | undefined) {
   for (const path of paths ?? []) {
-    const decision = rules.findLast((rule) => governsExternal(rule) && permissionMatches(rule.resource, `${path}/*`));
-    if (decision?.effect !== "allow") {
-      throw new Error(`Granted path ${path} is blocked by an explicit external_directory deny (${decision?.resource ?? "no matching rule"})`);
+    for (const resource of [path, `${path}/*`]) {
+      const decision = rules.findLast((rule) => governsExternal(rule) && permissionMatches(rule.resource, resource));
+      if (decision?.effect !== "allow") {
+        throw new Error(`Granted path ${path} is blocked by an explicit external_directory deny (${decision?.resource ?? "no matching rule"})`);
+      }
     }
   }
+}
+
+// OpenCode skips external_directory checks inside a session's project: the git worktree that git
+// finds from its Location, or the Location itself outside a repository. This returns that directory
+// or a wider one, never a narrower one. A `.git` file ends the search because git either uses it or
+// fails. A `.git` directory ends it only if it looks valid, because git skips an invalid one.
+export async function projectRoot(directory: string) {
+  for (let current = directory; ; current = dirname(current)) {
+    const marker = join(current, ".git");
+    const entry = await stat(marker).catch(() => undefined);
+    if (entry?.isFile() || (entry?.isDirectory() && await repositoryMarker(marker))) return current;
+    if (dirname(current) === current) return directory;
+  }
+}
+
+// A stricter form of git's own check: a symbolic or hexadecimal HEAD that is not a symlink, plus
+// searchable `objects` and `refs`.
+async function repositoryMarker(marker: string) {
+  const head = join(marker, "HEAD");
+  if (!await lstat(head).then((entry) => entry.isFile(), () => false)) return false;
+  const content = await readFile(head, "utf8").catch(() => "");
+  const searchable = await Promise.all(["objects", "refs"].map((name) =>
+    access(join(marker, name), constants.X_OK).then(() => true, () => false)));
+  return /^(?:ref:\s*refs\/|[0-9a-f]{40}(?:[0-9a-f]{24})?\s*$)/.test(content) && searchable.every(Boolean);
 }

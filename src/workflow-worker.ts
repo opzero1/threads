@@ -2,7 +2,10 @@ import { createHash } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import type { Plugin } from "@opencode/plugin";
+import type { Permission } from "@opencode/schema/permission";
 import { Session } from "@opencode/schema/session";
+import { explicitDenies, projectRoot } from "./external-access";
+import { permissionReaches } from "./permissions";
 import type { threads } from "./threads";
 import type { WorkflowAgentInput, WorkflowRun } from "./workflow-types";
 
@@ -141,25 +144,48 @@ function inside(path: string, root: string) {
   return child === "" || (!child.startsWith("..") && !isAbsolute(child));
 }
 
-// `input.paths` must already be resolved grants; a step may run inside one of them.
-export async function workflowSourceDirectory(
+// `input.paths` must already be resolved grants; a step may run inside one of them. `granted` means
+// that only a grant admits the directory, which then needs assertGrantedProject.
+export async function workflowSource(
   ctx: Pick<Plugin.Context, "worktree">,
   run: WorkflowRun,
   input: WorkflowAgentInput,
 ) {
-  const source = await realpath(input.directory ?? run.directory);
-  const roots = [await realpath(run.directory), ...input.paths ?? []];
+  const directory = await realpath(input.directory ?? run.directory);
+  const owned = [await realpath(run.directory)];
   for (const entry of await ctx.worktree.list({ projectID: run.projectID })) {
     try {
-      roots.push(await realpath(entry.directory));
+      owned.push(await realpath(entry.directory));
     } catch {
       // Ignore stale inventory entries. They cannot authorize a real source directory.
     }
   }
-  if (!roots.some((root) => inside(source, root))) {
-    throw new Error("Workflow directory must be inside the owner project, one of its registered worktrees, or a granted path");
+  if (owned.some((root) => inside(directory, root))) return { directory, granted: false };
+  if ((input.paths ?? []).some((root) => inside(directory, root))) return { directory, granted: true };
+  throw new Error("Workflow directory must be inside the owner project, one of its registered worktrees, or a granted path");
+}
+
+// OpenCode checks external_directory only outside a worker's project. A step that a grant moves to
+// `directory` makes that project local, so an explicit deny there, or on anything beneath it, stops
+// applying. That project must stay within the grants and clear of explicit denies. `worktree` is a
+// planned checkout that becomes the worker's own project.
+export async function assertGrantedProject(
+  inherited: Permission.Ruleset,
+  role: Permission.Ruleset,
+  paths: readonly string[] | undefined,
+  directory: string,
+  worktree?: string,
+) {
+  const root = await projectRoot(directory);
+  if (!(paths ?? []).some((path) => inside(root, path))) {
+    throw new Error(`Workflow directory ${directory} is in project ${root}, which extends beyond its granted paths`);
   }
-  return source;
+  for (const local of worktree === undefined ? [root] : [root, worktree]) {
+    const deny = explicitDenies(inherited, role).find((rule) => permissionReaches(rule.resource, local));
+    if (deny) {
+      throw new Error(`Workflow directory ${directory} would make ${local} local to its worker, where the explicit external_directory deny (${deny.resource}) cannot apply`);
+    }
+  }
 }
 
 export async function workflowDirectory(

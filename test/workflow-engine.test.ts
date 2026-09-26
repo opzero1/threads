@@ -50,6 +50,7 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
   const deliveries: string[] = [];
   const deliveryTexts: string[] = [];
   let profileSystem = "profile-v1";
+  let profilePermissions: unknown[] = [{ action: "read", resource: "*", effect: "allow" }];
   const saved = new Map<string, string>();
   const worktreeProjects: string[] = [];
   let worktreeGate: { entered: () => void; wait: Promise<void> } | undefined;
@@ -74,7 +75,7 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
           model: undefined,
           permissions: agentID === "caller"
             ? [{ action: "subagent", resource: "analyst", effect: "allow" }]
-            : [{ action: "read", resource: "*", effect: "allow" }],
+            : profilePermissions,
           system: agentID === "analyst" ? profileSystem : undefined,
         } };
       },
@@ -194,6 +195,8 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
     api, ownerID, directory, deliveries, deliveryTexts, writes, validationErrors, worktreeProjects, reservations, spawnInputs, spawns: () => spawns, file,
     reopen: engine,
     setProfileSystem: (value: string) => { profileSystem = value; },
+    setProfilePermissions: (value: unknown[]) => { profilePermissions = value; },
+    setOwnerPermissions: (value: unknown[]) => { sessions.get(ownerID)!.permissions = value; },
     setSaved: (name: string, value: string) => { saved.set(name, value); },
     spawnedStepKeys,
     workerEvents,
@@ -1118,6 +1121,53 @@ return await agent("inspect", { key: "grant", agent: "analyst", paths: ${JSON.st
       expect(run.steps).toHaveLength(0);
     }
     expect(fixture.spawns()).toBe(0);
+    await fixture.api.dispose();
+  });
+
+  test("rejects a granted step directory whose project escapes its grants or an explicit deny, before admission", async () => {
+    const fixture = await harness("valid");
+    const outside = await realpath(await mkdtemp(join(tmpdir(), "workflow-grant-")));
+    temporary.push(outside);
+    const repo = join(outside, "repo");
+    for (const path of [join(outside, "private"), join(repo, "project"), join(repo, ".git", "objects"), join(repo, ".git", "refs")]) {
+      await mkdir(path, { recursive: true });
+    }
+    await Bun.write(join(repo, ".git", "HEAD"), "ref: refs/heads/main\n");
+    const attempt = async (key: string, options: Record<string, unknown>) => {
+      const script = `
+export const meta = { name: "${key}", description: "granted project" };
+return await agent("inspect", ${JSON.stringify({ key, agent: "analyst", ...options })});`;
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key, script, args: null }), {
+        agent: "caller", model: { providerID: "test", id: "model" },
+      });
+      return settled(fixture.api, fixture.ownerID, started.id);
+    };
+    const rejected = async (key: string, options: Record<string, unknown>, message: string) => {
+      const run = await attempt(key, options);
+      expect(run.status).toBe("failed");
+      expect(run.error).toContain(message);
+      expect(run.steps).toHaveLength(0);
+    };
+    const readProfile = { action: "read", resource: "*", effect: "allow" };
+    fixture.setOwnerPermissions([{ action: "external_directory", resource: `${outside}/private/*`, effect: "deny" }]);
+    await rejected("coordinator-directory", { directory: join(outside, "private"), paths: [outside] }, `explicit external_directory deny (${outside}/private/*)`);
+    await rejected("coordinator-root", { directory: outside, paths: [outside] }, `would make ${outside} local to its worker`);
+    fixture.setOwnerPermissions([]);
+    fixture.setProfilePermissions([readProfile, { action: "external_directory", resource: "*/private/*", effect: "deny" }]);
+    await rejected("role-repository", { directory: join(repo, "project"), paths: [repo] },
+      `would make ${repo} local to its worker, where the explicit external_directory deny (*/private/*) cannot apply`);
+    fixture.setProfilePermissions([readProfile]);
+    await rejected("widened", { directory: join(repo, "project"), paths: [join(repo, "project")] }, `is in project ${repo}, which extends beyond its granted paths`);
+    fixture.setOwnerPermissions([{ action: "external_directory", resource: `${dirname(outside)}/.opencode-workflows/*`, effect: "deny" }]);
+    await rejected("checkout", { directory: outside, paths: [outside], access: "write", isolation: "worktree" },
+      `would make ${dirname(outside)}/.opencode-workflows/workflow-`);
+    expect(fixture.spawns()).toBe(0);
+    expect(fixture.reservations).toEqual([]);
+    fixture.setOwnerPermissions([{ action: "external_directory", resource: `${outside}/private/*`, effect: "deny" }]);
+    const allowed = await attempt("repository", { directory: join(repo, "project"), paths: [repo] });
+    expect(allowed.status).toBe("completed");
+    expect(allowed.steps[0].directory).toBe(join(repo, "project"));
+    expect(fixture.spawns()).toBe(1);
     await fixture.api.dispose();
   });
 
