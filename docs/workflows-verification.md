@@ -50,7 +50,9 @@ Isolated runs on OpenCode 2.0.16 compared the new defaults with `fix/idle-locati
 
 ### Checks
 
-Typecheck and 136 unit tests passed, including 13 for options, footer counts, list grouping, worker states, and reported-tab closing. The native suites passed on OpenCode 2.0.16: `verify:footer` 17 checks, `verify:live` 28, `verify:activity` 36 with the sidebar option, `verify:tabs` 21 with automatic worker tabs, and `verify:idle-tabs` 3. `verify:workflows` passed 29 checks. `verify:live` no longer expects a fresh TUI to recover a running worker's tab; it now requires the footer to show the worker and no worker tab to open. `verify:package-ui` passed all seven checks on the packed tarball.
+Typecheck and 136 unit tests passed, including 13 for options, footer counts, list grouping, worker states, and reported-tab closing. The native suites passed on OpenCode 2.0.16: `verify:footer` 21 checks, `verify:live` 28, `verify:activity` 36 with the sidebar option, `verify:tabs` 21 with automatic worker tabs, and `verify:idle-tabs` 3. `verify:workflows` passed 29 checks. `verify:live` no longer expects a fresh TUI to recover a running worker's tab; it now requires the footer to show the worker and no worker tab to open. `verify:package-ui` passed all seven checks on the packed tarball.
+
+Four `verify:footer` checks were added after review. They cover a form request, which shows the same `? 1 needs input` marker as a permission request, and the list scope while a worker from another folder is focused. They also cover a reported worker's list-opened tab, which stays open while focused and closes once focus moves away. Temporary source mutations showed that three of them detect regressions: the scope check failed when the list followed `ctx.location`, the form check failed when attention ignored forms, and the focused-tab check failed when the focused guard was dropped.
 
 ## Version 0.2.5 idle Locations
 
@@ -58,7 +60,7 @@ On OpenCode 2.0.16 the TUI loads the Location of every open tab when it starts. 
 
 Threads 0.2.4 added to that set. Its tab reconciler opened a tab for every visible worker of an open coordinator, including finished `FAIL`, `INCONCLUSIVE`, and unreported workers. Its memory-only index repeated this on every TUI start. Three timers also sent located RPCs to the active session's Location while idle: the tab reconciler and workflow panel every 3 seconds, and Activity every 30 seconds. Without MCP servers, those RPCs alone re-woke an evicted Location within 3 seconds.
 
-Version 0.2.5 opens worker tabs automatically only while a worker is running or has not started its first execution. `/threads` still reopens finished workers. The timers send RPCs only while a tab is busy or needs input, a known worker is running, a workflow run can progress, or the workflow panel is open. Session events still refresh immediately. Activity's session list, individual session lookups, snapshot lookups, and input-request reads were measured and do not boot Locations, so they are unchanged.
+This section measured automatic worker tabs, which the footer defaults above replace; `workerTabs: "auto"` keeps them. With that option, version 0.2.5 opens worker tabs automatically only while a worker is running or has not started its first execution, and `/threads` still reopens finished workers. The timers send RPCs only while a tab is busy or needs input, a known worker is running, a workflow run can progress, or the workflow panel is open. Session events still refresh immediately. Activity's session list, individual session lookups, snapshot lookups, and input-request reads were measured and do not boot Locations, so they are unchanged.
 
 Isolated sandbox runs with the same fixture compared 0.2.4 and 0.2.5:
 

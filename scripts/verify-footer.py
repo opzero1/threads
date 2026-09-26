@@ -200,11 +200,27 @@ try:
     sandbox.api("POST", f"/api/session/{two}/permission/{request['id']}/reply", {"decision": "once"})
     idle(two)
     open_list()
+    # The focused worker runs in another folder, so ctx.location now names that folder.
+    wait(lambda: row(local["id"]) and row(coordinator_id) and row(one) and "Threads · ~/coordinator" in screen(), "TUI folder list while a worker from another folder is focused")
+    assert route() == one and row(elsewhere["id"]) is None and "Threads · ~/worker" not in screen(), (route(), row(elsewhere["id"]))
+    save("list-worker-focused")
+    passed("with a worker from another folder focused, the list stays scoped to the TUI folder")
     search("Footer coordinator", coordinator_id)
     os.write(terminal.master, b"\r")
     wait(lambda: route() == coordinator_id, "coordinator route")
     assert one in native_tabs() and two not in native_tabs(), native_tabs()
     passed("the list returns to the coordinator while the running worker's opened tab stays open")
+
+    provider.responses["FOOTER_FORM"] = {"name": "question", "arguments": {"questions": [{"question": "Continue the footer check?", "header": "Footer check", "options": [{"label": "Continue", "description": "Answer the fixture form"}]}]}}
+    sandbox.api("POST", f"/api/session/{two}/prompt", {"text": "FOOTER_FORM"})
+    form = eventually(lambda: next(iter(sandbox.api("GET", f"/api/session/{two}/form")["data"]), None))
+    wait(lambda: "? 1 needs input" in footer() and "1 worker" in footer(), "form attention marker")
+    assert two not in native_tabs() and route() == coordinator_id, (native_tabs(), route())
+    save("form-footer")
+    sandbox.api("POST", f"/api/session/{two}/form/{form['id']}/reply", {"answer": {"q0": "Continue"}})
+    idle(two)
+    wait(lambda: "needs input" not in footer() and "1 worker" in footer(), "form marker cleared")
+    passed("a worker waiting for a form answer gets the same attention marker without opening its tab, and the marker clears once answered")
 
     provider.release.set()
     eventually(lambda: (worker_view(coordinator_id, one)["report"] or {}).get("verdict") == "FAIL", timeout=60)
@@ -251,7 +267,8 @@ try:
     passed("/threads restores a hidden PASS worker into the list without opening its tab")
 
     provider.release.clear()
-    provider.responses["FOOTER_FOUR"] = {"name": "threads_report", "arguments": {"verdict": "PASS", "summary": "Footer worker four passed", "evidence": ["fixture"]}, "wait": True}
+    # FAIL keeps worker four visible, so only the list-opened rule can close its tab below.
+    provider.responses["FOOTER_FOUR"] = {"name": "threads_report", "arguments": {"verdict": "FAIL", "summary": "Footer worker four failed", "evidence": ["fixture"]}, "wait": True}
     four = spawn(coordinator_id, "four", "Footer worker four", "FOOTER_FOUR")
     wait(lambda: "1 worker" in footer(), "running footer before home")
     os.write(terminal.master, b"\x18n")
@@ -268,10 +285,25 @@ try:
     terminal.wait_for_match(lambda _: time.monotonic() - settled >= 7, "two missed-event refresh intervals", 10, False)
     assert four not in native_tabs() and one not in native_tabs() and three not in native_tabs(), native_tabs()
     passed("a fresh TUI shows the running worker in the footer and still opens no worker tabs")
+    open_list()
+    search("Footer worker four", four)
+    os.write(terminal.master, b"\r")
+    wait(lambda: route() == four and four in native_tabs(), "list-opened tab of the running worker")
     provider.release.set()
+    eventually(lambda: (worker_view(coordinator_id, four)["report"] or {}).get("verdict") == "FAIL", timeout=60)
     idle(four)
     wait(lambda: not indicator.search(footer()), "footer cleared after the last worker", 30)
     passed("the indicator disappears when the last worker finishes")
+    pause(4)
+    assert route() == four and four in native_tabs(), (route(), native_tabs())
+    save("reported-tab-focused")
+    passed("a reported worker's list-opened tab stays open while it is focused")
+    open_list()
+    search("Footer coordinator", coordinator_id)
+    os.write(terminal.master, b"\r")
+    wait(lambda: route() == coordinator_id and four not in native_tabs(), "list-opened tab closed after focus moved away", 30)
+    assert not worker_view(coordinator_id, four)["hidden"]
+    passed("that tab closes once focus moves to another conversation")
 
     cli["plugins"].append({"package": str(target), "options": {"activity": "sidebar"}})
     cli_path.write_text(json.dumps(cli))
