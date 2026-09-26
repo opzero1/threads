@@ -18,6 +18,8 @@ The panel shows phases, step outcomes, verdicts, evidence, retained directories,
 
 The navigator lists every run owned by the current coordinator session, including completed and failed runs. The detail panel shows one selected run. Other coordinator sessions have their own run lists.
 
+A worker that needs a directory outside its location can ask for your approval in its own conversation. Activity marks it as needing input, and the step waits for your answer. To avoid the prompt, name the directories the task needs in your request; the workflow grants them to a step with `paths`. Explicit denies in your configuration still apply.
+
 Ask the agent to inspect the run when you need its complete saved script or structured handoffs:
 
 ```text

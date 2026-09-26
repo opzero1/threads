@@ -141,13 +141,14 @@ function inside(path: string, root: string) {
   return child === "" || (!child.startsWith("..") && !isAbsolute(child));
 }
 
+// `input.paths` must already be resolved grants; a step may run inside one of them.
 export async function workflowSourceDirectory(
   ctx: Pick<Plugin.Context, "worktree">,
   run: WorkflowRun,
   input: WorkflowAgentInput,
 ) {
   const source = await realpath(input.directory ?? run.directory);
-  const roots = [await realpath(run.directory)];
+  const roots = [await realpath(run.directory), ...input.paths ?? []];
   for (const entry of await ctx.worktree.list({ projectID: run.projectID })) {
     try {
       roots.push(await realpath(entry.directory));
@@ -156,7 +157,7 @@ export async function workflowSourceDirectory(
     }
   }
   if (!roots.some((root) => inside(source, root))) {
-    throw new Error("Workflow directory must be inside the owner project or one of its registered worktrees");
+    throw new Error("Workflow directory must be inside the owner project, one of its registered worktrees, or a granted path");
   }
   return source;
 }

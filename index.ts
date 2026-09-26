@@ -44,7 +44,7 @@ export default Plugin.define({
       editor.add({
         name: "spawn",
         description:
-          "Delegate a task to a top-level worker in an existing absolute directory. Set agent to a configured profile (for example vera-core); its prompt, model preference, and permissions apply. Omit agent to inherit your active agent and model. Native subagent remains available within the selected profile's permissions and task's delegation limits. Workers cannot call threads_spawn. Reuse key only for identical requests, including agent.",
+          "Delegate a task to a top-level worker in an existing absolute directory. Set agent to a configured profile (for example vera-core); its prompt, model preference, and permissions apply. Omit agent to inherit your active agent and model. Set paths to existing absolute directories outside that directory that the worker may use without asking, within its permissions; explicit external_directory denies still win. Other directories follow the worker's permissions, and an inherited external_directory ask becomes an approval request in the worker's tab. Native subagent remains available within the selected profile's permissions and task's delegation limits. Workers cannot call threads_spawn. Reuse key only for identical requests, including agent and paths.",
         input: Spawn,
         output: WorkerView,
         options: {

@@ -8,8 +8,20 @@ import type { Permission } from "@opencode/schema/permission";
 import { Session } from "@opencode/schema/session";
 import { SessionMessage } from "@opencode/schema/session-message";
 import { z } from "zod";
+import {
+  asksExternal,
+  assertGrantsReachable,
+  EXTERNAL_DIRECTORY,
+  GRANTS_METADATA,
+  grantAccess,
+  grantNotice,
+  recordedGrants,
+  withResolvedGrants,
+  workerRestrictions,
+} from "./external-access";
 import { permissionMatches, requireDelegation } from "./permissions";
 import { Report, WorkerView } from "./rpc";
+import { GrantedPaths } from "./workflow-types";
 
 const sessionID = z.string().transform((value) => Session.ID.make(value));
 const messageID = z
@@ -38,6 +50,9 @@ export const Spawn = z
     agent: z.string().min(1).optional().describe(
       "Configured agent ID in the worker's directory. Omit to inherit the caller's agent and model.",
     ),
+    paths: GrantedPaths.optional().describe(
+      "Existing absolute directories outside the worker's directory that it may use without asking, within its permissions. Explicit external_directory denies still win. Unlisted directories follow the worker's own permissions.",
+    ),
   })
   .strict();
 export const Send = z
@@ -55,16 +70,18 @@ export const WorkflowWorker = z.object({
   callerAgent: z.string().min(1),
 }).strict();
 
-const digest = (parts: string[]) =>
+const digest = (parts: unknown[]) =>
   createHash("sha256").update(JSON.stringify(parts)).digest("hex");
 export const workerIdentity = (coordinatorID: string, key: string) =>
   Session.ID.make(`ses_${digest([coordinatorID, key]).slice(0, 32)}`);
+// Callers pass resolved grants. The object element cannot collide with a string agent ID.
 export const fingerprint = (input: z.infer<typeof Spawn>) =>
   digest([
     input.title,
     input.directory,
     input.task,
     ...(input.agent === undefined ? [] : [input.agent]),
+    ...(input.paths === undefined || input.paths.length === 0 ? [] : [{ paths: input.paths }]),
   ]);
 
 const locks = new Map<string, Promise<void>>();
@@ -120,18 +137,23 @@ export function workerLink(
   return link;
 }
 
-export function workflowPermissions(inherited: Permission.Ruleset, readProfile?: Permission.Ruleset): Permission.Ruleset {
-  const readActions = ["read", "glob", "grep", "webfetch", "websearch", "skill", "external_directory"];
+// `role` is the worker's configured profile. Read steps project it onto read-only actions; write
+// steps rely on it through the agent rules that precede these session rules.
+export function workflowPermissions(
+  inherited: Permission.Ruleset,
+  worker: { access: "read" | "write"; role: Permission.Ruleset; paths?: readonly string[] },
+): Permission.Ruleset {
+  const readActions = ["read", "glob", "grep", "webfetch", "websearch", "skill", EXTERNAL_DIRECTORY];
   return [
-    ...(readProfile === undefined ? [] : [
+    ...(worker.access === "read" ? [
       { action: "*", resource: "*", effect: "deny" as const },
       ...inherited.filter((rule) => rule.effect === "ask").map((rule) => ({ ...rule, effect: "deny" as const })),
-      ...readProfile.flatMap((rule) => readActions
+      ...worker.role.flatMap((rule) => readActions
         .filter((action) => permissionMatches(rule.action, action))
         .map((action) => ({ ...rule, action }))),
-    ]),
-    ...inherited.filter((rule) => readProfile === undefined ? rule.effect !== "allow" : rule.effect === "deny")
-      .map((rule) => ({ ...rule, effect: "deny" as const })),
+      ...inherited.filter((rule) => rule.effect === "deny"),
+    ] : workerRestrictions(inherited, worker.role)),
+    ...grantAccess(inherited, worker.role, worker.paths),
     { action: "subagent", resource: "*", effect: "deny" },
     { action: "threads_*", resource: "*", effect: "deny" },
     { action: "workflows_*", resource: "*", effect: "deny" },
@@ -160,6 +182,34 @@ export function threads(
   async function callerPermissions(session: NativeSession, agentID: string) {
     const agent = await ctx.agent.get({ agentID, location: session.location });
     return [...agent.data.permissions, ...(session.permissions ?? [])];
+  }
+
+  // A location loads its agents on first use, so a new worker directory can briefly report a
+  // configured agent as missing. Retry like the workflow engine's profile lookup.
+  async function rolePermissions(agentID: string, directory: string) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return (await ctx.agent.get({ agentID, location: { directory } })).data.permissions;
+      } catch (error) {
+        if (attempt >= 49 || !String(error).includes(`Agent not found: ${agentID}`)) throw error;
+        await Bun.sleep(100);
+      }
+    }
+  }
+
+  // Read workers start with an empty placeholder profile; prepareWorkflowPrompt applies the real
+  // profile from the worker's location. Grants are checked against that profile before creation.
+  async function workflowWorkerPermissions(
+    inherited: Permission.Ruleset,
+    agentID: string,
+    directory: string,
+    access: "read" | "write",
+    paths: readonly string[] | undefined,
+  ) {
+    const needsRole = paths !== undefined || (access === "write" && asksExternal(inherited));
+    const role = needsRole ? await rolePermissions(agentID, directory) : [];
+    assertGrantsReachable([...role, ...workflowPermissions(inherited, { access, role, paths })], paths);
+    return workflowPermissions(inherited, { access, role: access === "read" ? [] : role, paths });
   }
 
   async function prepareRole(
@@ -309,10 +359,12 @@ export function threads(
       if (!await initialized(session, link) && session.metadata?.opWorkflowAccess === "read") {
         const coordinator = await ctx.session.get({ sessionID: link.coordinatorID });
         const profile = await ctx.agent.get({ agentID: session.agent!, location: session.location });
-        await ctx.session.update({
-          sessionID: session.id,
-          permissions: workflowPermissions(await callerPermissions(coordinator, workflow.data.callerAgent), profile.data.permissions),
+        const paths = recordedGrants(session.metadata);
+        const permissions = workflowPermissions(await callerPermissions(coordinator, workflow.data.callerAgent), {
+          access: "read", role: profile.data.permissions, paths,
         });
+        assertGrantsReachable([...profile.data.permissions, ...permissions], paths);
+        await ctx.session.update({ sessionID: session.id, permissions });
       }
     },
     async hide(actor: string, input: z.infer<typeof WorkerTarget>) {
@@ -352,6 +404,7 @@ export function threads(
         ) {
           throw new Error("directory must be an existing absolute directory");
         }
+        const request = await withResolvedGrants(input);
         const workerID = workerIdentity(actor, input.key);
         let session = await ctx.session.get({ sessionID: workerID }).catch(
           (error: unknown) => {
@@ -377,32 +430,36 @@ export function threads(
           workerID,
           coordinatorID: actor,
           key: input.key,
-          fingerprint: fingerprint(input),
+          fingerprint: fingerprint(request),
           initialMessageID: SessionMessage.ID.create(),
           reportMessageID: SessionMessage.ID.create(),
         });
         if (!session) {
           const inherited = await callerPermissions(coordinator, runtime.agent);
           if (input.agent !== undefined) requireDelegation(inherited, input.agent);
+          // A role-selected worker inherits only the coordinator session's restrictions. Its role
+          // is loaded when a preserved ask or a grant must be checked against the role's denies.
+          const restricted = coordinator.permissions ?? [];
+          const role = input.agent !== undefined && (request.paths !== undefined || asksExternal(restricted))
+            ? await rolePermissions(input.agent, input.directory)
+            : [];
+          const permissions: Permission.Rule[] = [
+            ...(input.agent === undefined ? inherited : workerRestrictions(restricted, role)),
+            ...grantAccess(inherited, role, request.paths),
+            { action: "threads_report", resource: "*", effect: "allow" },
+          ];
+          assertGrantsReachable([...role, ...permissions], request.paths);
           session = await ctx.session.create({
             id: workerID,
             title: input.title,
             location: { directory: input.directory },
             agent: input.agent ?? runtime.agent,
             model: runtime.model,
-            permissions: [
-              ...(input.agent === undefined
-                ? inherited
-                : (coordinator.permissions ?? [])
-                    .filter((rule) => rule.effect !== "allow")
-                    .map((rule) => (
-                      { ...rule, effect: "deny" } satisfies Permission.Rule
-                    ))),
-              { action: "threads_report", resource: "*", effect: "allow" },
-            ],
+            permissions,
             metadata: {
               opThreads: proposed,
               ...(input.agent === undefined ? {} : { opThreadsRole: true }),
+              ...(request.paths === undefined ? {} : { [GRANTS_METADATA]: request.paths }),
             },
           });
         }
@@ -423,7 +480,7 @@ export function threads(
           metadata: input.agent === undefined
             ? undefined
             : { opThreadsCallerAgent: runtime.agent },
-          text: `${input.task}\n\nYou are a managed worker assigned to ${input.directory}. Work only within the assigned scope. You may use native subagent for bounded tasks or reviews when useful, within the brief's delegation limits and your permissions. Delegation is optional. Pass relevant context, scope, and constraints to each subagent. Do not call threads_spawn. Review your subagents' results and resolve any outstanding work before reporting. Only you call threads_report with the combined verdict, summary, and evidence; subagents return results to you. Runtime completion alone does not establish task success.`,
+          text: `${input.task}\n\nYou are a managed worker assigned to ${input.directory}. Work only within the assigned scope.${grantNotice(request.paths)} You may use native subagent for bounded tasks or reviews when useful, within the brief's delegation limits and your permissions. Delegation is optional. Pass relevant context, scope, and constraints to each subagent. Do not call threads_spawn. Review your subagents' results and resolve any outstanding work before reporting. Only you call threads_report with the combined verdict, summary, and evidence; subagents return results to you. Runtime completion alone does not establish task success.`,
         });
         if (input.agent !== undefined) {
           await ctx.storage.set(initializedKey(link), true);
@@ -450,9 +507,10 @@ export function threads(
           throw new Error("Workflow source must be an existing absolute directory");
         }
         if (input.agent === undefined) throw new Error("Workflow workers require an explicit role agent");
+        const request = await withResolvedGrants(input);
         const workerID = workerIdentity(actor, input.key);
         const proposed = Link.parse({
-          workerID, coordinatorID: actor, key: input.key, fingerprint: fingerprint(input),
+          workerID, coordinatorID: actor, key: input.key, fingerprint: fingerprint(request),
           initialMessageID: SessionMessage.ID.create(), reportMessageID: SessionMessage.ID.create(),
         });
         let session = await ctx.session.get({ sessionID: workerID }).catch((error: unknown) => {
@@ -470,11 +528,12 @@ export function threads(
           session = await ctx.session.create({
             id: workerID, title: input.title, location: { directory: sourceDirectory },
             model: runtime.model,
-            permissions: workflowPermissions(inherited, workflow.access === "read" ? [] : undefined),
+            permissions: await workflowWorkerPermissions(inherited, input.agent, sourceDirectory, workflow.access, request.paths),
             metadata: {
               opThreads: proposed, opThreadsRole: true,
               opWorkflow: { ownerID: workflow.ownerID, runID: workflow.runID, stepKey: workflow.stepKey, callerAgent: workflow.callerAgent },
               opWorkflowAccess: workflow.access,
+              ...(request.paths === undefined ? {} : { [GRANTS_METADATA]: request.paths }),
             },
           });
         }
@@ -516,6 +575,7 @@ export function threads(
           throw new Error("directory must be an existing absolute directory");
         }
         if (input.agent === undefined) throw new Error("Workflow workers require an explicit role agent");
+        const request = await withResolvedGrants(input);
         const workerID = workerIdentity(actor, input.key);
         let session = await ctx.session.get({ sessionID: workerID }).catch((error: unknown) => {
           const missing = MissingSession.safeParse(error);
@@ -526,7 +586,7 @@ export function threads(
           workerID,
           coordinatorID: actor,
           key: input.key,
-          fingerprint: fingerprint(input),
+          fingerprint: fingerprint(request),
           initialMessageID: SessionMessage.ID.create(),
           reportMessageID: SessionMessage.ID.create(),
         });
@@ -537,15 +597,17 @@ export function threads(
           }
           const inherited = await callerPermissions(coordinator, runtime.agent);
           requireDelegation(inherited, input.agent);
-          const restrictions = workflowPermissions(inherited, workflow.access === "read" ? [] : undefined);
           session = await ctx.session.create({
             id: workerID,
             title: input.title,
             location: { directory: input.directory },
             agent: input.agent,
             model: runtime.model,
-            permissions: restrictions,
-            metadata: { opThreads: proposed, opThreadsRole: true, opWorkflow: workflowMetadata, opWorkflowAccess: workflow.access },
+            permissions: await workflowWorkerPermissions(inherited, input.agent, input.directory, workflow.access, request.paths),
+            metadata: {
+              opThreads: proposed, opThreadsRole: true, opWorkflow: workflowMetadata, opWorkflowAccess: workflow.access,
+              ...(request.paths === undefined ? {} : { [GRANTS_METADATA]: request.paths }),
+            },
           });
         }
         const link = workerLink(session);
@@ -570,7 +632,7 @@ export function threads(
             id: link.initialMessageID,
             delivery: "queue",
             metadata: { opThreadsCallerAgent: runtime.agent, opWorkflowRunID: workflow.runID },
-            text: `${input.task}\n\nYou are a leaf workflow worker. Do not delegate, spawn or control other workers, or operate workflow controls. Work only in ${input.directory}. Finish by submitting one accepted workflows_result with a verdict, concise summary, evidence, and a result matching the requested JSON schema. If validation rejects your result, correct it and resubmit. Native completion without that validated report is not success.`,
+            text: `${input.task}\n\nYou are a leaf workflow worker. Do not delegate, spawn or control other workers, or operate workflow controls. Work only in ${input.directory}.${grantNotice(request.paths)} Finish by submitting one accepted workflows_result with a verdict, concise summary, evidence, and a result matching the requested JSON schema. If validation rejects your result, correct it and resubmit. Native completion without that validated report is not success.`,
           });
           await ctx.storage.set(initializedKey(link), true);
         }

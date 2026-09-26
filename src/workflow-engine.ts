@@ -4,6 +4,7 @@ import { Session } from "@opencode/schema/session";
 import { SessionMessage } from "@opencode/schema/session-message";
 import Ajv from "ajv";
 import { parseWorkflow, executeWorkflow, type WorkflowHost } from "./workflow-runtime";
+import { withResolvedGrants } from "./external-access";
 import { requireDelegation } from "./permissions";
 import {
   serialized,
@@ -378,12 +379,15 @@ export function workflowEngine(
     const hostFor = (prefix: string, depth: number): WorkflowHost => ({
       agent: async (raw) => {
         countCall();
-        const input = WorkflowAgentInput.parse(raw);
-        if (input.schema !== undefined) ajv.compile(input.schema);
-        const key = `${prefix}${input.key}`;
+        const parsed = WorkflowAgentInput.parse(raw);
+        if (parsed.schema !== undefined) ajv.compile(parsed.schema);
+        const key = `${prefix}${parsed.key}`;
         if (seen.has(key)) throw new Error(`Duplicate workflow agent key in this execution: ${key}`);
         seen.add(key);
         await waitUntilRunnable(runID, controller.signal);
+        // Resolved grants are part of the recorded input, so a replay whose paths now resolve
+        // elsewhere fails the fingerprint check instead of silently changing the grant.
+        const input = await withResolvedGrants(parsed);
         const requestFingerprint = workflowHash(input);
         const beforeAdmission = await store.get(runID);
         const source = await workflowSourceDirectory(ctx, beforeAdmission, input);
@@ -479,6 +483,7 @@ export function workflowEngine(
               directory: previous.directory,
               task: workflowTask(input),
               agent: input.agent,
+              paths: input.paths,
             }, source, runtime as Parameters<Threads["reserveWorkflow"]>[3], {
               ownerID: Session.ID.make(run.ownerID), runID: run.id, stepKey: key,
               callerAgent: run.callerAgent, access: input.access,
@@ -534,6 +539,7 @@ export function workflowEngine(
             directory,
             task: workflowTask(input),
             agent: input.agent,
+            paths: input.paths,
           }, runtime as Parameters<Threads["spawnWorkflow"]>[2], {
             ownerID: Session.ID.make(run.ownerID), runID: run.id, stepKey: key,
             callerAgent: run.callerAgent, access: input.access,

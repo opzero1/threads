@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Plugin } from "@opencode/plugin";
@@ -101,10 +101,12 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
   const workerEvents: string[] = [];
   const validationErrors: string[] = [];
   const reservations: string[] = [];
+  const spawnInputs: { key: string; directory?: string; paths?: string[] }[] = [];
   const fakeWorkers = {
     async reserveWorkflow(_actor: string, input: { key: string }) { reservations.push(input.key); return "source-project"; },
     async spawnWorkflow(actor: string, input: { key: string }, _runtime: unknown, metadata: Record<string, unknown>) {
       spawns++;
+      spawnInputs.push(structuredClone(input));
       workerEvents.push("spawn");
       spawnedStepKeys.push(String(metadata.stepKey));
       const workerID = workerIdentity(actor, input.key);
@@ -189,7 +191,7 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
   });
   api = engine();
   return {
-    api, ownerID, directory, deliveries, deliveryTexts, writes, validationErrors, worktreeProjects, reservations, spawns: () => spawns, file,
+    api, ownerID, directory, deliveries, deliveryTexts, writes, validationErrors, worktreeProjects, reservations, spawnInputs, spawns: () => spawns, file,
     reopen: engine,
     setProfileSystem: (value: string) => { profileSystem = value; },
     setSaved: (name: string, value: string) => { saved.set(name, value); },
@@ -1075,6 +1077,84 @@ return await agent("inspect", { key: "outside", agent: "analyst", directory: ${J
     expect(fixture.spawns()).toBe(0);
     await fixture.api.dispose();
   });
+
+  test("admits a step directory inside a granted path and forwards the resolved grant", async () => {
+    const fixture = await harness("valid");
+    const outside = await realpath(await mkdtemp(join(tmpdir(), "workflow-grant-")));
+    const aliases = await mkdtemp(join(tmpdir(), "workflow-grant-alias-"));
+    temporary.push(outside, aliases);
+    await mkdir(join(outside, "sub"));
+    await symlink(outside, join(aliases, "link"));
+    const granted = `
+export const meta = { name: "granted", description: "granted directory" };
+return await agent("inspect", { key: "granted", agent: "analyst", directory: ${JSON.stringify(join(outside, "sub"))}, paths: [${JSON.stringify(join(aliases, "link"))}] });`;
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "granted", script: granted, args: null }), {
+      agent: "caller", model: { providerID: "test", id: "model" },
+    });
+    const run = await settled(fixture.api, fixture.ownerID, started.id);
+    expect(run.status).toBe("completed");
+    expect(run.steps[0].input.paths).toEqual([outside]);
+    expect(run.steps[0].directory).toBe(join(outside, "sub"));
+    expect(fixture.spawnInputs.map(({ directory, paths }) => ({ directory, paths }))).toEqual([{ directory: join(outside, "sub"), paths: [outside] }]);
+    await fixture.api.dispose();
+  });
+
+  test("rejects invalid grants before admission", async () => {
+    const fixture = await harness("valid");
+    for (const [key, paths, message] of [
+      ["missing", [join(fixture.directory, "missing")], "existing directory"],
+      ["relative", ["relative"], "must be absolute"],
+      ["root", ["/"], "filesystem root"],
+    ] as const) {
+      const invalid = `
+export const meta = { name: "invalid-grant", description: "grant validation" };
+return await agent("inspect", { key: "grant", agent: "analyst", paths: ${JSON.stringify(paths)} });`;
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: `invalid-${key}`, script: invalid, args: null }), {
+        agent: "caller", model: { providerID: "test", id: "model" },
+      });
+      const run = await settled(fixture.api, fixture.ownerID, started.id);
+      expect(run.status).toBe("failed");
+      expect(run.error).toContain(message);
+      expect(run.steps).toHaveLength(0);
+    }
+    expect(fixture.spawns()).toBe(0);
+    await fixture.api.dispose();
+  });
+
+  for (const retarget of [false, true]) {
+    test(retarget ? "fails a replayed step whose granted path now resolves elsewhere" : "replays an unchanged grant without dispatching again", async () => {
+      const fixture = await harness("valid");
+      const scratch = await realpath(await mkdtemp(join(tmpdir(), "workflow-grant-")));
+      temporary.push(scratch);
+      const [first, second, link] = ["first", "second", "link"].map((name) => join(scratch, name));
+      await mkdir(first);
+      await mkdir(second);
+      await symlink(first, link);
+      const linked = `
+export const meta = { name: "linked", description: "grant replay" };
+const value = await agent("inspect", { key: "linked", agent: "analyst", paths: [${JSON.stringify(link)}] });
+await checkpoint("Continue?", { key: "continue" });
+return value;`;
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "linked", script: linked, args: null }), {
+        agent: "caller", model: { providerID: "test", id: "model" },
+      });
+      const waiting = await reaches(fixture.api, fixture.ownerID, started.id, "waiting");
+      expect(waiting.steps[0].input.paths).toEqual([first]);
+      await fixture.api.dispose();
+      if (retarget) {
+        await rm(link);
+        await symlink(second, link);
+      }
+      const reopened = fixture.reopen();
+      await reopened.control(fixture.ownerID, { runID: started.id, action: "resume", checkpointKey: "continue", response: true });
+      const run = await settled(reopened, fixture.ownerID, started.id);
+      expect(run.status).toBe(retarget ? "failed" : "completed");
+      if (retarget) expect(run.error).toContain("resumed with different input");
+      else expect(run.result).toEqual({ ok: true });
+      expect(fixture.spawns()).toBe(1);
+      await reopened.dispose();
+    });
+  }
 
   test("allocates a nested source project's worktree under its own project ID", async () => {
     const fixture = await harness("valid");

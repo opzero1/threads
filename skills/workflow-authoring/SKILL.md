@@ -9,6 +9,8 @@ Use a workflow for broad independent work or a pipeline whose later steps consum
 
 For work across repositories, put the coordinator session in a directory that contains the intended sources, then set each step's `directory` to its repository. The worker uses that repository's OpenCode project for worktree isolation. Choose the scoped common ancestor before starting the run; a prompt mentioning another absolute path does not grant directory access.
 
+When a step needs a directory outside its location, such as a reference repository, list it in the step's `paths`. The worker can then use that directory and its subdirectories without asking, within its `access`: a read step still cannot edit files or run commands there. A step's `directory` may also be inside a granted path. Explicit `external_directory` denies from the coordinator or the role still win. Without a grant, a directory that the coordinator would have to approve raises an approval request in a write worker's tab, and the step waits for the answer. Read steps follow their role's `external_directory` rules.
+
 1. Define the result, named slices, and verification predicate. For VERA tasks, retain the selected protocol and role profiles.
 2. Read [the runtime contract](references/runtime.md). Write a script with a literal `export const meta` first, named agent steps, and a final JSON result.
 3. Call `workflows_start` with a unique task key, `script` or saved `name`, JSON `args`, and the smallest useful concurrency and agent limit. It returns immediately.
