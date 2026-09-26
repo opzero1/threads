@@ -49,7 +49,7 @@ export async function workflows(
     editor.namespace({ name: "workflows", description: "Durable background JavaScript workflows using native OpenCode agents" });
     editor.add({
       name: "start",
-      description: "Start a dynamic JavaScript workflow in the background. Load workflow-authoring first. Supply script or a saved name, a stable retry key, and optional JSON args. The runner owns parallel agents, structured results, checkpoints, and resumable progress. Keep the same key and identical inputs for an exact retry. Configured role permissions apply to every agent. Returns immediately; inspect/control using the run ID.",
+      description: "Start a dynamic JavaScript workflow in the background. Load workflow-authoring first. Supply script or a saved name, a stable retry key, and optional JSON args. The runner owns parallel agents, structured results, checkpoints, and resumable progress. Keep the same key and identical inputs for an exact retry. Configured role permissions apply to every agent. An agent step's paths option grants existing absolute directories outside its location for use without asking, within its access; explicit external_directory denies still win. Without a grant, a write worker gets an approval request in its tab where you would be asked, unless its role denies the directory; read workers follow their role's rules. Returns immediately; inspect/control using the run ID.",
       input: startInput,
       output: WorkflowSummary,
       options: { namespace: "workflows", codemode: false },

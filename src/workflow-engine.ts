@@ -4,6 +4,7 @@ import { Session } from "@opencode/schema/session";
 import { SessionMessage } from "@opencode/schema/session-message";
 import Ajv from "ajv";
 import { parseWorkflow, executeWorkflow, type WorkflowHost } from "./workflow-runtime";
+import { withResolvedGrants } from "./external-access";
 import { requireDelegation } from "./permissions";
 import {
   serialized,
@@ -28,11 +29,12 @@ import {
   type WorkflowSettlement as Settlement,
 } from "./workflow-types";
 import {
+  assertGrantedProject,
   interruptWorkflowWorkers,
   withWorkflowSlot,
   workflowDirectory,
   workflowDirectoryPlan,
-  workflowSourceDirectory,
+  workflowSource,
   workflowTask,
 } from "./workflow-worker";
 
@@ -378,25 +380,34 @@ export function workflowEngine(
     const hostFor = (prefix: string, depth: number): WorkflowHost => ({
       agent: async (raw) => {
         countCall();
-        const input = WorkflowAgentInput.parse(raw);
-        if (input.schema !== undefined) ajv.compile(input.schema);
-        const key = `${prefix}${input.key}`;
+        const parsed = WorkflowAgentInput.parse(raw);
+        if (parsed.schema !== undefined) ajv.compile(parsed.schema);
+        const key = `${prefix}${parsed.key}`;
         if (seen.has(key)) throw new Error(`Duplicate workflow agent key in this execution: ${key}`);
         seen.add(key);
         await waitUntilRunnable(runID, controller.signal);
+        // Resolved grants are part of the recorded input, so a replay whose paths now resolve
+        // elsewhere fails the fingerprint check instead of silently changing the grant.
+        const input = await withResolvedGrants(parsed);
         const requestFingerprint = workflowHash(input);
         const beforeAdmission = await store.get(runID);
-        const source = await workflowSourceDirectory(ctx, beforeAdmission, input);
+        const { directory: source, granted } = await workflowSource(ctx, beforeAdmission, input);
         const directoryInput = { ...input, directory: source };
         const owner = await ctx.session.get({ sessionID: beforeAdmission.ownerID });
         const caller = await ctx.agent.get({ agentID: beforeAdmission.callerAgent, location: owner.location });
-        requireDelegation([...caller.data.permissions, ...(owner.permissions ?? [])], input.agent);
+        const inherited = [...caller.data.permissions, ...(owner.permissions ?? [])];
+        requireDelegation(inherited, input.agent);
         const sourceWorker = beforeAdmission.steps.find((step) => step.directory === source);
         if (sourceWorker && options.warmWorker) {
           const existing = await nativeWorker(sourceWorker.workerID);
           if (existing) await options.warmWorker(existing.id);
         }
         const sourceProfile = await agentProfile(input.agent, source);
+        // Fails fast at the source; spawnWorkflow repeats the check with the role where the worker runs.
+        if (granted) {
+          const worktree = input.isolation === "worktree" ? workflowDirectoryPlan(beforeAdmission, directoryInput, key).directory : undefined;
+          await assertGrantedProject(inherited, sourceProfile.data.permissions, input.paths, source, worktree);
+        }
         const sourceModel = sourceProfile.data.model ?? beforeAdmission.model;
         const sourceProfileFingerprint = workflowHash({
           model: sourceModel,
@@ -479,6 +490,7 @@ export function workflowEngine(
               directory: previous.directory,
               task: workflowTask(input),
               agent: input.agent,
+              paths: input.paths,
             }, source, runtime as Parameters<Threads["reserveWorkflow"]>[3], {
               ownerID: Session.ID.make(run.ownerID), runID: run.id, stepKey: key,
               callerAgent: run.callerAgent, access: input.access,
@@ -534,9 +546,10 @@ export function workflowEngine(
             directory,
             task: workflowTask(input),
             agent: input.agent,
+            paths: input.paths,
           }, runtime as Parameters<Threads["spawnWorkflow"]>[2], {
             ownerID: Session.ID.make(run.ownerID), runID: run.id, stepKey: key,
-            callerAgent: run.callerAgent, access: input.access,
+            callerAgent: run.callerAgent, access: input.access, granted, isolation: input.isolation,
           });
           const finalizeProfile = async () => {
             if (options.warmWorker && await nativeWorker(current.workerID)) await options.warmWorker(current.workerID);

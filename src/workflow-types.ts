@@ -29,6 +29,9 @@ export const WorkflowStart = WorkflowLimits.extend({
 });
 export type WorkflowStart = z.infer<typeof WorkflowStart>;
 
+export const MAX_GRANTED_PATHS = 16;
+export const GrantedPaths = z.array(z.string().min(1).max(4096)).max(MAX_GRANTED_PATHS);
+
 export const WorkflowAgentInput = z.object({
   key: z.string().min(1).max(120),
   prompt: z.string().min(1).max(100000),
@@ -39,6 +42,7 @@ export const WorkflowAgentInput = z.object({
   access: z.enum(["read", "write"]).default("read"),
   isolation: z.enum(["shared", "worktree"]).default("shared"),
   directory: z.string().min(1).optional(),
+  paths: GrantedPaths.optional(),
   timeoutMs: z.number().int().min(1000).max(604800000).optional(),
 }).strict();
 export type WorkflowAgentInput = z.infer<typeof WorkflowAgentInput>;

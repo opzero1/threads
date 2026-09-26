@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Plugin } from "@opencode/plugin";
@@ -50,6 +50,7 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
   const deliveries: string[] = [];
   const deliveryTexts: string[] = [];
   let profileSystem = "profile-v1";
+  let profilePermissions: unknown[] = [{ action: "read", resource: "*", effect: "allow" }];
   const saved = new Map<string, string>();
   const worktreeProjects: string[] = [];
   let worktreeGate: { entered: () => void; wait: Promise<void> } | undefined;
@@ -74,7 +75,7 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
           model: undefined,
           permissions: agentID === "caller"
             ? [{ action: "subagent", resource: "analyst", effect: "allow" }]
-            : [{ action: "read", resource: "*", effect: "allow" }],
+            : profilePermissions,
           system: agentID === "analyst" ? profileSystem : undefined,
         } };
       },
@@ -101,10 +102,14 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
   const workerEvents: string[] = [];
   const validationErrors: string[] = [];
   const reservations: string[] = [];
+  const spawnInputs: { key: string; directory?: string; paths?: string[] }[] = [];
+  const spawnScopes: { granted: unknown; isolation: unknown }[] = [];
   const fakeWorkers = {
     async reserveWorkflow(_actor: string, input: { key: string }) { reservations.push(input.key); return "source-project"; },
     async spawnWorkflow(actor: string, input: { key: string }, _runtime: unknown, metadata: Record<string, unknown>) {
       spawns++;
+      spawnInputs.push(structuredClone(input));
+      spawnScopes.push({ granted: metadata.granted, isolation: metadata.isolation });
       workerEvents.push("spawn");
       spawnedStepKeys.push(String(metadata.stepKey));
       const workerID = workerIdentity(actor, input.key);
@@ -189,9 +194,11 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
   });
   api = engine();
   return {
-    api, ownerID, directory, deliveries, deliveryTexts, writes, validationErrors, worktreeProjects, reservations, spawns: () => spawns, file,
+    api, ownerID, directory, deliveries, deliveryTexts, writes, validationErrors, worktreeProjects, reservations, spawnInputs, spawnScopes, spawns: () => spawns, file,
     reopen: engine,
     setProfileSystem: (value: string) => { profileSystem = value; },
+    setProfilePermissions: (value: unknown[]) => { profilePermissions = value; },
+    setOwnerPermissions: (value: unknown[]) => { sessions.get(ownerID)!.permissions = value; },
     setSaved: (name: string, value: string) => { saved.set(name, value); },
     spawnedStepKeys,
     workerEvents,
@@ -1075,6 +1082,156 @@ return await agent("inspect", { key: "outside", agent: "analyst", directory: ${J
     expect(fixture.spawns()).toBe(0);
     await fixture.api.dispose();
   });
+
+  test("admits a step directory inside a granted path and forwards the resolved grant", async () => {
+    const fixture = await harness("valid");
+    const outside = await realpath(await mkdtemp(join(tmpdir(), "workflow-grant-")));
+    const aliases = await mkdtemp(join(tmpdir(), "workflow-grant-alias-"));
+    temporary.push(outside, aliases);
+    await mkdir(join(outside, "sub"));
+    await symlink(outside, join(aliases, "link"));
+    const granted = `
+export const meta = { name: "granted", description: "granted directory" };
+return await agent("inspect", { key: "granted", agent: "analyst", directory: ${JSON.stringify(join(outside, "sub"))}, paths: [${JSON.stringify(join(aliases, "link"))}] });`;
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "granted", script: granted, args: null }), {
+      agent: "caller", model: { providerID: "test", id: "model" },
+    });
+    const run = await settled(fixture.api, fixture.ownerID, started.id);
+    expect(run.status).toBe("completed");
+    expect(run.steps[0].input.paths).toEqual([outside]);
+    expect(run.steps[0].directory).toBe(join(outside, "sub"));
+    expect(fixture.spawnInputs.map(({ directory, paths }) => ({ directory, paths }))).toEqual([{ directory: join(outside, "sub"), paths: [outside] }]);
+    await fixture.api.dispose();
+  });
+
+  test("rejects invalid grants before admission", async () => {
+    const fixture = await harness("valid");
+    for (const [key, paths, message] of [
+      ["missing", [join(fixture.directory, "missing")], "existing directory"],
+      ["relative", ["relative"], "must be absolute"],
+      ["root", ["/"], "filesystem root"],
+    ] as const) {
+      const invalid = `
+export const meta = { name: "invalid-grant", description: "grant validation" };
+return await agent("inspect", { key: "grant", agent: "analyst", paths: ${JSON.stringify(paths)} });`;
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: `invalid-${key}`, script: invalid, args: null }), {
+        agent: "caller", model: { providerID: "test", id: "model" },
+      });
+      const run = await settled(fixture.api, fixture.ownerID, started.id);
+      expect(run.status).toBe("failed");
+      expect(run.error).toContain(message);
+      expect(run.steps).toHaveLength(0);
+    }
+    expect(fixture.spawns()).toBe(0);
+    await fixture.api.dispose();
+  });
+
+  test("rejects a granted step directory whose project escapes its grants or an explicit deny, before admission", async () => {
+    const fixture = await harness("valid");
+    const outside = await realpath(await mkdtemp(join(tmpdir(), "workflow-grant-")));
+    temporary.push(outside);
+    const repo = join(outside, "repo");
+    for (const path of [join(outside, "private"), join(repo, "project"), join(repo, ".git", "objects"), join(repo, ".git", "refs")]) {
+      await mkdir(path, { recursive: true });
+    }
+    await Bun.write(join(repo, ".git", "HEAD"), "ref: refs/heads/main\n");
+    const attempt = async (key: string, options: Record<string, unknown>) => {
+      const script = `
+export const meta = { name: "${key}", description: "granted project" };
+return await agent("inspect", ${JSON.stringify({ key, agent: "analyst", ...options })});`;
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key, script, args: null }), {
+        agent: "caller", model: { providerID: "test", id: "model" },
+      });
+      return settled(fixture.api, fixture.ownerID, started.id);
+    };
+    const rejected = async (key: string, options: Record<string, unknown>, message: string) => {
+      const run = await attempt(key, options);
+      expect(run.status).toBe("failed");
+      expect(run.error).toContain(message);
+      expect(run.steps).toHaveLength(0);
+    };
+    const readProfile = { action: "read", resource: "*", effect: "allow" };
+    fixture.setOwnerPermissions([{ action: "external_directory", resource: `${outside}/private/*`, effect: "deny" }]);
+    await rejected("coordinator-directory", { directory: join(outside, "private"), paths: [outside] }, `explicit external_directory deny (${outside}/private/*)`);
+    await rejected("coordinator-root", { directory: outside, paths: [outside] }, `would make ${outside} local to its worker`);
+    fixture.setOwnerPermissions([]);
+    fixture.setProfilePermissions([readProfile, { action: "external_directory", resource: "*/private/*", effect: "deny" }]);
+    await rejected("role-repository", { directory: join(repo, "project"), paths: [repo] },
+      `would make ${repo} local to its worker, where the explicit external_directory deny (*/private/*) cannot apply`);
+    fixture.setProfilePermissions([readProfile]);
+    await rejected("widened", { directory: join(repo, "project"), paths: [join(repo, "project")] }, `is in project ${repo}, which extends beyond its granted paths`);
+    fixture.setOwnerPermissions([{ action: "external_directory", resource: `${dirname(outside)}/.opencode-workflows/*`, effect: "deny" }]);
+    await rejected("checkout", { directory: outside, paths: [outside], access: "write", isolation: "worktree" },
+      `would make ${dirname(outside)}/.opencode-workflows/workflow-`);
+    expect(fixture.spawns()).toBe(0);
+    expect(fixture.reservations).toEqual([]);
+    fixture.setOwnerPermissions([{ action: "external_directory", resource: `${outside}/private/*`, effect: "deny" }]);
+    const allowed = await attempt("repository", { directory: join(repo, "project"), paths: [repo] });
+    expect(allowed.status).toBe("completed");
+    expect(allowed.steps[0].directory).toBe(join(repo, "project"));
+    expect(fixture.spawns()).toBe(1);
+    await fixture.api.dispose();
+  });
+
+  test("tells each worker spawn whether only a grant admits its step and whether it runs in a worktree checkout", async () => {
+    const fixture = await harness("valid");
+    const outside = await realpath(await mkdtemp(join(tmpdir(), "workflow-grant-")));
+    temporary.push(outside);
+    const steps = `
+export const meta = { name: "scopes", description: "destination checks" };
+await agent("owned", { key: "owned", agent: "analyst", access: "write", isolation: "worktree" });
+await agent("granted", { key: "granted", agent: "analyst", directory: ${JSON.stringify(outside)}, paths: [${JSON.stringify(outside)}] });
+return await agent("checkout", { key: "checkout", agent: "analyst", access: "write", isolation: "worktree", directory: ${JSON.stringify(outside)}, paths: [${JSON.stringify(outside)}] });`;
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "scopes", script: steps, args: null }), {
+      agent: "caller", model: { providerID: "test", id: "model" },
+    });
+    const run = await settled(fixture.api, fixture.ownerID, started.id);
+    expect(run.status).toBe("completed");
+    expect(fixture.spawnScopes).toEqual([
+      { granted: false, isolation: "worktree" },
+      { granted: true, isolation: "shared" },
+      { granted: true, isolation: "worktree" },
+    ]);
+    expect(fixture.spawnInputs.map(({ directory }) => directory)).toEqual([
+      run.steps[0].directory, outside, join(dirname(outside), ".opencode-workflows", run.steps[2].directory.split("/").at(-1)!),
+    ]);
+    await fixture.api.dispose();
+  });
+
+  for (const retarget of [false, true]) {
+    test(retarget ? "fails a replayed step whose granted path now resolves elsewhere" : "replays an unchanged grant without dispatching again", async () => {
+      const fixture = await harness("valid");
+      const scratch = await realpath(await mkdtemp(join(tmpdir(), "workflow-grant-")));
+      temporary.push(scratch);
+      const [first, second, link] = ["first", "second", "link"].map((name) => join(scratch, name));
+      await mkdir(first);
+      await mkdir(second);
+      await symlink(first, link);
+      const linked = `
+export const meta = { name: "linked", description: "grant replay" };
+const value = await agent("inspect", { key: "linked", agent: "analyst", paths: [${JSON.stringify(link)}] });
+await checkpoint("Continue?", { key: "continue" });
+return value;`;
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "linked", script: linked, args: null }), {
+        agent: "caller", model: { providerID: "test", id: "model" },
+      });
+      const waiting = await reaches(fixture.api, fixture.ownerID, started.id, "waiting");
+      expect(waiting.steps[0].input.paths).toEqual([first]);
+      await fixture.api.dispose();
+      if (retarget) {
+        await rm(link);
+        await symlink(second, link);
+      }
+      const reopened = fixture.reopen();
+      await reopened.control(fixture.ownerID, { runID: started.id, action: "resume", checkpointKey: "continue", response: true });
+      const run = await settled(reopened, fixture.ownerID, started.id);
+      expect(run.status).toBe(retarget ? "failed" : "completed");
+      if (retarget) expect(run.error).toContain("resumed with different input");
+      else expect(run.result).toEqual({ ok: true });
+      expect(fixture.spawns()).toBe(1);
+      await reopened.dispose();
+    });
+  }
 
   test("allocates a nested source project's worktree under its own project ID", async () => {
     const fixture = await harness("valid");

@@ -22,7 +22,9 @@ Both the parent and managed workers may use native `subagent` when useful. Deleg
 
 An identical spawn key retries the original admission. Different work or a different agent requires a new key. A selected profile supplies its real system prompt, model preference, and permissions in the assigned directory. A profile without a model inherits the caller's resolved model. It has a separate conversation, so include all context it needs in the task brief. Mentioning a role in the brief does not select that profile.
 
-Explicit role selection requires an `allow` for `subagent` on that role ID. Selected workers carry parent session `deny` and `ask` rules as hard denials; parent allow exceptions do not reopen them. Read-only workers can still call their ownership-checked `threads_report` tool.
+Explicit role selection requires an `allow` for `subagent` on that role ID. Selected workers carry parent session `deny` and `ask` rules as hard denials; parent allow exceptions do not reopen them. A parent `external_directory` ask is the exception: it stays an approval request in the worker's tab unless the profile denies that directory. Read-only workers can still call their ownership-checked `threads_report` tool.
+
+If the worker needs a directory outside its assigned one, such as a reference repository, pass it in `paths`. The worker can then use that directory without asking, within its own permissions. Explicit `external_directory` denies still win, and a different `paths` list requires a new key. Naming a path in the brief does not grant it.
 
 If the selected profile is unavailable, fix its configuration and retry the identical spawn request. The indexed worker stays uninitialized until that retry succeeds. Do not use `threads_send` to start it.
 

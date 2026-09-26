@@ -14,6 +14,27 @@ export function permissionMatches(pattern: string, value: string) {
   return match?.[0] === normalized;
 }
 
+// Whether `pattern` matches `directory` or any path beneath it, under the rules of permissionMatches.
+// It steps through the pattern one UTF-16 unit at a time, like the regular expression.
+export function permissionReaches(pattern: string, directory: string) {
+  const tokens = pattern.replaceAll("\\", "/");
+  const fold = (value: string) => process.platform === "win32" ? value.toLowerCase() : value;
+  const expand = (positions: number[]) => {
+    const reachable = new Set(positions);
+    for (const position of reachable) if (tokens[position] === "*") reachable.add(position + 1);
+    return reachable;
+  };
+  const advance = (positions: Set<number>, unit: string) => expand([...positions].flatMap((position) => {
+    const token = tokens[position];
+    if (token === "*") return [position];
+    return token === "?" || (token !== undefined && fold(token) === fold(unit)) ? [position + 1] : [];
+  }));
+  let positions = expand([0]);
+  for (const unit of directory.replaceAll("\\", "/").split("")) positions = advance(positions, unit);
+  // Any position still live after `directory/` can finish on some path beneath it.
+  return positions.has(tokens.length) || advance(positions, "/").size > 0;
+}
+
 export function delegationEffect(
   rules: Permission.Ruleset,
   agentID: string,

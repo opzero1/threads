@@ -108,6 +108,19 @@ describe("native identity and caller boundaries", () => {
       "386dfd06102da10f8ca294a78d241e8a33d6921ff86f0615d282a618b140bdcf",
     );
   });
+  test("granted paths participate in spawn identity without changing grant-free fingerprints", () => {
+    const request = Spawn.parse({ key: "refs", title: "Workstream", directory: "/work", task: "Verify", agent: "vera-core" });
+    const granted = Spawn.parse({ ...request, paths: ["/refs/a"] });
+    expect(granted.paths).toEqual(["/refs/a"]);
+    expect(fingerprint({ ...request, paths: [] })).toBe(fingerprint(request));
+    expect(fingerprint(granted)).not.toBe(fingerprint(request));
+    expect(fingerprint(granted)).not.toBe(fingerprint({ ...request, paths: ["/refs/b"] }));
+    expect(fingerprint(granted)).not.toBe(fingerprint({ ...request, paths: ["/refs/a", "/refs/b"] }));
+    const unnamed = { key: "refs", title: "Workstream", directory: "/work", task: "Verify" };
+    expect(fingerprint({ ...unnamed, paths: ["/refs/a"] })).not.toBe(fingerprint({ ...unnamed, agent: JSON.stringify({ paths: ["/refs/a"] }) }));
+    expect(() => Spawn.parse({ ...request, paths: [""] })).toThrow();
+    expect(() => Spawn.parse({ ...request, paths: Array.from({ length: 17 }, (_, index) => `/refs/${index}`) })).toThrow();
+  });
 });
 
 describe("admission serialization", () => {

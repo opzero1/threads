@@ -8,7 +8,7 @@ Use `/workflow-run <task>` to have OpenCode author a JavaScript workflow with pa
 
 Dynamic workflows are included in `@op1/threads` 0.2.0. The `v0.1.8` tag preserves the pre-workflow release.
 
-Read [Run a dynamic workflow](docs/workflows.md) for progress, pause, stop, resume, worktree, and saved-script usage. The [runtime contract](skills/workflow-authoring/references/runtime.md) documents the authoring API and execution limits.
+Read [Run a dynamic workflow](docs/workflows.md) for progress, pause, stop, resume, worktree, and saved-script usage. The [runtime contract](skills/workflow-authoring/references/runtime.md) documents the authoring API, execution limits, and [external directory access](skills/workflow-authoring/references/runtime.md#external-directories): an agent step's `paths` grants directories outside its location.
 
 See [verification evidence](docs/workflows-verification.md) for the native checks and recovery guarantees.
 
@@ -63,14 +63,14 @@ The native tool names use namespace `threads` and individual names `spawn`, `lis
 
 | Tool | Input | Result |
 | --- | --- | --- |
-| `threads_spawn` | `{ key, title, directory, task, agent? }` | Worker view |
+| `threads_spawn` | `{ key, title, directory, task, agent?, paths? }` | Worker view |
 | `threads_list` | `{}` | `{ workers: WorkerView[] }` |
 | `threads_send` | `{ workerID, key, text }` | `{ workerID, messageID }` |
 | `threads_interrupt` | `{ workerID }` | Worker view |
 | `threads_hide` | `{ workerID }` | Worker view |
 | `threads_report` | `{ verdict, summary, evidence }` | `{ workerID, report }` |
 
-All fields are strings except `evidence`, which is an array of strings. Verdicts are `PASS`, `PASS WITH NOTES`, `FAIL`, and `INCONCLUSIVE`. Each tool returns JSON in native `content` and the same value in `output`.
+All fields are strings except `evidence` and `paths`, which are arrays of strings. Verdicts are `PASS`, `PASS WITH NOTES`, `FAIL`, and `INCONCLUSIVE`. Each tool returns JSON in native `content` and the same value in `output`.
 
 `directory` must exist and be absolute. Without `agent`, the worker inherits the coordinator's active agent and resolved model, with agent permissions followed by session permissions.
 
@@ -78,15 +78,17 @@ Set `agent` to use a configured profile, such as `agent: "vera-core"` for a VERA
 
 Explicit selection requires the caller's ordered agent and session rules to allow `subagent` for that exact agent ID. A matching `deny` or `ask` rejects the request before creation. OpenCode's plugin API cannot request approval for an input-dependent agent ID.
 
-A selected worker uses its profile's permissions. Parent session `deny` and `ask` rules at creation become hard denials on the worker, and parent allows are not copied. This conservative rule also drops parent allow exceptions that follow a denial. It prevents inherited permissions from relaxing a read-only profile. Each managed worker receives one explicit grant for `threads_report`, whose handler verifies ownership. Native subagents retain their own profiles and inherit those session restrictions. Omitting `agent` keeps the existing inheritance behavior.
+A selected worker uses its profile's permissions. Parent session `deny` and `ask` rules at creation become hard denials on the worker, and parent allows are not copied. This conservative rule also drops parent allow exceptions that follow a denial. It prevents inherited permissions from relaxing a read-only profile. One exception keeps on-demand access: a parent `external_directory` ask stays an approval request in the worker's tab unless the profile denies that directory. Each managed worker receives one explicit grant for `threads_report`, whose handler verifies ownership. Native subagents retain their own profiles and inherit those session restrictions. Omitting `agent` keeps the existing inheritance behavior.
+
+Set `paths` to existing absolute directories outside `directory` that the worker may use without asking, such as a reference repository. Each path and its subdirectories are granted for `external_directory` only, so the worker's own permissions still decide whether it can read, edit, or run commands there. The plugin resolves symlinks and records the sorted list in worker metadata. It rejects relative, missing, and non-directory paths, the filesystem root, and paths containing `*`, `?`, or a POSIX backslash. Explicit `external_directory` denies from the coordinator or the selected profile still apply inside a grant; a grant whose directory they deny fails before the worker is created. Without a grant, other directories follow the worker's permissions.
 
 Tool identity comes from the calling session. Only the owning coordinator can send, interrupt, or hide a worker. Only the exact original top-level worker can report. Native subagents and managed workers cannot spawn managed workers. Native `subagent` remains available.
 
 ## Identity and retries
 
-The coordinator ID and spawn key determine the worker ID. Worker metadata contains `opThreads` with exactly `workerID`, `coordinatorID`, `key`, `fingerprint`, `initialMessageID`, and `reportMessageID`. Explicit-role workers also carry `opThreadsRole: true`. There is no native `parentID`.
+The coordinator ID and spawn key determine the worker ID. Worker metadata contains `opThreads` with exactly `workerID`, `coordinatorID`, `key`, `fingerprint`, `initialMessageID`, and `reportMessageID`. Explicit-role workers also carry `opThreadsRole: true`. Workers with granted paths carry `opThreadsPaths`, the resolved list. There is no native `parentID`.
 
-The first create includes both message IDs. Identical spawn retries reuse the original session and initial message ID, even if the profile configuration has changed. They do not reset its agent or model. Changing the title, directory, task, or explicit agent under that key is an error. Requests that omit `agent` retain their pre-role fingerprint. Startup never replays initial prompts.
+The first create includes both message IDs. Identical spawn retries reuse the original session and initial message ID, even if the profile configuration has changed. They do not reset its agent or model. Changing the title, directory, task, explicit agent, or resolved `paths` under that key is an error. Requests that omit `agent` retain their pre-role fingerprint, and requests without `paths` keep their earlier fingerprint. Startup never replays initial prompts.
 
 The initial prompt hook resolves a selected profile after OpenCode loads the assigned directory's configuration. It rechecks the caller's role authorization and selects the profile's model before admitting the task. If the profile is unavailable, admission fails without running the task. The indexed worker remains recoverable: fix the profile configuration and retry the identical request. Until initialization completes, managed follow-ups and direct prompts are rejected. Initialization is recorded after native admission; a retry repairs that record if interrupted between the two writes.
 
