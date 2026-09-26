@@ -43,6 +43,8 @@ Isolated sandbox runs with the same fixture compared 0.2.4 and 0.2.5:
 
 `verify:live` now requires a fresh TUI to recover a running worker's tab and to leave finished workers closed. Typecheck, 123 unit tests, `verify:live`, `verify:activity`, `verify:tabs`, `verify:idle-tabs`, and `verify:workflows` passed on OpenCode 2.0.16.
 
+The first independent review returned **INCONCLUSIVE** with no blocking findings, because it could not run commands or read the retained evidence. Its note that the workflow timer polls while any panel is open was checked against OpenCode 2.0.16. `ui.panel.current()` returns only the calling plugin's panel, OpenCode closes a panel when the route leaves its session, and Threads opens only its workflow panel. The exception therefore applies only while the workflow panel is shown. In a sandbox probe, a shown panel refreshed every 3 seconds. After the user left its session, or while another plugin's panel was open, 0.2.5 sent no requests for 30 seconds and every evicted Location stayed evicted. In each of those windows, 0.2.4 sent 23 snapshot RPCs and re-woke two Locations. Session events and deliberate actions still send located RPCs. A run waiting on a checkpoint also keeps the workflow timer active while its owner session is shown, because its other steps can still run.
+
 ## Version 0.2.2 compiled TUI
 
 The npm package now ships a Solid-compiled `tui.js`, built by `prepack`, rather than loading TSX at runtime. The host's Solid transform excludes `node_modules`; raw JSX there does not receive the reactive bindings that the picker and workflow panel need. External runtime packages remain imports so OpenCode can supply its own renderer and Solid instance.
