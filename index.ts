@@ -100,7 +100,7 @@ export default Plugin.define({
       });
       editor.add({
         name: "hide",
-        description: "Hide a worker you no longer need from the sidebar without deleting its conversation or report. Only its coordinator may hide it. Running, selected, or attention-needed tabs stay open until idle. Use /threads to restore hidden tabs.",
+        description: "Hide a worker you no longer need from the Threads list and sidebar without deleting its conversation or report. Only its coordinator may hide it. A running, selected, or attention-needed worker stays visible until idle. Use /threads to restore hidden workers.",
         input: WorkerTarget,
         output: WorkerView,
         options: { namespace: "threads", codemode: false },

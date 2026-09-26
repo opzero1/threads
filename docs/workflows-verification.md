@@ -8,11 +8,11 @@ Current verification uses OpenCode `2.0.14`, Bun `1.4.0`, and published `@openco
 
 1. Run typecheck, unit tests, and the native checks appropriate to the change.
 2. Run `npm pack --json --pack-destination <existing-artifact-directory>`. Keep its manifest and integrity hash. The `prepack` hook must build `tui.js`; verify that the tarball includes it and excludes root `tui.ts`.
-3. Run `bun run verify:package-ui /absolute/path/to/package.tgz`. This installs the artifact under `node_modules`, without a TUI probe or project JSX configuration. Require all four checks, including pin/unpin, Escape, and the workflow result panel.
+3. Run `bun run verify:package-ui /absolute/path/to/package.tgz`. This installs the artifact under `node_modules`, without a TUI probe or project JSX configuration. Require all seven checks: the idle footer, the Threads list through `ctrl+x j` with pin/unpin and Escape, `/activities`, the running-worker indicator, `/workflows`, the workflow result panel, and the `activity: "sidebar"` option.
 4. Publish that exact tarball. If any packed content changes, repack and repeat the artifact check.
 5. Wait for npm's package index to expose the new version. Download its tarball and compare integrity with the verified artifact. A successful `npm publish` can precede registry availability.
 6. Run `bun run verify:package-ui @op1/threads@<version>` against the registry package before switching a working global installation.
-7. Preserve existing options when updating the global plugin entry. Confirm the server reports the intended version as active, then verify Activity and its commands in the live TUI. Record those observations separately.
+7. Preserve existing options when updating the global plugin entry. Confirm the server reports the intended version as active, then verify the footer indicator, the Threads list, and their commands in the live TUI, or the sidebar if the user selected it. Record those observations separately.
 
 `prepack` builds the UI automatically. The clean-install checks are explicit release gates; publishing does not run them automatically. Keep the manifest, integrity comparison, command results, and UI evidence together under `.audit/release-<version>/`.
 
@@ -20,12 +20,37 @@ Current verification uses OpenCode `2.0.14`, Bun `1.4.0`, and published `@openco
 
 | Observation | Next check |
 | --- | --- |
-| Activity and `/activities` are both missing | Inspect TUI plugin loading and `role=cli` logs. Server activation alone does not establish TUI activation. |
+| `ctrl+x j`, `/activities`, and the sidebar option all do nothing | Inspect TUI plugin loading and `role=cli` logs. Server activation alone does not establish TUI activation. An idle footer is empty by design, so it proves nothing on its own. |
 | `Cannot find package 'react'` from a plugin TSX file | Check the installed package entrypoint. Local JSX configuration and probe-assisted tests can hide missing Solid compilation. |
-| The picker renders, but its shortcut hint is missing or Escape does nothing | Check that the installed entrypoint reaches Solid-compiled code. A JSX import directive alone does not supply Solid's reactive bindings. |
+| The Threads list or picker renders, but its shortcut hint is missing or Escape does nothing | Check that the installed entrypoint reaches Solid-compiled code. A JSX import directive alone does not supply Solid's reactive bindings. |
 | Server load fails with `No matching version found` | Check npm propagation and the resolver's view of the version before changing UI settings. Publication acceptance is not installation readiness. |
 
 Reopening a TUI only addresses a reload problem after the installed package has passed a clean-start check. Do not recommend it as a confirmed fix based on server state or probe-assisted rendering alone.
+
+## Version 0.2.5 footer indicator and Threads list
+
+Threads no longer adds a sidebar or worker tabs by default. The terminal claims `prompt.footer.status` and `home.footer.status` and renders an indicator only while a known worker runs or waits for input, or a workflow of the current conversation progresses. It shows a spinner with the running worker and workflow counts, plus `? N needs input` in the warning color. `ctrl+x j`, `/activities`, and `/threads` open the Threads list, a dialog that covers the current coordinator, root sessions in the TUI's folder, open tabs, pins, and their managed workers. The dialog groups rows as needs attention, running, pinned, finished, recent, and closed, and applies the Activity pin, dismiss, and hidden rules. `activity: "sidebar"` keeps the Activity sidebar. `workerTabs: "auto"` keeps automatic tabs for running workers. Tabs that the list opens for unreported workers close after the worker reports, unless they are focused, running, or waiting for input. Existing pin, dismissed, section, and stack storage keeps its keys and shape; the only new key is `list-opened-workers`.
+
+The TUI's own folder is `ctx.data.location.default()`. `ctx.location` follows the focused session, so after focusing a worker tab it names the worker's folder. The list and the list-opened record use the default Location.
+
+### Loaded Locations
+
+Isolated runs on OpenCode 2.0.16 compared the new defaults with `fix/idle-locations` (9abdba3) alone. The fixture has a coordinator tab and two ordinary tabs, with the TUI in the service HOME and `--auto`. The coordinator spawns one worker in its own directory, and the worker reports `FAIL`. Counts are `GET /api/debug/location` entries. After each phase every Location was evicted and observed for 30 seconds.
+
+| Build | MCP servers | Idle | Worker running | Worker finished, after eviction | Fresh TUI | Fresh TUI, after eviction |
+| --- | --- | --- | --- | --- | --- | --- |
+| 9abdba3 | none | 4 | 3, worker tab open | 0 | 5, worker included | 0 |
+| footer | none | 4 | 3, no worker tab | 0 | 4, worker excluded | 0 |
+| 9abdba3 | 3 per Location | 4 | 5, worker tab open | 5, worker rebooted | 5, worker included | 5, worker rebooted |
+| footer | 3 per Location | 4 | 5, no worker tab | 5, worker rebooted | 4, worker excluded | 4, worker not rebooted |
+
+- A fresh TUI loads the worker's Location with 9abdba3, because the finished `FAIL` worker keeps its automatically opened tab and OpenCode prefetches every tab. With MCP servers, that Location starts its three servers again at every TUI start and reboots after each eviction. The footer build opens no worker tab. A fresh TUI makes one request about the worker, `GET /api/session/:id`, which does not load a Location.
+- In the TUI session during which the worker ran, both builds end with the worker's Location revalidated when MCP servers are configured. OpenCode's TUI fetches agents, commands, models, providers, skills, and MCP resources for any Location that publishes update events while it is connected, and the server's boot of the worker's Location publishes them. After eviction, the TUI's own `GET /api/mcp/resource` for that Location booted it again within 0.5 seconds. No Threads request was involved, so Threads cannot prevent this. An upstream fix would ignore `mcp.*.changed` for a Location during or after its `location.shutdown`, or revalidate only Locations that a visible view reads.
+- While idle after eviction, neither build sent a Threads or workflow RPC.
+
+### Checks
+
+Typecheck and 136 unit tests passed, including 13 for options, footer counts, list grouping, worker states, and reported-tab closing. The native suites passed on OpenCode 2.0.16: `verify:footer` 17 checks, `verify:live` 28, `verify:activity` 36 with the sidebar option, `verify:tabs` 21 with automatic worker tabs, and `verify:idle-tabs` 3. `verify:workflows` passed 29 checks. `verify:live` no longer expects a fresh TUI to recover a running worker's tab; it now requires the footer to show the worker and no worker tab to open. `verify:package-ui` passed all seven checks on the packed tarball.
 
 ## Version 0.2.5 idle Locations
 

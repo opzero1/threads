@@ -100,7 +100,8 @@ try:
 
     cli_path = sandbox.root / "config" / "opencode" / "cli.json"
     cli = json.loads(cli_path.read_text())
-    cli["plugins"].append({"package": str(target), "options": {"activity": False}})
+    # Native ordering of managed worker tabs needs the legacy automatic worker tabs.
+    cli["plugins"].append({"package": str(target), "options": {"activity": False, "workerTabs": "auto"}})
     cli["plugins"][0]["options"]["openSessionIDs"] = [session["id"] for session in sessions]
     cli["keybinds"] = {"session.tab.select.3": "f3", "session.tab.select.2": "f4"}
     cli_path.write_text(json.dumps(cli))

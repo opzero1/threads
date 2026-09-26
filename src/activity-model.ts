@@ -19,6 +19,107 @@ export type ActivityThread = {
   status: Pick<ActivityItem, "attention" | "busy" | "unread">;
 };
 
+export type ActivityMode = "footer" | "sidebar";
+export type WorkerTabs = "manual" | "auto";
+
+// `activity: true` and `false` predate the footer; they keep meaning "sidebar" and "no sidebar".
+export function threadsOptions(options: Readonly<Record<string, unknown>>) {
+  const activity: ActivityMode =
+    options.activity === "sidebar" || options.activity === true
+      ? "sidebar"
+      : "footer";
+  const workerTabs: WorkerTabs = options.workerTabs === "auto" ? "auto" : "manual";
+  return { activity, workerTabs };
+}
+
+export type ListCategory =
+  | "Needs attention"
+  | "Running"
+  | "Pinned"
+  | "Finished"
+  | "Recent"
+  | "Closed";
+const listOrder: ListCategory[] = [
+  "Needs attention",
+  "Running",
+  "Pinned",
+  "Finished",
+  "Recent",
+  "Closed",
+];
+export type ListItem = ActivityItem & { closed: boolean; worker: boolean };
+
+export function listCategory(item: ListItem): ListCategory {
+  if (item.closed) return "Closed";
+  if (item.attention) return "Needs attention";
+  if (item.busy) return "Running";
+  if (item.pinned) return "Pinned";
+  return item.worker ? "Finished" : "Recent";
+}
+
+export function workerState(
+  worker: {
+    outcome: "succeeded" | "failed" | "interrupted" | null;
+    report: { verdict: string } | null;
+  },
+  busy: boolean,
+  attention: boolean,
+) {
+  if (attention) return "needs input";
+  if (busy) return "running";
+  if (worker.report) return worker.report.verdict;
+  if (worker.outcome === null) return "starting";
+  return worker.outcome === "succeeded" ? "no report" : worker.outcome;
+}
+
+export type FooterSummary = {
+  running: number;
+  attention: number;
+  workflows: number;
+};
+
+export function footerSummary(
+  workers: Iterable<{ busy: boolean; attention: boolean }>,
+  workflows: number,
+): FooterSummary {
+  let running = 0;
+  let attention = 0;
+  for (const worker of workers) {
+    if (worker.attention) attention++;
+    else if (worker.busy) running++;
+  }
+  return { running, attention, workflows };
+}
+
+export function footerText(summary: FooterSummary) {
+  const count = (value: number, noun: string) =>
+    `${value} ${noun}${value === 1 ? "" : "s"}`;
+  const label = [
+    ...(summary.running ? [count(summary.running, "worker")] : []),
+    ...(summary.workflows ? [count(summary.workflows, "workflow")] : []),
+  ].join(" · ");
+  return {
+    visible: summary.running + summary.workflows + summary.attention > 0,
+    spinning: summary.running + summary.workflows > 0,
+    label,
+    attention: summary.attention ? `? ${summary.attention} needs input` : "",
+  };
+}
+
+// A worker tab the list opened is temporary: once the worker has reported and is idle,
+// it closes whenever the user is not looking at it, so its Location can go idle again.
+export function reportedTabAction(
+  worker: { report: unknown },
+  status: "idle" | "running",
+  tab:
+    | { readonly active: boolean; readonly busy: boolean; readonly attention: boolean }
+    | undefined,
+): "keep" | "close" | "forget" {
+  if (worker.report === null || status === "running") return "keep";
+  if (!tab) return "forget";
+  return tab.active || tab.busy || tab.attention ? "keep" : "close";
+}
+
 export function cleanRoleTitle(title: string, managed: boolean) {
   if (!managed) return title;
   const remainder = title.replace(/^\[(?:Main|Worker)\] /, "");
@@ -105,6 +206,22 @@ export function activityGroups(items: ActivityItem[], now = new Date()) {
     groups.set(key, group);
   }
   return groups;
+}
+
+export function activityList<Item extends ListItem>(items: Item[]) {
+  const groups = new Map<ListCategory, Item[]>();
+  for (const item of items
+    .filter((item) => item.closed || visible(item))
+    .sort(compare)) {
+    const category = listCategory(item);
+    const group = groups.get(category) ?? [];
+    group.push(item);
+    groups.set(category, group);
+  }
+  return listOrder.flatMap((category) => {
+    const group = groups.get(category);
+    return group ? [[category, group] as const] : [];
+  });
 }
 
 export function activityThreads(items: ActivityItem[], now = new Date()) {

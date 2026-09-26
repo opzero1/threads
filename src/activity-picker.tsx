@@ -13,15 +13,19 @@ type Choice = Pick<ActivityItem, "id" | "title" | "subtitle" | "pinned"> & {
 export function ActivityPicker(props: {
   ctx: Plugin.Context;
   fallbackColor: RGBA;
+  title?: string;
+  note?: string;
   items: () => Choice[];
   current: string | undefined;
   pin: (id: string) => Promise<void>;
+  dismiss?: (id: string) => Promise<void>;
   open: (id: string) => Promise<void>;
 }) {
   const { ctx } = props;
   const [query, setQuery] = createSignal("");
   const [selectedID, setSelectedID] = createSignal(props.current);
   const [pinning, setPinning] = createSignal(false);
+  const [dismissing, setDismissing] = createSignal(false);
   const [height, setHeight] = createSignal(ctx.renderer.height);
   let input: InputRenderable | undefined;
   let scroll: ScrollBoxRenderable | undefined;
@@ -69,6 +73,17 @@ export function ActivityPicker(props: {
       if (!closed) setPinning(false);
     }
   };
+  const toggleDismiss = async () => {
+    const item = selected();
+    if (!item || !props.dismiss || dismissing()) return;
+    setSelectedID(item.id);
+    setDismissing(true);
+    try {
+      await props.dismiss(item.id);
+    } finally {
+      if (!closed) setDismissing(false);
+    }
+  };
   ctx.keymap.layer(() => ({
     mode: "global",
     target: () => input,
@@ -90,6 +105,14 @@ export function ActivityPicker(props: {
         bind: "ctrl+f",
         run: togglePin,
       },
+      ...(props.dismiss
+        ? [{
+            id: "threads.activity.choose.dismiss",
+            title: "Dismiss/restore highlighted Activity conversation",
+            bind: "ctrl+d",
+            run: toggleDismiss,
+          }]
+        : []),
     ],
   }));
   let scrollTo: string | undefined;
@@ -112,7 +135,7 @@ export function ActivityPicker(props: {
   });
   return (
     <box id="activity-picker" paddingX={2} paddingY={1} gap={1}>
-      <text fg={foreground()}><b>Activity</b></text>
+      <text fg={foreground()}><b>{props.title ?? "Activity"}</b>{props.note ? ` · ${props.note}` : ""}</text>
       <input
         id="activity-picker-search"
         ref={(node) => { input = node; }}
@@ -135,7 +158,7 @@ export function ActivityPicker(props: {
         scrollbarOptions={{ visible: false }}
       >
         <For each={grouped()}>{([category, items]) => <>
-          <text fg={muted()} marginTop={1}>{category}</text>
+          <text id={`activity-picker-category-${category}`} fg={muted()} marginTop={1}>{category}</text>
           <For each={items}>{(item) => (
             <box
               id={`activity-picker-row-${item.id}`}
@@ -157,7 +180,7 @@ export function ActivityPicker(props: {
                 wrapMode="none"
                 truncate
               >{`${selected()?.id === item.id ? ">" : " "} ${item.pinned ? "◆" : "◇"} ${item.title}`}</text>
-              <text fg={muted()} flexGrow={1} flexShrink={1} minWidth={0} wrapMode="none" truncate>
+              <text id={`activity-picker-subtitle-${item.id}`} fg={muted()} flexGrow={1} flexShrink={1} minWidth={0} wrapMode="none" truncate>
                 {`${item.subtitle}${item.closed ? " · Closed" : ""}`}
               </text>
             </box>
@@ -168,7 +191,14 @@ export function ActivityPicker(props: {
         </Show>
       </scrollbox>
       <text id="activity-picker-hint" fg={muted()}>
-        {`${ctx.keymap.shortcuts("threads.activity.choose.pin").join(" / ")} ${selected()?.pinned ? "Unpin" : "Pin"} · enter Open · esc Close`}
+        {[
+          `${ctx.keymap.shortcuts("threads.activity.choose.pin").join(" / ")} ${selected()?.pinned ? "Unpin" : "Pin"}`,
+          ...(props.dismiss
+            ? [`${ctx.keymap.shortcuts("threads.activity.choose.dismiss").join(" / ")} ${selected()?.closed ? "Restore" : "Dismiss"}`]
+            : []),
+          "enter Open",
+          "esc Close",
+        ].join(" · ")}
       </text>
     </box>
   );

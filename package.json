@@ -32,6 +32,7 @@
     "verify:idle-tabs": "uv run --with pyte python scripts/verify-idle-tabs.py",
     "verify:tabs": "uv run --with pyte python scripts/verify-tab-groups.py",
     "verify:activity": "uv run --with pyte python scripts/verify-activity.py",
+    "verify:footer": "uv run --with pyte python scripts/verify-footer.py",
     "verify:workflows": "uv run --with pyte python scripts/verify-workflows.py",
     "verify:workflow-regressions": "python3 scripts/verify-workflow-regressions.py",
     "verify:workflow-capacity": "python3 scripts/verify-workflow-capacity.py",

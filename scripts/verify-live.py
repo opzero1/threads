@@ -54,6 +54,17 @@ def roots():
     return sandbox.api("GET", "/api/session?parentID=null&limit=100")["data"]
 
 
+def footer():
+    return "\n".join(terminal.screen.display[-3:])
+
+
+def tab_state():
+    try:
+        return json.loads((artifacts / "tabs.json").read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"tabs": [], "route": {}}
+
+
 try:
     settings = config(target, provider)
     sandbox = Sandbox(settings, artifacts)
@@ -94,19 +105,19 @@ try:
     passed("spawn creates one independent worker in its assigned directory with inherited policy and model")
 
     eventually(lambda: worker_id in sandbox.api("GET", "/api/session/active")["data"])
-    terminal.wait_for("Fixture worker", left=True)
-    terminal.wait_for_match(lambda _: any(tab["sessionID"] == worker_id and tab["busy"] for tab in json.loads((artifacts / "tabs.json").read_text())["tabs"]), "running worker tab", 40, False)
-    tab_state = json.loads((artifacts / "tabs.json").read_text())
-    assert tab_state["route"] == {"type": "session", "sessionID": coordinator_id}, tab_state
-    assert any(tab["sessionID"] == worker_id and tab["busy"] for tab in tab_state["tabs"]), tab_state
-    passed("managed worker appears in the native TUI while its execution is running")
-    passed("opening the worker tab preserves coordinator focus and its native busy indicator")
+    terminal.wait_for_match(lambda _: "1 worker" in footer(), "running worker footer indicator", 40, False)
+    settled = time.monotonic()
+    terminal.wait_for_match(lambda _: time.monotonic() - settled >= 4, "worker tab settle time", 10, False)
+    assert tab_state()["route"] == {"type": "session", "sessionID": coordinator_id}, tab_state()
+    assert all(tab["sessionID"] != worker_id for tab in tab_state()["tabs"]), tab_state()
+    passed("a running managed worker appears in the native TUI footer indicator")
+    passed("a running worker opens no tab and leaves coordinator focus unchanged")
     hidden = run_tool(coordinator_id, "threads_hide", {"workerID": worker_id})
     assert hidden["state"]["status"] == "completed", hidden
     terminal.wait_for("threads_hide")
-    tab_state = json.loads((artifacts / "tabs.json").read_text())
-    assert any(tab["sessionID"] == worker_id and tab["busy"] for tab in tab_state["tabs"]), tab_state
-    passed("an orchestrator hide request leaves a running worker visible")
+    terminal.wait_for_match(lambda _: "1 worker" in footer(), "hidden running worker still counted", 20, False)
+    assert all(tab["sessionID"] != worker_id for tab in tab_state()["tabs"]), tab_state()
+    passed("an orchestrator hide request leaves a running worker counted in the footer")
     terminal.close(artifacts / "tui-visible.txt")
     terminal = None
     assert worker_id in sandbox.api("GET", "/api/session/active")["data"]
@@ -262,17 +273,14 @@ try:
     terminal = Terminal(sandbox, coordinator_id)
 
     def open_tabs():
-        try:
-            return {tab["sessionID"] for tab in json.loads((artifacts / "tabs.json").read_text())["tabs"]}
-        except (FileNotFoundError, json.JSONDecodeError):
-            return set()
+        return {tab["sessionID"] for tab in tab_state()["tabs"]}
 
-    terminal.wait_for_match(lambda _: worker_id in open_tabs(), "running worker tab recovered", 40, False)
-    passed("a fresh TUI recovers a running managed worker tab after a service restart")
+    terminal.wait_for_match(lambda _: "1 worker" in footer(), "running worker in the footer after restart", 40, False)
+    passed("a fresh TUI shows a running managed worker in the footer after a service restart")
     settled = time.monotonic()
     terminal.wait_for_match(lambda _: time.monotonic() - settled >= 7, "two missed-event refresh intervals", 10, False)
-    assert not set(finished) & open_tabs(), open_tabs()
-    passed("a fresh TUI leaves finished workers' tabs closed so their Locations stay idle")
+    assert not (set(finished) | {worker_id}) & open_tabs(), open_tabs()
+    passed("a fresh TUI opens no worker tabs, so it loads neither running nor finished workers' Locations")
     provider.release.set()
 
     tool_names = {tool["function"]["name"] for request in provider.requests for tool in request.get("tools", [])}

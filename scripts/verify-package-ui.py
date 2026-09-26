@@ -1,9 +1,11 @@
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from fixture import Provider, config
@@ -33,11 +35,20 @@ provider = Provider()
 sandbox = None
 terminal = None
 checks = []
+indicator = re.compile(r"\d+ workers?\b|\d+ workflows?\b|needs input")
 
 
 def passed(label):
     checks.append(label)
     print("PASS: " + label, flush=True)
+
+
+def footer():
+    return "\n".join(terminal.screen.display[-3:])
+
+
+def left():
+    return "\n".join(line[:42] for line in terminal.screen.display)
 
 
 try:
@@ -53,19 +64,47 @@ try:
     })["data"]
     terminal = Terminal(sandbox, session["id"])
     terminal.wait_for("ctrl+p commands")
-    terminal.wait_for("Activity", left=True)
-    passed("Activity loads without a probe plugin or project JSX configuration")
-    os.write(terminal.master, b"/activities")
-    terminal.wait_for("Choose Activity conversation")
-    os.write(terminal.master, b"\r")
-    terminal.wait_for("ctrl+f Pin · enter Open · esc Close")
+    terminal.wait_for("Published plugin UI verification", left=True)
+    settled = time.monotonic()
+    terminal.wait_for_match(lambda _: time.monotonic() - settled >= 3, "idle settle", 10, False)
+    assert not indicator.search(footer()) and "Activity" not in left(), (footer(), left())
+    passed("the default footer mode loads without a probe plugin or project JSX configuration and stays empty while idle")
+    os.write(terminal.master, b"\x18j")
+    terminal.wait_for("ctrl+f Pin · ctrl+d Dismiss · enter Open · esc Close")
+    terminal.wait_for("Threads ·")
     os.write(terminal.master, b"\x06")
-    terminal.wait_for("ctrl+f Unpin · enter Open · esc Close")
+    terminal.wait_for("ctrl+f Unpin · ctrl+d Dismiss · enter Open · esc Close")
     os.write(terminal.master, b"\x06")
-    terminal.wait_for("ctrl+f Pin · enter Open · esc Close")
+    terminal.wait_for("ctrl+f Pin · ctrl+d Dismiss · enter Open · esc Close")
     os.write(terminal.master, b"\x1b")
-    terminal.wait_for_match(lambda text: "enter Open · esc Close" not in text, "closed Activity picker", 10, False)
-    passed("the Activity picker renders, toggles pin state, and closes with Escape")
+    terminal.wait_for_match(lambda text: "enter Open · esc Close" not in text, "closed Threads list", 10, False)
+    passed("ctrl+x j opens the compiled Threads list, which toggles pin state and closes with Escape")
+    os.write(terminal.master, b"/activities")
+    terminal.wait_for("Show threads and workers")
+    os.write(terminal.master, b"\r")
+    terminal.wait_for("ctrl+f Pin · ctrl+d Dismiss · enter Open · esc Close")
+    os.write(terminal.master, b"\x1b")
+    terminal.wait_for_match(lambda text: "enter Open · esc Close" not in text, "closed /activities list", 10, False)
+    passed("/activities opens the same list")
+    provider.responses["PACKAGE_WORKER_REPORT"] = {
+        "name": "threads_report",
+        "arguments": {"verdict": "PASS", "summary": "Packaged worker", "evidence": ["installed package"]},
+        "wait": True,
+    }
+    provider.responses["PACKAGE_WORKER_SPAWN"] = {
+        "name": "threads_spawn",
+        "arguments": {"key": "package-worker", "title": "Packaged footer worker", "directory": str(sandbox.worker), "task": "PACKAGE_WORKER_REPORT"},
+    }
+    sandbox.api("POST", f'/api/session/{session["id"]}/prompt', {"text": "PACKAGE_WORKER_SPAWN"})
+    terminal.wait_for_match(lambda _: re.search(r"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] 1 worker", footer()), "footer spinner and worker count", 40, False)
+    settled = time.monotonic()
+    terminal.wait_for_match(lambda _: time.monotonic() - settled >= 3, "worker tab settle", 10, False)
+    assert "Packaged footer worker" not in left(), left()
+    (artifacts / "running-footer.screen.txt").write_text("\n".join(terminal.screen.display))
+    provider.release.set()
+    eventually(lambda: not sandbox.api("GET", "/api/session/active")["data"], timeout=60)
+    terminal.wait_for_match(lambda _: not indicator.search(footer()), "footer cleared", 30, False)
+    passed("a running worker shows the compiled footer spinner and count without opening a tab, and it clears when done")
     os.write(terminal.master, b"/workflows")
     terminal.wait_for("Open dynamic workflows")
     os.write(terminal.master, b"\r")
@@ -89,7 +128,6 @@ try:
     terminal.close(artifacts / "picker.txt")
     terminal = Terminal(sandbox, session["id"])
     terminal.wait_for("ctrl+p commands")
-    terminal.wait_for("Activity", left=True)
     os.write(terminal.master, b"/workflows")
     terminal.wait_for("Open dynamic workflows")
     os.write(terminal.master, b"\r")
@@ -101,6 +139,12 @@ try:
     os.write(terminal.master, b"\x1b")
     terminal.wait_for_match(lambda text: "Phase: Packaged phase" not in text, "closed workflow panel", 10, False)
     passed("a real workflow completes and its compiled result panel opens and closes")
+    cli["plugins"] = [{"package": plugin, "options": {"activity": "sidebar"}}]
+    path.write_text(json.dumps(cli))
+    terminal.wait_for("Activity", left=True, timeout=40)
+    terminal.wait_for("/activities", timeout=20)
+    (artifacts / "sidebar-option.screen.txt").write_text("\n".join(terminal.screen.display))
+    passed("the activity: sidebar option renders the compiled Activity sidebar")
 finally:
     if terminal:
         terminal.close(artifacts / "terminal.txt")

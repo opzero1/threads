@@ -2,12 +2,18 @@ import type { Plugin } from "@opencode/plugin/tui";
 import type { BoxRenderable, TextRenderable } from "@opentui/core";
 import { z } from "zod";
 import {
+  activityList,
   activityThreads,
   activitySubtitle,
   activityTime,
   cleanRoleTitle,
+  footerSummary,
+  workerState,
   type ActivityItem,
+  type ActivityMode,
+  type ListItem,
 } from "./activity-model";
+import { ThreadsIndicator } from "./activity-footer";
 import { activityRail } from "./activity-rail";
 import { themeColor, themeHue, themeMuted } from "./activity-theme";
 import { ActivityPicker } from "./activity-picker";
@@ -44,9 +50,11 @@ export function activity(
         typeof import("@opentui/solid/components").getComponentCatalogue
       >["spinner"]
     | undefined,
+  settings: { mode: ActivityMode; workflows: () => number },
 ) {
   const { BoxRenderable, ScrollBoxRenderable, TextRenderable, TextAttributes } =
     core;
+  const footer = settings.mode === "footer";
   const { createEffect, createSignal } = solid;
   const fallbackColor = core.RGBA.fromHex("#808080");
   const [revision, setRevision] = createSignal(0);
@@ -62,6 +70,12 @@ export function activity(
   const [dismissed, saveDismissed] = ctx.storage.store("activity-dismissed", {
     initial: { ids: [] as string[] },
   });
+  // Unreported workers whose tab the list opened, by TUI folder because native tabs are
+  // shared per folder. The tab closes after the worker reports.
+  const [listOpened, saveListOpened] = ctx.storage.store("list-opened-workers", {
+    initial: { folders: {} as Record<string, string[]> },
+  });
+  const openedHere = () => listOpened.folders[folder()] ?? [];
   const closingRows = new Set<string>();
   const sessions = new Map<string, Session>();
   const workers = new Map<string, z.infer<typeof WorkerView>>();
@@ -104,10 +118,168 @@ export function activity(
   async function focus(id: string) {
     try {
       await restore([id]);
-      if (!stopped) ctx.ui.tabs.focus(id);
+      if (stopped) return;
+      const worker = workers.get(id);
+      const opening =
+        worker?.report === null &&
+        !ctx.ui.tabs.list().some((tab) => tab.sessionID === id);
+      if (!ctx.ui.tabs.enabled()) {
+        ctx.ui.router.navigate({ type: "session", sessionID: id });
+        return;
+      }
+      const here = folder();
+      if (ctx.ui.tabs.focus(id) && opening && !openedHere().includes(id))
+        await saveListOpened((draft) => {
+          const ids = (draft.folders[here] ??= []);
+          if (!ids.includes(id)) ids.push(id);
+          if (ids.length > 100) ids.splice(0, ids.length - 100);
+        });
     } catch (value) {
       error(value);
     }
+  }
+  // The TUI's own folder. ctx.location follows the focused session instead.
+  function folder() {
+    return ctx.data.location.default().directory;
+  }
+  function currentCoordinator() {
+    const route = ctx.ui.router.current();
+    if (route.type !== "session") return undefined;
+    const link = Link.safeParse(
+      (ctx.data.session.get(route.sessionID) ?? sessions.get(route.sessionID))
+        ?.metadata?.opThreads,
+    );
+    return (
+      workers.get(route.sessionID)?.coordinatorID ??
+      (link.success && link.data.workerID === route.sessionID
+        ? link.data.coordinatorID
+        : route.sessionID)
+    );
+  }
+  function trackedSessionIDs() {
+    const directory = folder();
+    const route = ctx.ui.router.current();
+    const current = currentCoordinator();
+    return new Set([
+      ...[...sessions.values()]
+        .filter((session) => session.location.directory === directory)
+        .map((session) => session.id),
+      ...ctx.ui.tabs.list().map((tab) => tab.sessionID),
+      ...pins.ids,
+      ...(route.type === "session" ? [route.sessionID] : []),
+      ...(current ? [current] : []),
+    ]);
+  }
+  // The footer list: the current coordinator, sessions in the TUI's folder, open tabs and
+  // pins, with the managed workers of those conversations. Closed rows stay reachable.
+  function listItems() {
+    revision();
+    const tabs = new Map(ctx.ui.tabs.list().map((tab) => [tab.sessionID, tab]));
+    const roots = trackedSessionIDs();
+    const coordinators = new Set(
+      [...workers.values()].map((worker) => worker.coordinatorID),
+    );
+    const ids = new Set([
+      ...roots,
+      ...[...workers.values()]
+        .filter((worker) => roots.has(worker.coordinatorID))
+        .map((worker) => worker.workerID),
+    ]);
+    const result: ListItem[] = [];
+    for (const id of ids) {
+      if (deleted.has(id)) continue;
+      const session = ctx.data.session.get(id) ?? sessions.get(id);
+      const worker = workers.get(id);
+      if (!session && !worker) continue;
+      if (session && (session.parentID || session.time.archived)) continue;
+      const tab = tabs.get(id);
+      const closed = dismissed.ids.includes(id) && !tab?.active;
+      const attention = tab
+        ? tab.attention
+        : Boolean(
+            ctx.data.session.permission.list(id)?.length ||
+              ctx.data.session.form.list(id)?.length,
+          );
+      const busy = tab ? tab.busy : ctx.data.session.status(id) === "running";
+      // Unknown history-worker visibility must not resurrect an auto-hidden worker.
+      if (
+        !worker &&
+        Link.safeParse(session?.metadata?.opThreads).success &&
+        !tab &&
+        !busy &&
+        !attention &&
+        !closed
+      )
+        continue;
+      const role = worker ? "Worker" : coordinators.has(id) ? "Main" : undefined;
+      const subtitle = activitySubtitle({
+        directory: session?.location.directory ?? worker?.directory ?? folder(),
+        project: session ? ctx.data.project.get(session.projectID) : undefined,
+        role,
+      });
+      result.push({
+        id,
+        title: cleanRoleTitle(
+          tab?.title ?? session?.title ?? worker?.title ?? "Untitled",
+          role !== undefined,
+        ),
+        subtitle: worker
+          ? `${workerState(worker, busy, attention)} · ${subtitle}`
+          : subtitle,
+        updated: session ? activityTime(session.time) : 0,
+        active: tab?.active ?? false,
+        attention,
+        busy,
+        unread: tab?.unread,
+        pinned: pins.ids.includes(id),
+        hidden: closed ? false : worker?.hidden ?? false,
+        open: Boolean(tab),
+        closed,
+        worker: Boolean(worker),
+        coordinatorID: worker?.coordinatorID,
+      });
+    }
+    return activityList(result);
+  }
+  function summary() {
+    revision();
+    const tabs = new Map(ctx.ui.tabs.list().map((tab) => [tab.sessionID, tab]));
+    return footerSummary(
+      [...workers.values()]
+        .filter((worker) => !deleted.has(worker.workerID))
+        .map((worker) => {
+          const tab = tabs.get(worker.workerID);
+          return {
+            busy: tab
+              ? tab.busy
+              : ctx.data.session.status(worker.workerID) === "running",
+            attention: tab
+              ? tab.attention
+              : Boolean(
+                  ctx.data.session.permission.list(worker.workerID)?.length ||
+                    ctx.data.session.form.list(worker.workerID)?.length,
+                ),
+          };
+        }),
+      settings.workflows(),
+    );
+  }
+  async function forgetListOpened(id: string) {
+    if (!openedHere().includes(id)) return;
+    await saveListOpened((draft) => {
+      const ids = (draft.folders[folder()] ?? []).filter((value) => value !== id);
+      if (ids.length) draft.folders[folder()] = ids;
+      else delete draft.folders[folder()];
+    });
+  }
+  async function toggleDismiss(id: string) {
+    if (dismissed.ids.includes(id)) {
+      try {
+        await restore([id]);
+      } catch (value) {
+        error(value);
+      }
+    } else await close(id);
   }
   async function close(id: string) {
     if (stopped || closingRows.has(id)) return;
@@ -261,6 +433,7 @@ export function activity(
           parentID: null,
           limit: 100,
           order: "desc",
+          ...(footer ? { directory: folder() } : {}),
         },
         { signal: abort.signal },
       );
@@ -269,14 +442,15 @@ export function activity(
       for (const id of new Set([...pins.ids, ...dismissed.ids]))
         await resolveSession(id);
       const ids = [
-        ...new Set(
-          [...sessions.values()].flatMap((session) => {
+        ...new Set([
+          ...(footer ? trackedSessionIDs() : []),
+          ...[...sessions.values()].flatMap((session) => {
             const link = Link.safeParse(session.metadata?.opThreads);
             return link.success
               ? [session.id, link.data.coordinatorID]
               : [session.id];
           }),
-        ),
+        ]),
       ];
       for (let index = 0; index < ids.length && !stopped; index += 100) {
         const result = await rpc.snapshot(
@@ -293,6 +467,11 @@ export function activity(
       )) {
         await resolveSession(id);
       }
+      // Session reads do not load a Location; they give listed workers their times.
+      if (footer)
+        for (const worker of [...workers.values()])
+          if (!worker.hidden && !ctx.data.session.get(worker.workerID))
+            await resolveSession(worker.workerID);
       lastError = undefined;
     } catch (value) {
       error(value);
@@ -325,7 +504,8 @@ export function activity(
     if (action === "close") await close(item.id);
     if (action === "workers") await toggleThread(item.id);
   }
-  const rail = activityRail(ctx, core, (content) => {
+  // The footer mode never builds the rail, so it adds no frame callback or tree scan.
+  const rail = footer ? undefined : activityRail(ctx, core, (content) => {
     const runningIndicator = (id: string) => {
       if (!Spinner) return;
       const node = new Spinner(ctx.renderer, {
@@ -619,7 +799,7 @@ export function activity(
       render = () => {};
     };
   });
-  rail.toggle(ctx.options.activity !== false);
+  rail?.toggle(true);
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
   const stopEvents = ctx.data.listen(({ details }) => {
     if (!details.type.startsWith("session.")) return;
@@ -629,6 +809,7 @@ export function activity(
       sessions.delete(sessionID);
       workers.delete(sessionID);
       void restore([sessionID]).catch(error);
+      void forgetListOpened(sessionID).catch(error);
       if (pins.ids.includes(sessionID))
         void savePins((draft) => {
           draft.ids = draft.ids.filter((id) => id !== sessionID);
@@ -646,7 +827,7 @@ export function activity(
       }, 1000);
   });
   const timer = setInterval(() => {
-    rail.invalidate();
+    rail?.invalidate();
     changed();
     if (
       workInProgress(ctx.ui.tabs.list(), workers.keys(), (id) =>
@@ -666,19 +847,38 @@ export function activity(
         selected = id;
         if (id && !closingRows.has(id)) void restore([id]).catch(error);
       });
-      createEffect(() => {
-        ctx.themeMode;
-        themeColor(ctx.theme.text, fallbackColor);
-        themeColor(ctx.theme.border, fallbackColor);
-        sections.collapsed.length;
-        threadState.collapsed.length;
-        items();
-        render();
-        rail.invalidate();
-      });
+      if (rail)
+        createEffect(() => {
+          ctx.themeMode;
+          themeColor(ctx.theme.text, fallbackColor);
+          themeColor(ctx.theme.border, fallbackColor);
+          sections.collapsed.length;
+          threadState.collapsed.length;
+          items();
+          render();
+          rail.invalidate();
+        });
+      const pinCommand = {
+        id: "threads.activity.pin",
+        title: "Pin/unpin current Activity conversation",
+        palette: true,
+        slash: { name: "pin" },
+        async run() {
+          const route = ctx.ui.router.current();
+          if (route.type === "session") await pin(route.sessionID);
+        },
+      } as const;
+      const chooseCommand = {
+        id: "threads.activity.choose",
+        title: footer ? "Show threads and workers" : "Choose Activity conversation",
+        bind: "<leader>j",
+        palette: true,
+        slash: { name: "activities" },
+        run: openList,
+      } as const;
       ctx.keymap.layer(() => ({
         mode: "global",
-        commands: [
+        commands: footer ? [pinCommand, chooseCommand] : [
           {
             id: "threads.activity.threads",
             title: "Expand/collapse managed workers",
@@ -722,54 +922,77 @@ export function activity(
             palette: true,
             slash: { name: "activity" },
             run() {
-              rail.toggle();
+              rail?.toggle();
             },
           },
-          {
-            id: "threads.activity.pin",
-            title: "Pin/unpin current Activity conversation",
-            palette: true,
-            slash: { name: "pin" },
-            async run() {
-              const route = ctx.ui.router.current();
-              if (route.type === "session") await pin(route.sessionID);
-            },
-          },
-          {
-            id: "threads.activity.choose",
-            title: "Choose Activity conversation",
-            palette: true,
-            slash: { name: "activities" },
-            run() {
-              const route = ctx.ui.router.current();
-              ctx.ui.dialog.show(() => ActivityPicker({
-                ctx,
-                fallbackColor,
-                current: route.type === "session" ? route.sessionID : undefined,
-                items: () => [...items(true)].flatMap(([category, group]) =>
-                  group
-                    .flatMap((thread) => [thread.item, ...thread.children])
-                    .map((item) => ({
-                      ...item,
-                      category,
-                      closed: dismissed.ids.includes(item.id),
-                    })),
-                ),
-                pin,
-                open: focus,
-              }));
-            },
-          },
+          pinCommand,
+          chooseCommand,
         ],
       }));
       return null;
     },
   });
+  function openList() {
+    const route = ctx.ui.router.current();
+    const current = route.type === "session" ? route.sessionID : undefined;
+    ctx.ui.dialog.show(() => footer
+      ? ActivityPicker({
+          ctx,
+          fallbackColor,
+          title: "Threads",
+          note: ctx.ui.format.path(folder()),
+          current,
+          items: () => listItems().flatMap(([category, group]) =>
+            group.map((item) => ({ ...item, category })),
+          ),
+          pin,
+          dismiss: toggleDismiss,
+          open: focus,
+        })
+      : ActivityPicker({
+          ctx,
+          fallbackColor,
+          current,
+          items: () => [...items(true)].flatMap(([category, group]) =>
+            group
+              .flatMap((thread) => [thread.item, ...thread.children])
+              .map((item) => ({
+                ...item,
+                category,
+                closed: dismissed.ids.includes(item.id),
+              })),
+          ),
+          pin,
+          open: focus,
+        }));
+    if (footer) ctx.ui.dialog.set({ size: "large" });
+  }
+  const indicator = (id: string) => () =>
+    ThreadsIndicator({
+      ctx,
+      id,
+      fallbackColor,
+      spinner: Spinner !== undefined,
+      summary,
+      shortcut: () => ctx.keymap.shortcuts("threads.activity.choose")[0],
+      open: openList,
+    });
+  const removeFooter = ctx.ui.slot({
+    append: "prompt.footer.status",
+    render: indicator("threads-footer"),
+  });
+  const removeHomeFooter = ctx.ui.slot({
+    append: "home.footer.status",
+    render: indicator("threads-home-footer"),
+  });
   void load();
   return {
-    mounted: rail.mounted,
+    mounted: () => rail?.mounted() ?? false,
     isDismissed: (id: string) => closingRows.has(id) || dismissed.ids.includes(id),
     restore,
+    openList,
+    listOpened: (id: string) => openedHere().includes(id),
+    forgetListOpened,
     updateWorkers(values: z.infer<typeof WorkerView>[]) {
       for (const worker of values) workers.set(worker.workerID, worker);
       changed();
@@ -781,7 +1004,9 @@ export function activity(
       clearTimeout(refreshTimer);
       stopEvents();
       removeSlot();
-      rail.dispose();
+      removeFooter();
+      removeHomeFooter();
+      rail?.dispose();
     },
   };
 }

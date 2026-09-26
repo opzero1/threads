@@ -244,12 +244,16 @@ export function workflowUI(ctx: Plugin.Context) {
     if (ctx.ui.panel.current() || workflowProgressing(runs().map((run) => run.status)))
       refreshInBackground();
   }, 3000);
-  return () => {
-    abort.abort();
-    clearInterval(timer);
-    stopEvents();
-    removePanel();
-    removeFooter();
-    removeCommands();
+  return {
+    // Runs of the current owner that are still progressing; the footer indicator counts them.
+    active: () => runs().filter((run) => workflowProgressing([run.status])).length,
+    dispose() {
+      abort.abort();
+      clearInterval(timer);
+      stopEvents();
+      removePanel();
+      removeFooter();
+      removeCommands();
+    },
   };
 }

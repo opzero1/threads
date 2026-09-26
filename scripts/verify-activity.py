@@ -119,6 +119,8 @@ try:
     cli = json.loads(path.read_text())
     cli["theme"] = {"mode": "dark"}
     cli["plugins"][0]["options"].update({"openSessionIDs": [session["id"] for session in sessions[:2]], "tree": True, "mounts": True})
+    # The footer is the default; this suite checks the sidebar option with its legacy worker tabs.
+    cli["plugins"].append({"package": str(root), "options": {"activity": "sidebar", "workerTabs": "auto"}})
     path.write_text(json.dumps(cli))
     terminal = Terminal(sandbox, sessions[0]["id"])
     terminal.wait_for("ctrl+p commands")
@@ -447,15 +449,15 @@ try:
     os.write(terminal.master, b"\r")
     terminal.wait_for_match(lambda _: rect(f'activity-row-{yesterday["id"]}') is not None, "Yesterday expands after restart", 15, False)
     passed("collapsed sections persist across TUI restart and can be expanded again")
-    cli["plugins"].append({"package": str(root), "options": {"activity": False}})
+    cli["plugins"][-1]["options"]["activity"] = "footer"
     path.write_text(json.dumps(cli))
     terminal.wait_for_match(lambda _: rect("op-threads-activity") is None, "plugin reload restores native children", 30, False)
     terminal.wait_for("+ New session", left=True)
-    cli["plugins"][-1]["options"]["activity"] = True
+    cli["plugins"][-1]["options"]["activity"] = "sidebar"
     path.write_text(json.dumps(cli))
     terminal.wait_for("Activity", left=True)
     terminal.wait_for("Pinned", left=True)
-    passed("CLI plugin option reload detaches and remounts cleanly, retaining durable pins")
+    passed("switching the CLI plugin option to the footer and back detaches and remounts the sidebar cleanly, retaining durable pins")
     terminal.close(artifacts / "reloaded.txt")
     terminal = None
     sandbox.api("DELETE", f'/api/session/{older_session["id"]}')

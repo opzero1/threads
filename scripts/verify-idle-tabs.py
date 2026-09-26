@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import re
 import sys
 import threading
 import time
@@ -61,7 +62,7 @@ try:
 
     cli_path = sandbox.root / "config" / "opencode" / "cli.json"
     cli = json.loads(cli_path.read_text())
-    cli["plugins"].append({"package": str(target), "options": {"activity": False}})
+    cli["plugins"].append({"package": str(target), "options": {}})
     cli["plugins"][0]["options"].update({
         "openSessionIDs": [session["id"] for session in sessions],
         "perProcess": True, "history": True,
@@ -104,6 +105,11 @@ try:
     assert both_visible(), states()
     assert len({tuple(order) for order in orders()}) == 1, orders()
     passed("idle tab order remains identical and stable across terminals and periodic refreshes")
+    indicator = re.compile(r"\d+ workers?\b|\d+ workflows?\b|needs input")
+    footers = ["\n".join(terminal.screen.display[-3:]) for terminal in terminals]
+    assert not any(indicator.search(footer) for footer in footers), footers
+    assert all("Activity" not in "\n".join(line[:42] for line in terminal.screen.display) for terminal in terminals)
+    passed("idle terminals render no Threads footer indicator and no Activity sidebar by default")
 finally:
     stop.set()
     for reader in readers:

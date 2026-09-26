@@ -5,7 +5,11 @@ import { z } from "zod";
 import { ThreadsRpc } from "./src/rpc";
 import { activity } from "./src/activity";
 import { workflowUI } from "./src/workflow-ui";
-import { cleanRoleTitle } from "./src/activity-model";
+import {
+  cleanRoleTitle,
+  reportedTabAction,
+  threadsOptions,
+} from "./src/activity-model";
 import { workInProgress, workerWorking } from "./src/idle";
 import {
   BoxRenderable,
@@ -20,13 +24,15 @@ const CoordinatorRef = z.object({ coordinatorID: z.string() });
 export default Plugin.define({
   id: "op-threads",
   setup(ctx) {
-    const stopWorkflows = workflowUI(ctx);
+    const settings = threadsOptions(ctx.options);
+    const workflows = workflowUI(ctx);
     const rpc = ctx.client.rpc(ThreadsRpc);
     const sidebar = activity(
       ctx,
       { BoxRenderable, ScrollBoxRenderable, TextRenderable, TextAttributes, RGBA },
       { createEffect, createSignal },
       getComponentCatalogue().spinner,
+      { mode: settings.activity, workflows: workflows.active },
     );
     const [cleaned, saveCleaned] = ctx.storage.store("role-title-cleanup", {
       initial: { ids: [] as string[] },
@@ -38,6 +44,7 @@ export default Plugin.define({
     let stopped = false;
     let running = false;
     let reopenPending = false;
+    let refreshPending = false;
     let lastError: string | undefined;
     let movingFrom: string | undefined;
     let known: string[] = [];
@@ -79,29 +86,37 @@ export default Plugin.define({
         break;
       }
     }
+    function trackedCoordinatorIDs() {
+      const route = ctx.ui.router.current();
+      return [
+        ...new Set(
+          [
+            ...ctx.ui.tabs.list().map((tab) => tab.sessionID),
+            ...(route.type === "session" ? [route.sessionID] : []),
+          ].flatMap((sessionID) => {
+            const link = CoordinatorRef.safeParse(
+              ctx.data.session.get(sessionID)?.metadata?.opThreads,
+            );
+            return link.success
+              ? [sessionID, link.data.coordinatorID]
+              : [sessionID];
+          }),
+        ),
+      ].slice(0, 100);
+    }
     async function reconcile(reopen = false) {
       if (stopped || !ctx.ui.tabs.enabled()) return;
       if (running) {
         reopenPending ||= reopen;
+        // Coalesce, never drop: the last session event can be the one that finishes a worker.
+        refreshPending = true;
         return;
       }
       running = true;
+      refreshPending = false;
       try {
         groupTabs();
-        const route = ctx.ui.router.current();
-        const coordinatorIDs = [
-          ...new Set([
-            ...ctx.ui.tabs.list().flatMap((tab) => {
-              const link = CoordinatorRef.safeParse(
-                ctx.data.session.get(tab.sessionID)?.metadata?.opThreads,
-              );
-              return link.success
-                ? [tab.sessionID, link.data.coordinatorID]
-                : [tab.sessionID];
-            }),
-            ...(route.type === "session" ? [route.sessionID] : []),
-          ]),
-        ].slice(0, 100);
+        const coordinatorIDs = trackedCoordinatorIDs();
         if (!coordinatorIDs.length) return;
         const { workers } = await (reopen ? rpc.restore : rpc.snapshot)(
           { coordinatorIDs },
@@ -122,6 +137,22 @@ export default Plugin.define({
             .find((tab) => tab.sessionID === worker.workerID);
           if (closing.has(worker.workerID) && tab) continue;
           const closed = closing.delete(worker.workerID);
+          if (!reopen && sidebar.listOpened(worker.workerID)) {
+            const action = reportedTabAction(
+              worker,
+              ctx.data.session.status(worker.workerID),
+              tab,
+            );
+            if (action === "forget")
+              await sidebar.forgetListOpened(worker.workerID);
+            if (action === "close") {
+              if (ctx.ui.tabs.close(worker.workerID)) {
+                closing.add(worker.workerID);
+                await sidebar.forgetListOpened(worker.workerID);
+              }
+              continue;
+            }
+          }
           if (
             worker.hidden &&
             !tab?.active &&
@@ -142,6 +173,8 @@ export default Plugin.define({
             }
             continue;
           }
+          // Worker tabs open on demand from the list unless the auto option is set.
+          if (!reopen && settings.workerTabs !== "auto") continue;
           if (!reopen && !closed && seen.workerIDs.includes(worker.workerID))
             continue;
           if (
@@ -203,12 +236,39 @@ export default Plugin.define({
         if (reopenPending) {
           reopenPending = false;
           void reconcile(true);
-        }
+        } else if (refreshPending && !stopped) void reconcile();
       }
     }
     const refresh = () => {
       void reconcile();
     };
+    // Without automatic worker tabs, /threads restores hidden and dismissed workers into
+    // the list instead of reopening a tab (and so loading a Location) for each of them.
+    async function restoreWorkers() {
+      try {
+        const ids = trackedCoordinatorIDs();
+        if (ids.length) {
+          const { workers } = await rpc.restore(
+            { coordinatorIDs: ids },
+            {
+              location: ctx.location ?? ctx.data.location.default(),
+              signal: abort.signal,
+            },
+          );
+          if (stopped) return;
+          known = [...new Set([...known, ...workers.map((worker) => worker.workerID)])];
+          await sidebar.restore(workers.map((worker) => worker.workerID));
+          sidebar.updateWorkers(workers);
+        }
+      } catch (error) {
+        if (!stopped)
+          ctx.ui.toast.show({
+            message: `Managed workers: ${String(error)}`,
+            variant: "error",
+          });
+      }
+      if (!stopped) sidebar.openList();
+    }
     const stopEvents = ctx.data.listen(({ details }) => {
       if (details.type.startsWith("session.")) refresh();
     });
@@ -232,10 +292,16 @@ export default Plugin.define({
           commands: [
             {
               id: "threads.reopen",
-              title: "Reopen managed worker tabs",
+              title:
+                settings.workerTabs === "auto"
+                  ? "Reopen managed worker tabs"
+                  : "Restore and list managed workers",
               palette: true,
               slash: { name: "threads" },
-              run: () => reconcile(true),
+              run: () =>
+                settings.workerTabs === "auto"
+                  ? reconcile(true)
+                  : restoreWorkers(),
             },
           ],
         }));
@@ -244,7 +310,7 @@ export default Plugin.define({
     });
     refresh();
     return () => {
-      stopWorkflows();
+      workflows.dispose();
       stopped = true;
       abort.abort();
       sidebar.dispose();
