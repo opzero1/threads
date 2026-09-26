@@ -11,6 +11,7 @@ import {
 import { activityRail } from "./activity-rail";
 import { themeColor, themeHue, themeMuted } from "./activity-theme";
 import { ActivityPicker } from "./activity-picker";
+import { workInProgress } from "./idle";
 import { ThreadsRpc, WorkerView } from "./rpc";
 
 type Session = NonNullable<
@@ -647,7 +648,12 @@ export function activity(
   const timer = setInterval(() => {
     rail.invalidate();
     changed();
-    void load();
+    if (
+      workInProgress(ctx.ui.tabs.list(), workers.keys(), (id) =>
+        ctx.data.session.status(id),
+      )
+    )
+      void load();
   }, 30000);
   const removeSlot = ctx.ui.slot({
     append: "app",

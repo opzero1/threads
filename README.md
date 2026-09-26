@@ -108,7 +108,7 @@ Plugin option `workflowConcurrency` sets the default concurrency for new workflo
 
 ## Terminal and RPC
 
-The terminal synchronizes workers before opening native tabs without changing focus. A TUI memory index survives plugin reloads and respects manually closed native tabs. Conversations closed through Activity stay dismissed across restarts. `/threads` explicitly reopens workers for open coordinator tabs, including workers dismissed through Activity. A new TUI recovers the other workers from durable storage. Closing the TUI does not interrupt workers.
+The terminal synchronizes workers before opening native tabs without changing focus. It opens a tab automatically only while a worker is running or has not started its first execution. OpenCode loads the Location of every open tab, so finished workers are never reopened automatically. A TUI memory index survives plugin reloads and respects manually closed native tabs. Conversations closed through Activity stay dismissed across restarts. `/threads` explicitly reopens workers for open coordinator tabs, including finished workers and workers dismissed through Activity. A new TUI recovers tabs only for workers that are still working. Closing the TUI does not interrupt workers.
 
 Activity shows Main and Worker roles as row subtitles. It omits a leading `[Main] ` or `[Worker] ` from known managed titles, including closed history rows and prefixes reapplied by older clients. Managed identity comes from the worker RPC, including lookups for loaded history conversations whose workers are on older pages. Unrelated prefixed titles remain unchanged.
 
@@ -116,7 +116,7 @@ For open managed tabs, the TUI also removes one legacy prefix from the fresh sav
 
 When upgrading, restart all existing TUIs. Older 0.1.7 clients still write role prefixes and can reapply them after cleanup.
 
-Workers with `PASS` or `PASS WITH NOTES` reports hide automatically once idle. This also applies to reports saved before upgrading. Unreported workers and `FAIL` or `INCONCLUSIVE` reports stay visible. The selected tab, running workers, and tabs needing input stay open until they are inactive.
+Workers with `PASS` or `PASS WITH NOTES` reports hide automatically once idle. This also applies to reports saved before upgrading. Unreported workers and `FAIL` or `INCONCLUSIVE` reports stay visible while their tab is open; once you close it, it stays closed until `/threads`. The selected tab, running workers, and tabs needing input stay open until they are inactive.
 
 The coordinator can call `threads_hide` when a worker is no longer needed. Hiding preserves the conversation and report, survives restarts, and does not free an admission slot. `/threads` restores hidden workers and keeps them visible for inspection. A valid `threads_send` follow-up also restores its worker. Visibility overrides belong to the original report message ID, so recreating a deleted worker cannot inherit its hidden state.
 
@@ -133,7 +133,7 @@ input: { coordinatorIDs: string[] }
 result: { workers: WorkerView[] }
 ```
 
-The input accepts at most 100 coordinator IDs. Raw HTTP RPC requests wrap the input as `{ "input": { "coordinatorIDs": ["ses_..."] } }`. Each method declares `errors: {}` and the RPC declares `events: {}`. The TUI subscribes to native session events and reconciles at most one snapshot at a time, with a three-second missed-event refresh.
+The input accepts at most 100 coordinator IDs. Raw HTTP RPC requests wrap the input as `{ "input": { "coordinatorIDs": ["ses_..."] } }`. Each method declares `errors: {}` and the RPC declares `events: {}`. The TUI subscribes to native session events and reconciles at most one snapshot at a time. Its three-second missed-event refresh runs only while a tab is busy or needs input, or a known worker is running. Each RPC is located and loads its OpenCode Location, so an idle TUI sends none.
 
 ## Activity sidebar
 
@@ -159,7 +159,7 @@ Managed workers appear indented under their main conversation. The stack appears
 
 Each main conversation with workers has a **▾ Workers (N)** heading below its subtitle. Click the heading to collapse the worker list, or **▸ Workers (N)** to expand it. When the list is collapsed, the main row summarizes worker activity, with input requests taking precedence over running spinners. Collapsing keeps the workers running and their tabs open. Stack preferences survive reloads and restarts, and `/activities` still lists collapsed workers.
 
-Activity fetches the 100 most recent root sessions across projects and refreshes them in the background. Open and pinned sessions are merged into the list; older pins and known main conversations are resolved individually. Archived, deleted, and native child sessions are excluded. Closed managed workers are not reintroduced by fetched history. `/threads` restores their native tabs using the existing worker visibility rules.
+Activity fetches the 100 most recent root sessions across projects and refreshes them after session events, and every 30 seconds while work is in progress. Open and pinned sessions are merged into the list; older pins and known main conversations are resolved individually. Archived, deleted, and native child sessions are excluded. Closed managed workers are not reintroduced by fetched history. `/threads` restores their native tabs using the existing worker visibility rules.
 
 Left-click a row to open or focus its real session. Each row has one-click **[◇]** (pin), **[◆]** (unpin), and **[×]** (close from Activity) buttons beside its title. These controls work on both main and worker rows without selecting a background conversation. Closing removes the row and closes its native tab when open. Saved history and the pin preference remain intact. Dismissed rows stay hidden through refreshes, reloads, and restarts. Selecting a closed conversation in `/activities` restores it; `/threads` also restores dismissed managed workers. Reopening a conversation through native session navigation restores its Activity row. Right-click also opens the action menu. The mouse wheel scrolls the list, and the native rail edge remains draggable.
 

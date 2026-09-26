@@ -2,6 +2,7 @@ import type { Plugin } from "@opencode/plugin/tui";
 import { createEffect, createSignal, For, Show } from "solid-js";
 import type { Accessor } from "solid-js";
 import { WorkflowsRpc } from "./workflow-rpc";
+import { workflowProgressing } from "./idle";
 import { Json } from "./workflow-types";
 import type { WorkflowRun, WorkflowSummary } from "./workflow-types";
 
@@ -239,7 +240,10 @@ export function workflowUI(ctx: Plugin.Context) {
   const stopEvents = ctx.data.listen(({ details }) => {
     if (details.type.startsWith("session.") || details.type.startsWith("rpc.workflows.")) refreshInBackground();
   });
-  const timer = setInterval(refreshInBackground, 3000);
+  const timer = setInterval(() => {
+    if (ctx.ui.panel.current() || workflowProgressing(runs().map((run) => run.status)))
+      refreshInBackground();
+  }, 3000);
   return () => {
     abort.abort();
     clearInterval(timer);

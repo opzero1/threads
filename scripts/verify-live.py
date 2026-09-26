@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import sys
+import time
 import uuid
 
 from fixture import Provider, config
@@ -248,9 +249,31 @@ try:
     assert worker_id not in sandbox.api("GET", "/api/session/active")["data"]
     passed("service restart preserves the relation without replaying worker tasks")
 
+    finished = [unreported[2], unreported[3], stopped_id, next(session["id"] for session in roots() if session["title"] == "Replacement worker")]
+    provider.release.clear()
+    provider.responses["FIXTURE_RECOVER"] = {
+        "name": "threads_report",
+        "arguments": {"verdict": "PASS", "summary": "Recovered after restart", "evidence": []},
+        "wait": True,
+    }
+    resumed = run_tool(coordinator_id, "threads_send", {"workerID": worker_id, "key": "recover-1", "text": "FIXTURE_RECOVER: report after the restart."})
+    assert resumed["state"]["status"] == "completed", resumed
+    eventually(lambda: worker_id in sandbox.api("GET", "/api/session/active")["data"])
     terminal = Terminal(sandbox, coordinator_id)
-    terminal.wait_for("Fixture worker", left=True)
-    passed("a fresh TUI recovers the managed worker tab after a service restart")
+
+    def open_tabs():
+        try:
+            return {tab["sessionID"] for tab in json.loads((artifacts / "tabs.json").read_text())["tabs"]}
+        except (FileNotFoundError, json.JSONDecodeError):
+            return set()
+
+    terminal.wait_for_match(lambda _: worker_id in open_tabs(), "running worker tab recovered", 40, False)
+    passed("a fresh TUI recovers a running managed worker tab after a service restart")
+    settled = time.monotonic()
+    terminal.wait_for_match(lambda _: time.monotonic() - settled >= 7, "two missed-event refresh intervals", 10, False)
+    assert not set(finished) & open_tabs(), open_tabs()
+    passed("a fresh TUI leaves finished workers' tabs closed so their Locations stay idle")
+    provider.release.set()
 
     tool_names = {tool["function"]["name"] for request in provider.requests for tool in request.get("tools", [])}
     assert {"threads_spawn", "threads_list", "threads_send", "threads_interrupt", "threads_report", "subagent"} <= tool_names, tool_names

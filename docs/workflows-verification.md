@@ -27,6 +27,22 @@ Current verification uses OpenCode `2.0.14`, Bun `1.4.0`, and published `@openco
 
 Reopening a TUI only addresses a reload problem after the installed package has passed a clean-start check. Do not recommend it as a confirmed fix based on server state or probe-assisted rendering alone.
 
+## Version 0.2.5 idle Locations
+
+On OpenCode 2.0.16 the TUI loads the Location of every open tab when it starts. It also keeps revalidating Locations it has loaded for the rest of its life, even after their tabs close. Evicting a Location with MCP servers publishes `location.shutdown` followed by `mcp.resources.changed` and `mcp.status.changed`. The TUI answers those events with `GET /api/mcp/resource` and `GET /api/command` for that Location, which boots it again within a second. Plain OpenCode does this without Threads.
+
+Threads 0.2.4 added to that set. Its tab reconciler opened a tab for every visible worker of an open coordinator, including finished `FAIL`, `INCONCLUSIVE`, and unreported workers. Its memory-only index repeated this on every TUI start. Three timers also sent located RPCs to the active session's Location while idle: the tab reconciler and workflow panel every 3 seconds, and Activity every 30 seconds. Without MCP servers, those RPCs alone re-woke an evicted Location within 3 seconds.
+
+Version 0.2.5 opens worker tabs automatically only while a worker is running or has not started its first execution. `/threads` still reopens finished workers. The timers send RPCs only while a tab is busy or needs input, a known worker is running, a workflow run can progress, or the workflow panel is open. Session events still refresh immediately. Activity's session list, individual session lookups, snapshot lookups, and input-request reads were measured and do not boot Locations, so they are unchanged.
+
+Isolated sandbox runs with the same fixture compared 0.2.4 and 0.2.5:
+
+- Without MCP servers, 0.2.4 reopened two finished worker tabs and booted their Locations. After every Location was evicted, 0.2.4 re-woke two within 3.2 seconds; 0.2.5 kept all four evicted for 40 seconds and sent no requests.
+- With three MCP servers per Location, 0.2.4 loaded six Locations and OpenCode rebooted all six. 0.2.5 never loaded the finished workers' Locations. OpenCode still rebooted the four Locations of the open tabs.
+- In both builds, a newly spawned running worker opened its tab without taking focus, Activity showed it under its coordinator, and its `PASS` report hid it again.
+
+`verify:live` now requires a fresh TUI to recover a running worker's tab and to leave finished workers closed. Typecheck, 123 unit tests, `verify:live`, `verify:activity`, `verify:tabs`, `verify:idle-tabs`, and `verify:workflows` passed on OpenCode 2.0.16.
+
 ## Version 0.2.2 compiled TUI
 
 The npm package now ships a Solid-compiled `tui.js`, built by `prepack`, rather than loading TSX at runtime. The host's Solid transform excludes `node_modules`; raw JSX there does not receive the reactive bindings that the picker and workflow panel need. External runtime packages remain imports so OpenCode can supply its own renderer and Solid instance.

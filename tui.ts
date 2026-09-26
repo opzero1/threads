@@ -6,6 +6,7 @@ import { ThreadsRpc } from "./src/rpc";
 import { activity } from "./src/activity";
 import { workflowUI } from "./src/workflow-ui";
 import { cleanRoleTitle } from "./src/activity-model";
+import { workInProgress, workerWorking } from "./src/idle";
 import {
   BoxRenderable,
   ScrollBoxRenderable,
@@ -39,6 +40,7 @@ export default Plugin.define({
     let reopenPending = false;
     let lastError: string | undefined;
     let movingFrom: string | undefined;
+    let known: string[] = [];
     function groupTabs() {
       if (sidebar.mounted()) return;
       const tabs = ctx.ui.tabs.list().map((tab) => {
@@ -108,6 +110,7 @@ export default Plugin.define({
             signal: abort.signal,
           },
         );
+        known = workers.map((worker) => worker.workerID);
         if (reopen)
           await sidebar.restore(workers.map((worker) => worker.workerID));
         sidebar.updateWorkers(workers);
@@ -140,6 +143,12 @@ export default Plugin.define({
             continue;
           }
           if (!reopen && !closed && seen.workerIDs.includes(worker.workerID))
+            continue;
+          if (
+            !reopen &&
+            !tab &&
+            !workerWorking(worker, ctx.data.session.status(worker.workerID))
+          )
             continue;
           await ctx.data.session.sync(worker.workerID);
           if (
@@ -203,7 +212,14 @@ export default Plugin.define({
     const stopEvents = ctx.data.listen(({ details }) => {
       if (details.type.startsWith("session.")) refresh();
     });
-    const timer = setInterval(refresh, 3000);
+    const timer = setInterval(() => {
+      if (
+        workInProgress(ctx.ui.tabs.list(), known, (id) =>
+          ctx.data.session.status(id),
+        )
+      )
+        refresh();
+    }, 3000);
     const removeSlot = ctx.ui.slot({
       append: "app",
       render: () => {
