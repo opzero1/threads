@@ -9,7 +9,7 @@ import { projectRoot, recordedGrants, resolveGrantedPaths, withResolvedGrants } 
 import { permissionMatches } from "../src/permissions";
 import { threads, workerIdentity } from "../src/threads";
 import { WorkflowAgentInput, type WorkflowRun } from "../src/workflow-types";
-import { assertGrantedProject, workflowSource } from "../src/workflow-worker";
+import { assertGrantedProject, assertWorkerProject, workflowSource } from "../src/workflow-worker";
 
 const temporary: string[] = [];
 afterEach(async () => Promise.all(temporary.splice(0).map((path) => rm(path, { recursive: true, force: true }))));
@@ -149,6 +149,29 @@ describe("worker project scope", () => {
     await expect(assertGrantedProject([deny(`${directory}/.opencode-workflows/*`)], [], [repo], repo, checkout))
       .rejects.toThrow(`would make ${checkout} local`);
   });
+
+  test("a worker's project is checked where it runs, and a checkout that is its own project needs no grant", async () => {
+    const { directory, refs } = await scratch();
+    const grant = join(directory, "granted");
+    const repo = await repository(join(grant, "repository"));
+    const checkout = join(grant, ".opencode-workflows", "checkout");
+    git(repo, "worktree", "add", "-q", "-b", "checkout", checkout);
+    const deny = (resource: string): Rule => ({ action: "external_directory", resource, effect: "deny" });
+    const local = `Workflow directory ${checkout} would make ${checkout} local to its worker, where the explicit external_directory deny`;
+    await assertWorkerProject([], [], [grant], checkout, true);
+    await assertWorkerProject([], [], [refs], checkout, true);
+    await expect(assertWorkerProject([], [deny("*/.opencode-workflows/*/private/*")], [grant], checkout, true))
+      .rejects.toThrow(`${local} (*/.opencode-workflows/*/private/*) cannot apply`);
+    await expect(assertWorkerProject([deny(`${grant}/.opencode-workflows/*`)], [], [grant], checkout, true))
+      .rejects.toThrow(`${local} (${grant}/.opencode-workflows/*) cannot apply`);
+    // A deny elsewhere in the grant stays outside the checkout, where the worker's own rules apply it.
+    await assertWorkerProject([], [deny(`${grant}/secret/*`)], [grant], checkout, true);
+    // Any other location keeps its whole project within the grants.
+    await expect(assertWorkerProject([], [], [refs], checkout, false)).rejects.toThrow(`is in project ${checkout}, which extends beyond its granted paths`);
+    await expect(assertWorkerProject([], [], [join(repo, "project")], join(repo, "project"), true))
+      .rejects.toThrow(`is in project ${repo}, which extends beyond its granted paths`);
+    await expect(assertWorkerProject([deny(`${repo}/private/*`)], [], [grant], join(repo, "project"), false)).rejects.toThrow(`would make ${repo} local`);
+  });
 });
 
 type Rule = Permission.Rule;
@@ -167,7 +190,10 @@ async function fakeThreads(options: { coordinatorPermissions?: Rule[]; profiles?
   const created: Record<string, any>[] = [];
   const prompts: { sessionID: string; text: string }[] = [];
   const updates: { sessionID: string; permissions: Rule[] }[] = [];
+  const events: string[] = [];
   const agentLookups: string[] = [];
+  // Like OpenCode, a Location's profile adds the rules of every ancestor directory's configuration.
+  const layers: Record<string, Record<string, Rule[]>> = {};
   const profiles: Record<string, Rule[]> = {
     build: [...defaults, { action: "subagent", resource: "*", effect: "allow" }],
     writer: [...defaults, { action: "*", resource: "*", effect: "allow" }],
@@ -194,11 +220,24 @@ async function fakeThreads(options: { coordinatorPermissions?: Rule[]; profiles?
       },
       async update(input: { sessionID: string; permissions: Rule[] }) {
         updates.push(input);
+        events.push(`update ${input.sessionID}`);
         sessions.get(input.sessionID)!.permissions = input.permissions;
       },
       async prompt(input: { sessionID: string; id: string; text: string }) {
         prompts.push(input);
+        events.push(`prompt ${input.sessionID}`);
         if (sessions.get(input.sessionID)?.metadata?.opWorkflow) await api.prepareWorkflowPrompt(input.sessionID, input.id);
+      },
+      async move(input: { sessionID: string; directory: string }) {
+        events.push(`move ${input.sessionID} ${input.directory}`);
+        sessions.get(input.sessionID)!.location = { directory: input.directory };
+      },
+      async switchAgent(input: { sessionID: string; agent: string }) {
+        events.push(`agent ${input.sessionID} ${input.agent}`);
+        sessions.get(input.sessionID)!.agent = input.agent;
+      },
+      async interrupt(input: { sessionID: string }) {
+        events.push(`interrupt ${input.sessionID}`);
       },
       async switchModel() {},
     },
@@ -212,7 +251,10 @@ async function fakeThreads(options: { coordinatorPermissions?: Rule[]; profiles?
           throw new Error(`Agent not found: ${agentID}`);
         }
         if (!permissions) throw new Error(`Agent not found: ${agentID}`);
-        return { data: { permissions } };
+        const layered = Object.entries(layers)
+          .filter(([directory]) => location.directory === directory || location.directory.startsWith(`${directory}/`))
+          .flatMap(([, agents]) => agents[agentID] ?? []);
+        return { data: { permissions: [...permissions, ...layered] } };
       },
     },
     storage: {
@@ -226,7 +268,7 @@ async function fakeThreads(options: { coordinatorPermissions?: Rule[]; profiles?
   } as unknown as Pick<Plugin.Context, "session" | "agent" | "storage">;
   api = threads(ctx, 8);
   const runtime = { agent: "build", model: { providerID: "test", id: "model" } } as never;
-  return { ...paths, api, coordinatorID, sessions, created, prompts, updates, agentLookups, storage, runtime, profiles };
+  return { ...paths, api, coordinatorID, sessions, created, prompts, updates, events, agentLookups, layers, storage, runtime, profiles };
 }
 
 describe("managed workers with grants", () => {
@@ -273,7 +315,8 @@ describe("managed workers with grants", () => {
     const ownerID = Session.ID.make(fixture.coordinatorID);
     const base = { title: "Exact", directory: fixture.worker, task: "Read refs", paths: [fixture.refs] };
     const workflow = (key: string, agent: string, access: "read" | "write") => fixture.api.spawnWorkflow(fixture.coordinatorID,
-      { ...base, key: `workflow:wfr_test:${key}`, agent }, fixture.runtime, { ownerID, runID: "wfr_test", stepKey: key, callerAgent: "build", access });
+      { ...base, key: `workflow:wfr_test:${key}`, agent }, fixture.runtime,
+      { ownerID, runID: "wfr_test", stepKey: key, callerAgent: "build", access, granted: false, isolation: "shared" });
     fixture.profiles["root-guarded"] = [...defaults, exact];
     await expect(fixture.api.spawn(fixture.coordinatorID, { ...base, key: "role", agent: "root-guarded" }, fixture.runtime)).rejects.toThrow(blocked);
     for (const access of ["read", "write"] as const) await expect(workflow(`role-${access}`, "root-guarded", access)).rejects.toThrow(blocked);
@@ -309,7 +352,8 @@ describe("managed workers with grants", () => {
   test("workflow workers carry grants into creation and the read profile applied at first prompt", async () => {
     const fixture = await fakeThreads();
     const ownerID = Session.ID.make(fixture.coordinatorID);
-    const workflow = (stepKey: string, access: "read" | "write") => ({ ownerID, runID: "wfr_test", stepKey, callerAgent: "build", access });
+    const workflow = (stepKey: string, access: "read" | "write") =>
+      ({ ownerID, runID: "wfr_test", stepKey, callerAgent: "build", access, granted: false, isolation: "shared" as const });
     await fixture.api.spawnWorkflow(fixture.coordinatorID, {
       key: "workflow:wfr_test:write", title: "Write", directory: fixture.worker, task: "Write refs", agent: "writer", paths: [fixture.link],
     }, fixture.runtime, workflow("write", "write"));
@@ -333,5 +377,107 @@ describe("managed workers with grants", () => {
     await expect(fixture.api.spawnWorkflow(fixture.coordinatorID, {
       key: "workflow:wfr_test:write", title: "Write", directory: fixture.worker, task: "Write refs", agent: "writer", paths: [fixture.other],
     }, fixture.runtime, workflow("write", "write"))).rejects.toThrow("different request");
+  });
+});
+
+describe("workflow workers at their destination", () => {
+  // A worktree step reserves its worker at the source repository, then moves it into the checkout. The
+  // role at the checkout adds rules from `<grant>/.opencode-workflows/`, which the source never sees.
+  async function relocation(options: Parameters<typeof fakeThreads>[0] = {}) {
+    const fixture = await fakeThreads(options);
+    const grant = join(fixture.directory, "granted");
+    const source = await repository(join(grant, "repository"));
+    const checkout = join(grant, ".opencode-workflows", "checkout");
+    git(source, "worktree", "add", "-q", "-b", "checkout", checkout);
+    const ownerID = Session.ID.make(fixture.coordinatorID);
+    const metadata = (key: string) => ({ ownerID, runID: "wfr_test", stepKey: key, callerAgent: "build", access: "write" as const });
+    const request = (key: string, paths?: string[], directory = checkout) =>
+      ({ key: `workflow:wfr_test:${key}`, title: key, directory, task: "Write", agent: "writer", ...(paths === undefined ? {} : { paths }) });
+    return {
+      ...fixture, grant, source, checkout,
+      workerID: (key: string) => workerIdentity(fixture.coordinatorID, `workflow:wfr_test:${key}`),
+      layer: (rules: Rule[]) => { fixture.layers[join(grant, ".opencode-workflows")] = { writer: rules }; },
+      setCoordinatorPermissions: (rules: Rule[]) => { fixture.sessions.get(fixture.coordinatorID)!.permissions = rules; },
+      reserve: (key: string, paths?: string[]) =>
+        fixture.api.reserveWorkflow(fixture.coordinatorID, request(key, paths), source, fixture.runtime, metadata(key)),
+      spawn: (key: string, granted: boolean, paths?: string[], isolation: "shared" | "worktree" = "worktree") =>
+        fixture.api.spawnWorkflow(fixture.coordinatorID, request(key, paths, isolation === "worktree" ? checkout : source), fixture.runtime,
+          { ...metadata(key), granted, isolation }),
+    };
+  }
+
+  test("a reservation fails before it moves or is prompted when the role at its checkout denies a path that the checkout makes local", async () => {
+    const fixture = await relocation();
+    const deny: Rule = { action: "external_directory", resource: "*/.opencode-workflows/*/private/*", effect: "deny" };
+    fixture.layer([deny]);
+    await fixture.reserve("scope", [fixture.grant]);
+    const workerID = fixture.workerID("scope");
+    await expect(fixture.spawn("scope", true, [fixture.grant])).rejects.toThrow(
+      `Workflow directory ${fixture.checkout} would make ${fixture.checkout} local to its worker, where the explicit external_directory deny (${deny.resource}) cannot apply`,
+    );
+    expect(fixture.events).toEqual([`interrupt ${workerID}`]);
+    expect(fixture.prompts).toEqual([]);
+    expect(fixture.sessions.get(workerID)!.location.directory).toBe(fixture.source);
+  });
+
+  test("a reservation gets its permissions from the role at its checkout and the coordinator's current rules before its first prompt", async () => {
+    const fixture = await relocation({ coordinatorPermissions: [{ action: "external_directory", resource: "*", effect: "ask" }] });
+    const secret: Rule = { action: "external_directory", resource: `${fixture.grant}/secret/*`, effect: "deny" };
+    fixture.layer([secret]);
+    await fixture.reserve("refresh", [fixture.grant]);
+    const workerID = fixture.workerID("refresh");
+    const reservation: Rule[] = fixture.sessions.get(workerID)!.permissions;
+    fixture.setCoordinatorPermissions([{ action: "external_directory", resource: "*", effect: "ask" }, { action: "shell", resource: "*", effect: "ask" }]);
+    await fixture.spawn("refresh", true, [fixture.grant]);
+    const destination = [...fixture.profiles.writer, secret];
+    const stale = [...destination, ...reservation];
+    const effective = [...destination, ...fixture.sessions.get(workerID)!.permissions];
+    // The reservation's source-role rules put the grant after the checkout role's deny.
+    expect(decide(stale, "external_directory", `${fixture.grant}/secret/*`)).toBe("allow");
+    expect(decide(effective, "external_directory", `${fixture.grant}/secret/*`)).toBe("deny");
+    expect(decide(effective, "external_directory", `${fixture.grant}/repository/*`)).toBe("allow");
+    expect(decide(effective, "external_directory", `${fixture.other}/*`)).toBe("ask");
+    expect(decide(stale, "shell", "ls")).toBe("allow");
+    expect(decide(effective, "shell", "ls")).toBe("deny");
+    expect(fixture.events).toEqual([
+      `move ${workerID} ${fixture.checkout}`, `agent ${workerID} writer`, `update ${workerID}`, `prompt ${workerID}`,
+    ]);
+  });
+
+  test("the coordinator's rules at the time of the first prompt decide the destination check", async () => {
+    const fixture = await relocation();
+    await fixture.reserve("current", [fixture.grant]);
+    fixture.setCoordinatorPermissions([{ action: "external_directory", resource: `${fixture.grant}/.opencode-workflows/*`, effect: "deny" }]);
+    await expect(fixture.spawn("current", true, [fixture.grant])).rejects.toThrow(`deny (${fixture.grant}/.opencode-workflows/*) cannot apply`);
+    expect(fixture.prompts).toEqual([]);
+    expect(fixture.events).toEqual([`interrupt ${fixture.workerID("current")}`]);
+  });
+
+  test("a reservation in the owner's own project is refreshed at its checkout without a project check", async () => {
+    const fixture = await relocation({ coordinatorPermissions: [{ action: "external_directory", resource: "*", effect: "ask" }] });
+    const deny: Rule = { action: "external_directory", resource: "*/.opencode-workflows/*/private/*", effect: "deny" };
+    fixture.layer([deny]);
+    await fixture.reserve("owned");
+    const workerID = fixture.workerID("owned");
+    const reservation: Rule[] = fixture.sessions.get(workerID)!.permissions;
+    await fixture.spawn("owned", false);
+    const destination = [...fixture.profiles.writer, deny];
+    const elsewhere = `${fixture.directory}/.opencode-workflows/other/private/*`;
+    // The preserved ask follows the role's rules, so only recomputed rules reassert the checkout role's deny after it.
+    expect(decide([...destination, ...reservation], "external_directory", elsewhere)).toBe("ask");
+    expect(decide([...destination, ...fixture.sessions.get(workerID)!.permissions], "external_directory", elsewhere)).toBe("deny");
+    expect(fixture.prompts.map((prompt) => prompt.sessionID)).toEqual([workerID]);
+  });
+
+  test("a new worker that only a grant admits is checked with the coordinator's current rules before its session exists", async () => {
+    const fixture = await relocation();
+    fixture.setCoordinatorPermissions([{ action: "external_directory", resource: `${fixture.source}/private/*`, effect: "deny" }]);
+    await expect(fixture.spawn("fresh", true, [fixture.grant], "shared")).rejects.toThrow(`would make ${fixture.source} local to its worker`);
+    expect(fixture.created).toHaveLength(0);
+    expect([...fixture.storage.keys()]).toEqual([]);
+    fixture.setCoordinatorPermissions([]);
+    await fixture.spawn("fresh", true, [fixture.grant], "shared");
+    expect(fixture.created.map((session) => session.location.directory)).toEqual([fixture.source]);
+    expect(fixture.updates).toEqual([]);
   });
 });

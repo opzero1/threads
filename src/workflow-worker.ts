@@ -177,14 +177,34 @@ export async function assertGrantedProject(
   worktree?: string,
 ) {
   const root = await projectRoot(directory);
+  assertWithinGrants(paths, directory, root);
+  for (const local of worktree === undefined ? [root] : [root, worktree]) assertClearOfDenies(inherited, role, directory, local);
+}
+
+// The same rule where the worker actually runs, with the role that applies there. A worktree checkout
+// that is its own project holds a copy of the granted source, so it needs no grant of its own.
+export async function assertWorkerProject(
+  inherited: Permission.Ruleset,
+  role: Permission.Ruleset,
+  paths: readonly string[] | undefined,
+  directory: string,
+  checkout: boolean,
+) {
+  const root = await projectRoot(directory);
+  if (!checkout || root !== directory) assertWithinGrants(paths, directory, root);
+  assertClearOfDenies(inherited, role, directory, root);
+}
+
+function assertWithinGrants(paths: readonly string[] | undefined, directory: string, root: string) {
   if (!(paths ?? []).some((path) => inside(root, path))) {
     throw new Error(`Workflow directory ${directory} is in project ${root}, which extends beyond its granted paths`);
   }
-  for (const local of worktree === undefined ? [root] : [root, worktree]) {
-    const deny = explicitDenies(inherited, role).find((rule) => permissionReaches(rule.resource, local));
-    if (deny) {
-      throw new Error(`Workflow directory ${directory} would make ${local} local to its worker, where the explicit external_directory deny (${deny.resource}) cannot apply`);
-    }
+}
+
+function assertClearOfDenies(inherited: Permission.Ruleset, role: Permission.Ruleset, directory: string, local: string) {
+  const deny = explicitDenies(inherited, role).find((rule) => permissionReaches(rule.resource, local));
+  if (deny) {
+    throw new Error(`Workflow directory ${directory} would make ${local} local to its worker, where the explicit external_directory deny (${deny.resource}) cannot apply`);
   }
 }
 

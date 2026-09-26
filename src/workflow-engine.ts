@@ -403,6 +403,7 @@ export function workflowEngine(
           if (existing) await options.warmWorker(existing.id);
         }
         const sourceProfile = await agentProfile(input.agent, source);
+        // Fails fast at the source; spawnWorkflow repeats the check with the role where the worker runs.
         if (granted) {
           const worktree = input.isolation === "worktree" ? workflowDirectoryPlan(beforeAdmission, directoryInput, key).directory : undefined;
           await assertGrantedProject(inherited, sourceProfile.data.permissions, input.paths, source, worktree);
@@ -548,7 +549,7 @@ export function workflowEngine(
             paths: input.paths,
           }, runtime as Parameters<Threads["spawnWorkflow"]>[2], {
             ownerID: Session.ID.make(run.ownerID), runID: run.id, stepKey: key,
-            callerAgent: run.callerAgent, access: input.access,
+            callerAgent: run.callerAgent, access: input.access, granted, isolation: input.isolation,
           });
           const finalizeProfile = async () => {
             if (options.warmWorker && await nativeWorker(current.workerID)) await options.warmWorker(current.workerID);

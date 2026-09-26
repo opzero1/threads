@@ -103,11 +103,13 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
   const validationErrors: string[] = [];
   const reservations: string[] = [];
   const spawnInputs: { key: string; directory?: string; paths?: string[] }[] = [];
+  const spawnScopes: { granted: unknown; isolation: unknown }[] = [];
   const fakeWorkers = {
     async reserveWorkflow(_actor: string, input: { key: string }) { reservations.push(input.key); return "source-project"; },
     async spawnWorkflow(actor: string, input: { key: string }, _runtime: unknown, metadata: Record<string, unknown>) {
       spawns++;
       spawnInputs.push(structuredClone(input));
+      spawnScopes.push({ granted: metadata.granted, isolation: metadata.isolation });
       workerEvents.push("spawn");
       spawnedStepKeys.push(String(metadata.stepKey));
       const workerID = workerIdentity(actor, input.key);
@@ -192,7 +194,7 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
   });
   api = engine();
   return {
-    api, ownerID, directory, deliveries, deliveryTexts, writes, validationErrors, worktreeProjects, reservations, spawnInputs, spawns: () => spawns, file,
+    api, ownerID, directory, deliveries, deliveryTexts, writes, validationErrors, worktreeProjects, reservations, spawnInputs, spawnScopes, spawns: () => spawns, file,
     reopen: engine,
     setProfileSystem: (value: string) => { profileSystem = value; },
     setProfilePermissions: (value: unknown[]) => { profilePermissions = value; },
@@ -1168,6 +1170,31 @@ return await agent("inspect", ${JSON.stringify({ key, agent: "analyst", ...optio
     expect(allowed.status).toBe("completed");
     expect(allowed.steps[0].directory).toBe(join(repo, "project"));
     expect(fixture.spawns()).toBe(1);
+    await fixture.api.dispose();
+  });
+
+  test("tells each worker spawn whether only a grant admits its step and whether it runs in a worktree checkout", async () => {
+    const fixture = await harness("valid");
+    const outside = await realpath(await mkdtemp(join(tmpdir(), "workflow-grant-")));
+    temporary.push(outside);
+    const steps = `
+export const meta = { name: "scopes", description: "destination checks" };
+await agent("owned", { key: "owned", agent: "analyst", access: "write", isolation: "worktree" });
+await agent("granted", { key: "granted", agent: "analyst", directory: ${JSON.stringify(outside)}, paths: [${JSON.stringify(outside)}] });
+return await agent("checkout", { key: "checkout", agent: "analyst", access: "write", isolation: "worktree", directory: ${JSON.stringify(outside)}, paths: [${JSON.stringify(outside)}] });`;
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "scopes", script: steps, args: null }), {
+      agent: "caller", model: { providerID: "test", id: "model" },
+    });
+    const run = await settled(fixture.api, fixture.ownerID, started.id);
+    expect(run.status).toBe("completed");
+    expect(fixture.spawnScopes).toEqual([
+      { granted: false, isolation: "worktree" },
+      { granted: true, isolation: "shared" },
+      { granted: true, isolation: "worktree" },
+    ]);
+    expect(fixture.spawnInputs.map(({ directory }) => directory)).toEqual([
+      run.steps[0].directory, outside, join(dirname(outside), ".opencode-workflows", run.steps[2].directory.split("/").at(-1)!),
+    ]);
     await fixture.api.dispose();
   });
 

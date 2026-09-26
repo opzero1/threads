@@ -22,6 +22,7 @@ import {
 import { permissionMatches, requireDelegation } from "./permissions";
 import { Report, WorkerView } from "./rpc";
 import { GrantedPaths } from "./workflow-types";
+import { assertWorkerProject } from "./workflow-worker";
 
 const sessionID = z.string().transform((value) => Session.ID.make(value));
 const messageID = z
@@ -209,7 +210,7 @@ export function threads(
     const needsRole = paths !== undefined || (access === "write" && asksExternal(inherited));
     const role = needsRole ? await rolePermissions(agentID, directory) : [];
     assertGrantsReachable([...role, ...workflowPermissions(inherited, { access, role, paths })], paths);
-    return workflowPermissions(inherited, { access, role: access === "read" ? [] : role, paths });
+    return { role, permissions: workflowPermissions(inherited, { access, role: access === "read" ? [] : role, paths }) };
   }
 
   async function prepareRole(
@@ -528,7 +529,7 @@ export function threads(
           session = await ctx.session.create({
             id: workerID, title: input.title, location: { directory: sourceDirectory },
             model: runtime.model,
-            permissions: await workflowWorkerPermissions(inherited, input.agent, sourceDirectory, workflow.access, request.paths),
+            permissions: (await workflowWorkerPermissions(inherited, input.agent, sourceDirectory, workflow.access, request.paths)).permissions,
             metadata: {
               opThreads: proposed, opThreadsRole: true,
               opWorkflow: { ownerID: workflow.ownerID, runID: workflow.runID, stepKey: workflow.stepKey, callerAgent: workflow.callerAgent },
@@ -551,11 +552,13 @@ export function threads(
         return session.projectID;
       });
     },
+    // `granted` means that only a grant admits the step's source. `isolation` says whether
+    // `input.directory` is the step's own worktree checkout.
     async spawnWorkflow(
       actor: string,
       input: z.infer<typeof Spawn>,
       runtime: Pick<ToolContext, "agent"> & Pick<SessionContext, "model">,
-      workflow: z.infer<typeof WorkflowWorker> & { access: "read" | "write" },
+      workflow: z.infer<typeof WorkflowWorker> & { access: "read" | "write"; granted: boolean; isolation: "shared" | "worktree" },
     ) {
       return serialized(actor, async () => {
         const workflowMetadata = WorkflowWorker.parse({
@@ -575,6 +578,7 @@ export function threads(
           throw new Error("directory must be an existing absolute directory");
         }
         if (input.agent === undefined) throw new Error("Workflow workers require an explicit role agent");
+        const agent = input.agent;
         const request = await withResolvedGrants(input);
         const workerID = workerIdentity(actor, input.key);
         let session = await ctx.session.get({ sessionID: workerID }).catch((error: unknown) => {
@@ -590,41 +594,66 @@ export function threads(
           initialMessageID: SessionMessage.ID.create(),
           reportMessageID: SessionMessage.ID.create(),
         });
+        // A worker's first prompt runs under the coordinator's current rules and the role at
+        // `input.directory`, which can differ from the role at the step's source. A step that only a
+        // grant admits must keep its project there clear of explicit denies.
+        const destinationPermissions = async (inherited: Permission.Ruleset) => {
+          const worker = await workflowWorkerPermissions(inherited, agent, input.directory, workflow.access, request.paths);
+          if (workflow.granted) {
+            await assertWorkerProject(inherited, worker.role, request.paths, input.directory, workflow.isolation === "worktree");
+          }
+          return worker.permissions;
+        };
+        let created = false;
         if (!session) {
           const existing = await list(actor);
           if (existing.filter((worker) => !worker.report && worker.outcome !== "failed" && worker.outcome !== "interrupted").length >= limit) {
             throw new Error(`Coordinator worker limit reached (${limit}); wait for existing managed work before starting another workflow`);
           }
           const inherited = await callerPermissions(coordinator, runtime.agent);
-          requireDelegation(inherited, input.agent);
+          requireDelegation(inherited, agent);
           session = await ctx.session.create({
             id: workerID,
             title: input.title,
             location: { directory: input.directory },
-            agent: input.agent,
+            agent,
             model: runtime.model,
-            permissions: await workflowWorkerPermissions(inherited, input.agent, input.directory, workflow.access, request.paths),
+            permissions: await destinationPermissions(inherited),
             metadata: {
               opThreads: proposed, opThreadsRole: true, opWorkflow: workflowMetadata, opWorkflowAccess: workflow.access,
               ...(request.paths === undefined ? {} : { [GRANTS_METADATA]: request.paths }),
             },
           });
+          created = true;
         }
         const link = workerLink(session);
         const recorded = WorkflowWorker.parse(session.metadata?.opWorkflow);
         if (link.fingerprint !== proposed.fingerprint || JSON.stringify(recorded) !== JSON.stringify(workflowMetadata)) {
           throw new Error("This workflow spawn identity belongs to a different request");
         }
+        // A reservation got its permissions from the role at the step's source. Check and recompute them
+        // at the destination before the worker moves there or runs. A reservation that cannot run there
+        // is interrupted, like one whose worktree cannot be created.
+        let refreshed: Permission.Ruleset | undefined;
+        if (!created && !await initialized(session, link)) {
+          try {
+            refreshed = await destinationPermissions(await callerPermissions(coordinator, runtime.agent));
+          } catch (error) {
+            await ctx.session.interrupt({ sessionID: link.workerID, resume: false }).catch(() => {});
+            throw error;
+          }
+        }
         if (session.location.directory !== input.directory) {
           if (await initialized(session, link)) throw new Error("Initialized workflow worker cannot change its assigned directory");
           await ctx.session.move({ sessionID: link.workerID, directory: input.directory });
           session = await ctx.session.get({ sessionID: link.workerID });
         }
-        if (session.agent !== input.agent) {
+        if (session.agent !== agent) {
           if (await initialized(session, link)) throw new Error("Initialized workflow worker cannot change its role agent");
-          await ctx.session.switchAgent({ sessionID: link.workerID, agent: input.agent });
+          await ctx.session.switchAgent({ sessionID: link.workerID, agent });
           session = await ctx.session.get({ sessionID: link.workerID });
         }
+        if (refreshed !== undefined) await ctx.session.update({ sessionID: link.workerID, permissions: refreshed });
         await ctx.storage.set(indexKey(link), link);
         if (!await initialized(session, link)) {
           await ctx.session.prompt({
