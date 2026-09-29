@@ -8,11 +8,21 @@ Current verification uses OpenCode `2.0.14`, Bun `1.4.0`, and published `@openco
 
 1. Run typecheck, unit tests, and the native checks appropriate to the change.
 2. Run `npm pack --json --pack-destination <existing-artifact-directory>`. Keep its manifest and integrity hash. The `prepack` hook must build `tui.js`; verify that the tarball includes it and excludes root `tui.ts`.
-3. Run `bun run verify:package-ui /absolute/path/to/package.tgz`. This installs the artifact under `node_modules`, without a TUI probe or project JSX configuration. Require all seven checks: the idle footer, the Threads list through `ctrl+x j` with pin/unpin and Escape, `/activities`, the running-worker indicator, `/workflows`, the workflow result panel, and the `activity: "sidebar"` option.
+3. Run `bun run verify:package-ui /absolute/path/to/package.tgz`. This installs the artifact under `node_modules`, without a TUI probe or project JSX configuration. Require all ten checks:
+   - The idle footer is empty.
+   - `ctrl+x j` opens the Threads list with only the current conversation. Its search reacts to typing, and Escape closes it.
+   - `/activities` opens the same list.
+   - A running worker shows the footer indicator without opening a tab.
+   - `ctrl+d` dismisses and restores a finished worker without closing the list.
+   - With that worker focused, the list shows its coordinator's thread, and Enter returns to the main conversation.
+   - `/workflows` opens the navigator.
+   - On the home screen, the list shows its open-a-conversation message.
+   - A completed workflow's result panel opens and closes.
+   - Leftover `activity: "sidebar"` and `workerTabs: "auto"` options add no Activity rail and no automatic worker tab, while the footer and the list still work.
 4. Publish that exact tarball. If any packed content changes, repack and repeat the artifact check.
 5. Wait for npm's package index to expose the new version. Download its tarball and compare integrity with the verified artifact. A successful `npm publish` can precede registry availability.
 6. Run `bun run verify:package-ui @op1/threads@<version>` against the registry package before switching a working global installation.
-7. Preserve existing options when updating the global plugin entry. Confirm the server reports the intended version as active, then verify the footer indicator, the Threads list, and their commands in the live TUI, or the sidebar if the user selected it. Record those observations separately.
+7. Preserve existing options when updating the global plugin entry. Confirm the server reports the intended version as active, then verify the footer indicator, the Threads list, and their commands in the live TUI. Record those observations separately.
 
 `prepack` builds the UI automatically. The clean-install checks are explicit release gates; publishing does not run them automatically. Keep the manifest, integrity comparison, command results, and UI evidence together under `.audit/release-<version>/`.
 
@@ -20,12 +30,30 @@ Current verification uses OpenCode `2.0.14`, Bun `1.4.0`, and published `@openco
 
 | Observation | Next check |
 | --- | --- |
-| `ctrl+x j`, `/activities`, and the sidebar option all do nothing | Inspect TUI plugin loading and `role=cli` logs. Server activation alone does not establish TUI activation. An idle footer is empty by design, so it proves nothing on its own. |
+| `ctrl+x j` and `/activities` both do nothing | Inspect TUI plugin loading and `role=cli` logs. Server activation alone does not establish TUI activation. An idle footer is empty by design, so it proves nothing on its own. |
 | `Cannot find package 'react'` from a plugin TSX file | Check the installed package entrypoint. Local JSX configuration and probe-assisted tests can hide missing Solid compilation. |
 | The Threads list or picker renders, but its shortcut hint is missing or Escape does nothing | Check that the installed entrypoint reaches Solid-compiled code. A JSX import directive alone does not supply Solid's reactive bindings. |
 | Server load fails with `No matching version found` | Check npm propagation and the resolver's view of the version before changing UI settings. Publication acceptance is not installation readiness. |
 
 Reopening a TUI only addresses a reload problem after the installed package has passed a clean-start check. Do not recommend it as a confirmed fix based on server state or probe-assisted rendering alone.
+
+## Version 0.2.6 thread-only list
+
+Version 0.2.6 removes the Activity sidebar, pins, automatic worker tabs, native tab grouping, and saved-title cleanup. The `activity` and `workerTabs` options are ignored, including the legacy `"sidebar"` and `"auto"` values. OpenCode's native tab rail always shows, in OpenCode's own order. The terminal opens a worker's tab only when you choose that worker in the Threads list. `/threads` restores hidden and dismissed workers into the list without opening tabs. Saved titles keep any `[Main] ` or `[Worker] ` prefix; the list omits it from managed rows and from its header.
+
+`ctrl+x j`, `/activities`, and `/threads` open the Threads list for the current conversation's thread: the main conversation, which is the coordinator when a worker is focused, and that coordinator's managed workers. Rows group as needs attention, running, main, finished, and closed. On the home screen, the list shows "Open a conversation to see its workers". This replaces the 0.2.5 list scope, pins, sidebar option, and automatic worker tabs described below. Dismissed and list-opened storage keep their keys. Saved pins, collapsed sections, and title-cleanup markers are no longer read.
+
+### Checks
+
+On OpenCode 2.0.18, typecheck and 150 unit tests passed after removing the folder-subtitle helper and its two obsolete tests. `verify:footer` passed 25 checks and `verify:package-ui` passed 10 on the row-layout tarball. The earlier 0.2.6 verification passed `verify:live` with 28 checks and `verify:workflows` with 29. `verify:activity`, `verify:tabs`, and `verify:idle-tabs` were removed with the sidebar and tab grouping.
+
+The row-layout check reproduced the old title/subtitle overlap and then verified the exact replacement tarball at 80, 100, and 120 columns, with 23 layout and keyboard checks at each width. Main titles use the available row width without folder or role suffixes. Running, needs-input, failed, and closed workers keep their status visible with a two-cell gap. A live TUI check confirmed the main-row layout after installation.
+
+The release check also exposed a footer/list scope mismatch: an unrelated conversation could show another coordinator's worker count while its own list contained only the main row. The footer now uses the same coordinator identity as the list, including when a worker tab is focused. The home-screen footer continues to summarize all known workers.
+
+The `verify:footer` fixture adds a second conversation in the TUI's folder with its own worker, and an open tab for a conversation in another folder. The 0.2.5 list included both. The suite requires the list to omit them while idle, while workers run or wait for input, and while a worker is focused. It also checks the header without the role prefix, the saved `[Main] ` title that stays unchanged, the home-screen message, and that `ctrl+f` no longer pins. Two list checks moved from `verify:activity`: a dismissed worker stays under Closed after a TUI restart until `/threads` restores it, and deleting a worker's session removes its row from the open list. Another check covers the remaining tab-closing rule: a hidden worker's tab, opened after its report, stays open while focused and closes once focus moves away.
+
+The suite restarts the TUI with leftover `activity: "sidebar"` and `workerTabs: "auto"` options while a worker runs. Version 0.2.5 would open that worker's tab at startup. Version 0.2.6 opens none and adds no Activity rail. Every later check runs with those options, including one for a newly spawned worker that must not get a tab. Neither option changes 0.2.6 behavior, so no signal shows that the plugin received them. An earlier run on the same OpenCode build, against a source that still honored `workerTabs: "auto"`, showed that the TUI applies options from this `cli.json` entry: it opened the worker's tab. `verify:package-ui` starts its second TUI with the same options.
 
 ## Version 0.2.5 footer indicator and Threads list
 

@@ -51,6 +51,25 @@ def left():
     return "\n".join(line[:42] for line in terminal.screen.display)
 
 
+def screen():
+    return "\n".join(terminal.screen.display)
+
+
+hint = "ctrl+d Dismiss · enter Open · esc Close"
+header = "Threads · Published plugin UI verification"
+main_row = "> Published plugin UI verification"
+
+
+def open_list(keys=b"\x18j"):
+    os.write(terminal.master, keys)
+    terminal.wait_for(hint)
+
+
+def close_list():
+    os.write(terminal.master, b"\x1b")
+    terminal.wait_for_match(lambda text: "enter Open · esc Close" not in text, "closed Threads list", 10, False)
+
+
 try:
     sandbox = Sandbox(config(plugin, provider), artifacts)
     sandbox.await_plugin()
@@ -62,6 +81,11 @@ try:
         "title": "Published plugin UI verification",
         "location": {"directory": str(sandbox.directory)},
     })["data"]
+    # Earlier lists included every session in the TUI's folder; the thread list must not.
+    sandbox.api("POST", "/api/session", {
+        "title": "Unrelated package conversation",
+        "location": {"directory": str(sandbox.directory)},
+    })
     terminal = Terminal(sandbox, session["id"])
     terminal.wait_for("ctrl+p commands")
     terminal.wait_for("Published plugin UI verification", left=True)
@@ -69,26 +93,28 @@ try:
     terminal.wait_for_match(lambda _: time.monotonic() - settled >= 3, "idle settle", 10, False)
     assert not indicator.search(footer()) and "Activity" not in left(), (footer(), left())
     passed("the default footer mode loads without a probe plugin or project JSX configuration and stays empty while idle")
-    os.write(terminal.master, b"\x18j")
-    terminal.wait_for("ctrl+f Pin · ctrl+d Dismiss · enter Open · esc Close")
-    terminal.wait_for("Threads ·")
-    os.write(terminal.master, b"\x06")
-    terminal.wait_for("ctrl+f Unpin · ctrl+d Dismiss · enter Open · esc Close")
-    os.write(terminal.master, b"\x06")
-    terminal.wait_for("ctrl+f Pin · ctrl+d Dismiss · enter Open · esc Close")
-    os.write(terminal.master, b"\x1b")
-    terminal.wait_for_match(lambda text: "enter Open · esc Close" not in text, "closed Threads list", 10, False)
-    passed("ctrl+x j opens the compiled Threads list, which toggles pin state and closes with Escape")
+    open_list()
+    terminal.wait_for_match(lambda text: header in text and main_row in text, "the current conversation's thread", 10, False)
+    assert "Unrelated package conversation" not in screen(), screen()
+    assert not any(mark in screen() for mark in ("Pin ·", "Unpin", "◇", "◆")), screen()
+    os.write(terminal.master, b"no-such-thread")
+    terminal.wait_for_match(lambda text: "No matching conversations" in text and main_row not in text, "search without a match", 10, False)
+    os.write(terminal.master, b"\x15")
+    terminal.wait_for_match(lambda text: main_row in text and "No matching conversations" not in text, "search cleared", 10, False)
+    (artifacts / "list.screen.txt").write_text(screen())
+    close_list()
+    passed("ctrl+x j opens the compiled Threads list with only the current conversation; its search reacts to typing and Escape closes it")
     os.write(terminal.master, b"/activities")
-    terminal.wait_for("Show threads and workers")
+    terminal.wait_for("Show this conversation's workers")
     os.write(terminal.master, b"\r")
-    terminal.wait_for("ctrl+f Pin · ctrl+d Dismiss · enter Open · esc Close")
-    os.write(terminal.master, b"\x1b")
-    terminal.wait_for_match(lambda text: "enter Open · esc Close" not in text, "closed /activities list", 10, False)
+    terminal.wait_for(hint)
+    terminal.wait_for(header)
+    close_list()
     passed("/activities opens the same list")
+    # FAIL keeps the finished worker in the list for the dismiss and focus checks.
     provider.responses["PACKAGE_WORKER_REPORT"] = {
         "name": "threads_report",
-        "arguments": {"verdict": "PASS", "summary": "Packaged worker", "evidence": ["installed package"]},
+        "arguments": {"verdict": "FAIL", "summary": "Packaged worker", "evidence": ["installed package"]},
         "wait": True,
     }
     provider.responses["PACKAGE_WORKER_SPAWN"] = {
@@ -105,6 +131,30 @@ try:
     eventually(lambda: not sandbox.api("GET", "/api/session/active")["data"], timeout=60)
     terminal.wait_for_match(lambda _: not indicator.search(footer()), "footer cleared", 30, False)
     passed("a running worker shows the compiled footer spinner and count without opening a tab, and it clears when done")
+    open_list()
+    terminal.wait_for_match(lambda text: header in text and re.search(r"Packaged footer worker[ \t]+FAIL\b", text) and "Finished" in text, "finished worker in the thread list", 10, False)
+    os.write(terminal.master, b"Packaged footer worker")
+    terminal.wait_for("> Packaged footer worker")
+    os.write(terminal.master, b"\x04")
+    terminal.wait_for_match(lambda text: "ctrl+d Restore · enter Open · esc Close" in text and "· Closed" in text, "dismissed worker", 10, False)
+    os.write(terminal.master, b"\x04")
+    terminal.wait_for_match(lambda text: hint in text and "· Closed" not in text, "restored worker", 10, False)
+    passed("ctrl+d dismisses and restores the highlighted worker without closing the compiled list")
+    os.write(terminal.master, b"\r")
+    terminal.wait_for_match(lambda _: "Packaged footer worker" in left() and "enter Open · esc Close" not in screen(), "focused worker tab", 20, False)
+    open_list()
+    terminal.wait_for_match(lambda text: header in text and "> Packaged footer worker" in text and "Published plugin UI verification" in text, "coordinator's thread from the worker", 10, False)
+    assert "Threads · Packaged footer worker" not in screen(), screen()
+    (artifacts / "worker-focused-list.screen.txt").write_text(screen())
+    os.write(terminal.master, b"Published plugin")
+    terminal.wait_for(main_row)
+    os.write(terminal.master, b"\r")
+    terminal.wait_for_match(lambda text: "enter Open · esc Close" not in text, "list closed after Enter", 10, False)
+    # With an empty search, the list highlights the focused conversation.
+    open_list()
+    terminal.wait_for_match(lambda text: main_row in text and "> Packaged footer worker" not in text, "main conversation focused again", 10, False)
+    close_list()
+    passed("with the worker focused, the compiled list shows its coordinator's thread, and Enter returns to the main conversation")
     os.write(terminal.master, b"/workflows")
     terminal.wait_for("Open dynamic workflows")
     os.write(terminal.master, b"\r")
@@ -125,7 +175,20 @@ try:
         return next((run for run in runs if run["status"] == "completed"), None)
     eventually(completed, timeout=60)
     eventually(lambda: session["id"] not in sandbox.api("GET", "/api/session/active")["data"])
+    os.write(terminal.master, b"\x18n")
+    settled = time.monotonic()
+    terminal.wait_for_match(lambda _: time.monotonic() - settled >= 2, "home screen settle", 10, False)
+    # The message renders only when the route has no conversation and the list has no rows.
+    open_list()
+    terminal.wait_for("Open a conversation to see its workers")
+    assert "Threads ·" not in screen(), screen()
+    (artifacts / "home-list.screen.txt").write_text(screen())
+    close_list()
+    passed("on the home screen the compiled list shows its open-a-conversation message")
     terminal.close(artifacts / "picker.txt")
+    # Options left from earlier versions. Both are ignored; the checks below run with them.
+    cli["plugins"] = [{"package": plugin, "options": {"activity": "sidebar", "workerTabs": "auto"}}]
+    path.write_text(json.dumps(cli))
     terminal = Terminal(sandbox, session["id"])
     terminal.wait_for("ctrl+p commands")
     os.write(terminal.master, b"/workflows")
@@ -139,12 +202,30 @@ try:
     os.write(terminal.master, b"\x1b")
     terminal.wait_for_match(lambda text: "Phase: Packaged phase" not in text, "closed workflow panel", 10, False)
     passed("a real workflow completes and its compiled result panel opens and closes")
-    cli["plugins"] = [{"package": plugin, "options": {"activity": "sidebar"}}]
-    path.write_text(json.dumps(cli))
-    terminal.wait_for("Activity", left=True, timeout=40)
-    terminal.wait_for("/activities", timeout=20)
-    (artifacts / "sidebar-option.screen.txt").write_text("\n".join(terminal.screen.display))
-    passed("the activity: sidebar option renders the compiled Activity sidebar")
+    provider.release.clear()
+    provider.responses["PACKAGE_AUTO_REPORT"] = {
+        "name": "threads_report",
+        "arguments": {"verdict": "PASS", "summary": "Packaged automatic tab", "evidence": ["installed package"]},
+        "wait": True,
+    }
+    provider.responses["PACKAGE_AUTO_SPAWN"] = {
+        "name": "threads_spawn",
+        "arguments": {"key": "package-auto", "title": "Packaged auto worker", "directory": str(sandbox.worker), "task": "PACKAGE_AUTO_REPORT"},
+    }
+    sandbox.api("POST", f'/api/session/{session["id"]}/prompt', {"text": "PACKAGE_AUTO_SPAWN"})
+    terminal.wait_for_match(lambda _: re.search(r"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] 1 worker", footer()), "footer indicator with the leftover options", 40, False)
+    # Version 0.2.5 honored workerTabs: "auto" and would open this running worker's tab.
+    settled = time.monotonic()
+    terminal.wait_for_match(lambda _: time.monotonic() - settled >= 7, "two refresh intervals while the worker runs", 15, False)
+    assert "Packaged auto worker" not in left() and "Activity" not in left() and "/activities" not in left(), left()
+    assert len(indicator.findall(footer())) == 1, footer()
+    open_list()
+    terminal.wait_for_match(lambda text: header in text and re.search(r"Packaged auto worker[ \t]+running\b", text), "thread list with the leftover options", 10, False)
+    (artifacts / "legacy-options.screen.txt").write_text(screen())
+    close_list()
+    provider.release.set()
+    terminal.wait_for_match(lambda _: not indicator.search(footer()), "footer cleared after the worker", 60, False)
+    passed('leftover activity: "sidebar" and workerTabs: "auto" options are ignored: no Activity rail appears, a running worker gets no tab, and the footer and Threads list still work')
 finally:
     if terminal:
         terminal.close(artifacts / "terminal.txt")

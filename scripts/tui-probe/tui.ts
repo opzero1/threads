@@ -1,23 +1,17 @@
 import { Plugin } from "@opencode/plugin/tui";
 import { getComponentCatalogue } from "@opentui/solid/components";
-import { appendFile } from "node:fs/promises";
-import { createEffect, createSignal } from "solid-js";
+import { createEffect } from "solid-js";
 import { z } from "zod";
 import type { Renderable } from "@opentui/core";
-import { BoxRenderable, InputRenderable, ScrollBoxRenderable, TextRenderable, RGBA } from "@opentui/core";
-import { appendFileSync, writeFileSync } from "node:fs";
-import { themeColor, themeHue, themeMuted } from "../../src/activity-theme";
+import { BoxRenderable, InputRenderable, ScrollBoxRenderable, TextRenderable } from "@opentui/core";
+import { writeFileSync } from "node:fs";
 
 export default Plugin.define({
   id: "op-threads-tui-probe",
   async setup(context) {
-    const fallbackColor = RGBA.fromHex("#808080");
-    const configuredPath = context.options.path;
-    if (typeof configuredPath !== "string")
+    const path = context.options.path;
+    if (typeof path !== "string")
       throw new Error("Probe output path is required");
-    const path = context.options.perProcess
-      ? `${configuredPath}.${process.pid}.json`
-      : configuredPath;
     const openSessionIDs = z
       .array(z.string())
       .default([])
@@ -35,10 +29,6 @@ export default Plugin.define({
       });
     }
     let writes = Promise.resolve();
-    const [isolateRequests, setIsolateRequests] = createSignal(0);
-    const [closeResults, setCloseResults] = createSignal<
-      Record<string, boolean>
-    >({});
     const describe = (node: Renderable, depth = 0): unknown => ({
       id: node.id,
       num: node.num,
@@ -63,113 +53,27 @@ export default Plugin.define({
     });
     const treeTimer = context.options.tree
       ? setInterval(() => {
-          const foreground = themeColor(context.theme.text, fallbackColor);
-          const background =
-            context.theme.background.raised?.base ??
-            themeColor(context.theme.background, fallbackColor);
           writeFileSync(
             `${path}.tree.json`,
             JSON.stringify({
               app: context.app,
-              themeMode: context.themeMode,
-              themeText: themeColor(context.theme.text, fallbackColor).toInts(),
-              themeColors: Object.fromEntries(
-                Object.entries({
-                  default: themeColor(context.theme.text, fallbackColor),
-                  subdued: themeMuted(context.theme.text, fallbackColor),
-                  accent:
-                    themeHue(context.theme.hue?.accent, foreground, background),
-                  workers:
-                    themeHue(context.theme.hue?.purple, foreground, background),
-                  running: themeColor(context.theme.text.feedback.info, fallbackColor),
-                  warning: themeColor(context.theme.text.feedback.warning, fallbackColor),
-                  error: themeColor(context.theme.text.feedback.error, fallbackColor),
-                }).map(([name, color]) => [name, color.toInts()]),
-              ),
               route: context.ui.router.current(),
               tree: describe(context.renderer.root),
             }),
           );
         }, 100)
       : undefined;
-    let mountToggle = 0;
-    const captureMount: Parameters<
-      typeof context.renderer.addPostProcessFn
-    >[0] = (buffer) => {
-      if (!mountToggle) return;
-      const header = new TextDecoder()
-        .decode(buffer.getRealCharBytes(true))
-        .split("\n")[0]
-        ?.slice(0, 42)
-        .trim();
-      appendFileSync(
-        `${path}.mount.jsonl`,
-        JSON.stringify({ toggle: mountToggle, header }) + "\n",
-      );
-    };
-    if (context.options.mounts)
-      context.renderer.addPostProcessFn(captureMount);
     const removeSlot = context.ui.slot({
       append: "app",
       render() {
-        context.keymap.layer(() => ({
-          mode: "global",
-          priority: 100,
-          commands: [
-            {
-              id: "probe.activity.toggle",
-              bind: "f6",
-              enabled: () => context.options.mounts === true,
-              run() {
-                mountToggle++;
-                context.keymap.dispatch("threads.activity.toggle");
-              },
-            },
-            {
-              id: "probe.arrange",
-              bind: "ctrl+g",
-              run() {
-                for (const [index, sessionID] of openSessionIDs.entries()) {
-                  context.ui.tabs.move(sessionID, index);
-                }
-              },
-            },
-            {
-              id: "probe.isolate",
-              bind: "ctrl+o",
-              run() {
-                setCloseResults(
-                  Object.fromEntries(
-                    context.ui.tabs
-                      .list()
-                      .filter((tab) => !tab.active)
-                      .map((tab) => [
-                        tab.sessionID,
-                        context.ui.tabs.close(tab.sessionID),
-                      ]),
-                  ),
-                );
-                setIsolateRequests((count) => count + 1);
-              },
-            },
-          ],
-        }));
         createEffect(() => {
           const snapshot = JSON.stringify({
-            isolateRequests: isolateRequests(),
-            closeResults: closeResults(),
             enabled: context.ui.tabs.enabled(),
-            tabs: context.ui.tabs.list().map((tab) => ({
-              ...tab,
-              projectID: context.data.session.get(tab.sessionID)?.projectID,
-            })),
+            tabs: context.ui.tabs.list(),
             route: context.ui.router.current(),
           });
           writes = writes.then(async () => {
             await Bun.write(path, snapshot);
-            if (context.options.history) {
-              await appendFile(`${path}.history.jsonl`, `${snapshot}\n`);
-            }
           });
         });
         return null;
@@ -177,7 +81,6 @@ export default Plugin.define({
     });
     return () => {
       clearInterval(treeTimer);
-      context.renderer.removePostProcessFn(captureMount);
       removeSlot();
     };
   },

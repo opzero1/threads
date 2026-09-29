@@ -1,6 +1,6 @@
 {
   "name": "@op1/threads",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Visible worker sessions and durable dynamic workflows for OpenCode V2.",
   "type": "module",
   "main": "./index.ts",
@@ -29,9 +29,6 @@
     "verify:live": "uv run --with pyte python scripts/verify-live.py",
     "verify:package-ui": "uv run --with pyte python scripts/verify-package-ui.py",
     "verify:roles": "python3 scripts/verify-roles.py",
-    "verify:idle-tabs": "uv run --with pyte python scripts/verify-idle-tabs.py",
-    "verify:tabs": "uv run --with pyte python scripts/verify-tab-groups.py",
-    "verify:activity": "uv run --with pyte python scripts/verify-activity.py",
     "verify:footer": "uv run --with pyte python scripts/verify-footer.py",
     "verify:workflows": "uv run --with pyte python scripts/verify-workflows.py",
     "verify:workflow-regressions": "python3 scripts/verify-workflow-regressions.py",

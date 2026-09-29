@@ -5,7 +5,7 @@ import fuzzysort from "fuzzysort";
 import type { ActivityItem } from "./activity-model";
 import { themeColor, themeMuted } from "./activity-theme";
 
-type Choice = Pick<ActivityItem, "id" | "title" | "subtitle" | "pinned"> & {
+type Choice = Pick<ActivityItem, "id" | "title" | "subtitle"> & {
   category: string;
   closed: boolean;
 };
@@ -15,16 +15,15 @@ export function ActivityPicker(props: {
   fallbackColor: RGBA;
   title?: string;
   note?: string;
+  empty?: string;
   items: () => Choice[];
   current: string | undefined;
-  pin: (id: string) => Promise<void>;
   dismiss?: (id: string) => Promise<void>;
   open: (id: string) => Promise<void>;
 }) {
   const { ctx } = props;
   const [query, setQuery] = createSignal("");
   const [selectedID, setSelectedID] = createSignal(props.current);
-  const [pinning, setPinning] = createSignal(false);
   const [dismissing, setDismissing] = createSignal(false);
   const [height, setHeight] = createSignal(ctx.renderer.height);
   let input: InputRenderable | undefined;
@@ -62,17 +61,6 @@ export function ActivityPicker(props: {
     ctx.ui.dialog.clear();
     void props.open(id);
   };
-  const togglePin = async () => {
-    const item = selected();
-    if (!item || pinning()) return;
-    setSelectedID(item.id);
-    setPinning(true);
-    try {
-      await props.pin(item.id);
-    } finally {
-      if (!closed) setPinning(false);
-    }
-  };
   const toggleDismiss = async () => {
     const item = selected();
     if (!item || !props.dismiss || dismissing()) return;
@@ -99,12 +87,6 @@ export function ActivityPicker(props: {
       { bind: "end", run: () => { select(choices().length - 1); } },
       { bind: "return", run: () => open() },
       { bind: "escape", run: () => ctx.ui.dialog.clear() },
-      {
-        id: "threads.activity.choose.pin",
-        title: "Pin/unpin highlighted Activity conversation",
-        bind: "ctrl+f",
-        run: togglePin,
-      },
       ...(props.dismiss
         ? [{
             id: "threads.activity.choose.dismiss",
@@ -165,6 +147,7 @@ export function ActivityPicker(props: {
               height={1}
               flexShrink={0}
               flexDirection="row"
+              gap={2}
               backgroundColor={selected()?.id === item.id
                 ? ctx.theme.background.raised?.high ?? themeColor(ctx.theme.background, props.fallbackColor)
                 : undefined}
@@ -176,23 +159,28 @@ export function ActivityPicker(props: {
               <text
                 id={`activity-picker-title-${item.id}`}
                 fg={foreground()}
-                width="60%"
+                flexGrow={1}
+                flexShrink={1}
+                minWidth={0}
                 wrapMode="none"
                 truncate
-              >{`${selected()?.id === item.id ? ">" : " "} ${item.pinned ? "◆" : "◇"} ${item.title}`}</text>
-              <text id={`activity-picker-subtitle-${item.id}`} fg={muted()} flexGrow={1} flexShrink={1} minWidth={0} wrapMode="none" truncate>
-                {`${item.subtitle}${item.closed ? " · Closed" : ""}`}
-              </text>
+              >{`${selected()?.id === item.id ? ">" : " "} ${item.title}`}</text>
+              <Show when={item.subtitle || item.closed}>
+                <text id={`activity-picker-subtitle-${item.id}`} fg={muted()} flexShrink={0} maxWidth="40%" wrapMode="none" truncate>
+                  {[item.subtitle, item.closed ? "Closed" : ""].filter(Boolean).join(" · ")}
+                </text>
+              </Show>
             </box>
           )}</For>
         </>}</For>
         <Show when={!choices().length}>
-          <text fg={muted()}>No matching conversations</text>
+          <text id="activity-picker-empty" fg={muted()}>
+            {!query() && props.empty ? props.empty : "No matching conversations"}
+          </text>
         </Show>
       </scrollbox>
       <text id="activity-picker-hint" fg={muted()}>
         {[
-          `${ctx.keymap.shortcuts("threads.activity.choose.pin").join(" / ")} ${selected()?.pinned ? "Unpin" : "Pin"}`,
           ...(props.dismiss
             ? [`${ctx.keymap.shortcuts("threads.activity.choose.dismiss").join(" / ")} ${selected()?.closed ? "Restore" : "Dismiss"}`]
             : []),

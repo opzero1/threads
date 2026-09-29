@@ -5,7 +5,6 @@ import {
   footerText,
   listCategory,
   reportedTabAction,
-  threadsOptions,
   workerState,
   type ListItem,
 } from "../src/activity-model";
@@ -19,7 +18,6 @@ function row(id: string, values: Partial<ListItem> = {}): ListItem {
     active: false,
     attention: false,
     busy: false,
-    pinned: false,
     hidden: false,
     open: false,
     closed: false,
@@ -27,27 +25,6 @@ function row(id: string, values: Partial<ListItem> = {}): ListItem {
     ...values,
   };
 }
-
-describe("terminal options", () => {
-  test("the footer and on-demand worker tabs are the defaults", () => {
-    expect(threadsOptions({})).toEqual({ activity: "footer", workerTabs: "manual" });
-    expect(threadsOptions({ activity: "footer", workerTabs: "manual" })).toEqual({
-      activity: "footer",
-      workerTabs: "manual",
-    });
-  });
-
-  test("the sidebar and automatic worker tabs stay available as options", () => {
-    expect(threadsOptions({ activity: "sidebar" }).activity).toBe("sidebar");
-    expect(threadsOptions({ workerTabs: "auto" }).workerTabs).toBe("auto");
-  });
-
-  test("legacy booleans keep their meaning: true shows the sidebar, false hides it", () => {
-    expect(threadsOptions({ activity: true }).activity).toBe("sidebar");
-    expect(threadsOptions({ activity: false }).activity).toBe("footer");
-    expect(threadsOptions({ activity: "unknown", workerTabs: true }).workerTabs).toBe("manual");
-  });
-});
 
 describe("footer indicator", () => {
   test("an idle TUI renders nothing", () => {
@@ -86,11 +63,10 @@ describe("footer indicator", () => {
 });
 
 describe("worker list", () => {
-  test("rows group as needs attention, running, pinned, finished workers, recent sessions and closed", () => {
+  test("rows group as needs attention, running, the main conversation, finished workers and closed", () => {
     const groups = activityList([
-      row("recent"),
+      row("main"),
       row("finished", { worker: true }),
-      row("pinned", { pinned: true }),
       row("running", { busy: true, worker: true }),
       row("attention", { attention: true, busy: true, worker: true }),
       row("closed", { closed: true, busy: true }),
@@ -98,16 +74,15 @@ describe("worker list", () => {
     expect(groups.map(([category, items]) => [category, items.map((item) => item.id)])).toEqual([
       ["Needs attention", ["attention"]],
       ["Running", ["running"]],
-      ["Pinned", ["pinned"]],
+      ["Main", ["main"]],
       ["Finished", ["finished"]],
-      ["Recent", ["recent"]],
       ["Closed", ["closed"]],
     ]);
   });
 
   test("hidden workers stay out unless open, selected, running or waiting; closed rows stay reachable", () => {
     const ids = activityList([
-      row("hidden", { worker: true, hidden: true, pinned: true }),
+      row("hidden", { worker: true, hidden: true }),
       row("open", { worker: true, hidden: true, open: true }),
       row("selected", { worker: true, hidden: true, active: true }),
       row("busy", { worker: true, hidden: true, busy: true }),
@@ -124,7 +99,7 @@ describe("worker list", () => {
       row("unknown", { updated: 0 }),
     ]);
     expect(items.map((item) => item.id)).toEqual(["new", "a", "b", "unknown"]);
-    expect(listCategory(row("x", { pinned: true, worker: true }))).toBe("Pinned");
+    expect(listCategory(row("x", { worker: true }))).toBe("Finished");
   });
 
   test("worker rows describe input, running, verdict and native outcome", () => {

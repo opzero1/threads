@@ -5,87 +5,31 @@ import { z } from "zod";
 import { ThreadsRpc } from "./src/rpc";
 import { activity } from "./src/activity";
 import { workflowUI } from "./src/workflow-ui";
-import {
-  cleanRoleTitle,
-  reportedTabAction,
-  threadsOptions,
-} from "./src/activity-model";
-import { workInProgress, workerWorking } from "./src/idle";
-import {
-  BoxRenderable,
-  ScrollBoxRenderable,
-  TextRenderable,
-  TextAttributes,
-  RGBA,
-} from "@opentui/core";
+import { reportedTabAction } from "./src/activity-model";
+import { workInProgress } from "./src/idle";
+import { RGBA } from "@opentui/core";
 
 const CoordinatorRef = z.object({ coordinatorID: z.string() });
 
 export default Plugin.define({
   id: "op-threads",
   setup(ctx) {
-    const settings = threadsOptions(ctx.options);
     const workflows = workflowUI(ctx);
     const rpc = ctx.client.rpc(ThreadsRpc);
-    const sidebar = activity(
+    const list = activity(
       ctx,
-      { BoxRenderable, ScrollBoxRenderable, TextRenderable, TextAttributes, RGBA },
+      RGBA,
       { createEffect, createSignal },
-      getComponentCatalogue().spinner,
-      { mode: settings.activity, workflows: workflows.active },
+      getComponentCatalogue().spinner !== undefined,
+      { workflows: workflows.active },
     );
-    const [cleaned, saveCleaned] = ctx.storage.store("role-title-cleanup", {
-      initial: { ids: [] as string[] },
-    });
-    const initial: { workerIDs: string[] } = { workerIDs: [] };
-    const [seen, updateSeen] = ctx.storage.memory("seen-workers", { initial });
     const closing = new Set<string>();
     const abort = new AbortController();
     let stopped = false;
     let running = false;
-    let reopenPending = false;
     let refreshPending = false;
     let lastError: string | undefined;
-    let movingFrom: string | undefined;
     let known: string[] = [];
-    function groupTabs() {
-      if (sidebar.mounted()) return;
-      const tabs = ctx.ui.tabs.list().map((tab) => {
-        const projectID = ctx.data.session.get(tab.sessionID)?.projectID;
-        return {
-          sessionID: tab.sessionID,
-          priority: tab.busy || tab.attention,
-          projectID:
-            typeof projectID === "string" && projectID.length > 0
-              ? projectID
-              : undefined,
-        };
-      });
-      const groups = new Map<string, typeof tabs>();
-      for (const tab of tabs) {
-        const key =
-          tab.projectID === undefined
-            ? `session:${tab.sessionID}`
-            : `project:${tab.projectID}`;
-        const group = groups.get(key);
-        if (group) group.push(tab);
-        else groups.set(key, [tab]);
-      }
-      const ordered = [...groups.values()].flatMap((group) =>
-        group
-          .sort((left, right) => Number(right.priority) - Number(left.priority))
-          .map((tab) => tab.sessionID),
-      );
-      const current = tabs.map((tab) => tab.sessionID);
-      const stamp = JSON.stringify(current);
-      if (movingFrom === stamp) return;
-      movingFrom = undefined;
-      for (const [index, sessionID] of ordered.entries()) {
-        if (current[index] === sessionID) continue;
-        if (ctx.ui.tabs.move(sessionID, index)) movingFrom = stamp;
-        break;
-      }
-    }
     function trackedCoordinatorIDs() {
       const route = ctx.ui.router.current();
       return [
@@ -104,10 +48,11 @@ export default Plugin.define({
         ),
       ].slice(0, 100);
     }
-    async function reconcile(reopen = false) {
+    // Worker tabs open only from the Threads list. This closes the ones that are no longer
+    // needed: list-opened tabs after their worker reports, and tabs of hidden workers.
+    async function reconcile() {
       if (stopped || !ctx.ui.tabs.enabled()) return;
       if (running) {
-        reopenPending ||= reopen;
         // Coalesce, never drop: the last session event can be the one that finishes a worker.
         refreshPending = true;
         return;
@@ -115,10 +60,9 @@ export default Plugin.define({
       running = true;
       refreshPending = false;
       try {
-        groupTabs();
         const coordinatorIDs = trackedCoordinatorIDs();
         if (!coordinatorIDs.length) return;
-        const { workers } = await (reopen ? rpc.restore : rpc.snapshot)(
+        const { workers } = await rpc.snapshot(
           { coordinatorIDs },
           {
             location: ctx.location ?? ctx.data.location.default(),
@@ -126,104 +70,38 @@ export default Plugin.define({
           },
         );
         known = workers.map((worker) => worker.workerID);
-        if (reopen)
-          await sidebar.restore(workers.map((worker) => worker.workerID));
-        sidebar.updateWorkers(workers);
+        list.updateWorkers(workers);
         for (const worker of workers) {
           if (stopped) return;
-          if (!reopen && sidebar.isDismissed(worker.workerID)) continue;
+          if (list.isDismissed(worker.workerID)) continue;
           const tab = ctx.ui.tabs
             .list()
             .find((tab) => tab.sessionID === worker.workerID);
           if (closing.has(worker.workerID) && tab) continue;
-          const closed = closing.delete(worker.workerID);
-          if (!reopen && sidebar.listOpened(worker.workerID)) {
-            const action = reportedTabAction(
-              worker,
-              ctx.data.session.status(worker.workerID),
-              tab,
-            );
+          closing.delete(worker.workerID);
+          const status = ctx.data.session.status(worker.workerID);
+          if (list.listOpened(worker.workerID)) {
+            const action = reportedTabAction(worker, status, tab);
             if (action === "forget")
-              await sidebar.forgetListOpened(worker.workerID);
+              await list.forgetListOpened(worker.workerID);
             if (action === "close") {
               if (ctx.ui.tabs.close(worker.workerID)) {
                 closing.add(worker.workerID);
-                await sidebar.forgetListOpened(worker.workerID);
+                await list.forgetListOpened(worker.workerID);
               }
               continue;
             }
           }
           if (
+            tab &&
             worker.hidden &&
-            !tab?.active &&
-            !tab?.busy &&
-            !tab?.attention &&
-            ctx.data.session.status(worker.workerID) !== "running"
-          ) {
-            if (tab) {
-              if (!ctx.ui.tabs.close(worker.workerID)) continue;
-              closing.add(worker.workerID);
-            }
-            if (seen.workerIDs.includes(worker.workerID)) {
-              updateSeen((draft) => {
-                draft.workerIDs = draft.workerIDs.filter(
-                  (id) => id !== worker.workerID,
-                );
-              });
-            }
-            continue;
-          }
-          // Worker tabs open on demand from the list unless the auto option is set.
-          if (!reopen && settings.workerTabs !== "auto") continue;
-          if (!reopen && !closed && seen.workerIDs.includes(worker.workerID))
-            continue;
-          if (
-            !reopen &&
-            !tab &&
-            !workerWorking(worker, ctx.data.session.status(worker.workerID))
+            !tab.active &&
+            !tab.busy &&
+            !tab.attention &&
+            status !== "running" &&
+            ctx.ui.tabs.close(worker.workerID)
           )
-            continue;
-          await ctx.data.session.sync(worker.workerID);
-          if (
-            !stopped &&
-            ctx.ui.tabs.open(worker.workerID) &&
-            !seen.workerIDs.includes(worker.workerID)
-          ) {
-            updateSeen((draft) => {
-              draft.workerIDs.push(worker.workerID);
-            });
-          }
-        }
-        if (!stopped && ctx.ui.tabs.enabled()) {
-          const roles = new Map<string, "Main" | "Worker">();
-          for (const worker of workers) {
-            roles.set(worker.coordinatorID, "Main");
-            roles.set(worker.workerID, "Worker");
-          }
-          for (const tab of ctx.ui.tabs.list()) {
-            if (stopped) return;
-            const role = roles.get(tab.sessionID);
-            const session = ctx.data.session.get(tab.sessionID);
-            if (!role || !session || cleaned.ids.includes(tab.sessionID))
-              continue;
-            const fresh = await ctx.client.session.get(
-              { sessionID: tab.sessionID },
-              { signal: abort.signal },
-            );
-            if (stopped) return;
-            const title = cleanRoleTitle(fresh.title ?? "", true);
-            if (title && title !== fresh.title)
-              await ctx.client.session.update(
-                { sessionID: tab.sessionID, title },
-                { signal: abort.signal },
-              );
-            if (stopped) return;
-            await saveCleaned((draft) => {
-              if (!draft.ids.includes(tab.sessionID))
-                draft.ids.push(tab.sessionID);
-            });
-          }
-          groupTabs();
+            closing.add(worker.workerID);
         }
         lastError = undefined;
       } catch (error) {
@@ -233,17 +111,14 @@ export default Plugin.define({
         lastError = message;
       } finally {
         running = false;
-        if (reopenPending) {
-          reopenPending = false;
-          void reconcile(true);
-        } else if (refreshPending && !stopped) void reconcile();
+        if (refreshPending && !stopped) void reconcile();
       }
     }
     const refresh = () => {
       void reconcile();
     };
-    // Without automatic worker tabs, /threads restores hidden and dismissed workers into
-    // the list instead of reopening a tab (and so loading a Location) for each of them.
+    // /threads restores hidden and dismissed workers into the list instead of reopening a
+    // tab (and so loading a Location) for each of them.
     async function restoreWorkers() {
       try {
         const ids = trackedCoordinatorIDs();
@@ -257,8 +132,8 @@ export default Plugin.define({
           );
           if (stopped) return;
           known = [...new Set([...known, ...workers.map((worker) => worker.workerID)])];
-          await sidebar.restore(workers.map((worker) => worker.workerID));
-          sidebar.updateWorkers(workers);
+          await list.restore(workers.map((worker) => worker.workerID));
+          list.updateWorkers(workers);
         }
       } catch (error) {
         if (!stopped)
@@ -267,7 +142,7 @@ export default Plugin.define({
             variant: "error",
           });
       }
-      if (!stopped) sidebar.openList();
+      if (!stopped) list.openList();
     }
     const stopEvents = ctx.data.listen(({ details }) => {
       if (details.type.startsWith("session.")) refresh();
@@ -292,16 +167,10 @@ export default Plugin.define({
           commands: [
             {
               id: "threads.reopen",
-              title:
-                settings.workerTabs === "auto"
-                  ? "Reopen managed worker tabs"
-                  : "Restore and list managed workers",
+              title: "Restore and list managed workers",
               palette: true,
               slash: { name: "threads" },
-              run: () =>
-                settings.workerTabs === "auto"
-                  ? reconcile(true)
-                  : restoreWorkers(),
+              run: restoreWorkers,
             },
           ],
         }));
@@ -313,7 +182,7 @@ export default Plugin.define({
       workflows.dispose();
       stopped = true;
       abort.abort();
-      sidebar.dispose();
+      list.dispose();
       clearInterval(timer);
       stopEvents();
       removeSlot();

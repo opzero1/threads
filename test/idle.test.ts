@@ -1,35 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { workInProgress, workerWorking, workflowProgressing } from "../src/idle";
-
-const report = (verdict: "PASS" | "FAIL" | "INCONCLUSIVE") => ({
-  verdict,
-  summary: "fixture",
-  evidence: [],
-});
-
-describe("automatic managed-worker tabs", () => {
-  test("a running worker gets a tab whatever its last outcome or report", () => {
-    expect(workerWorking({ outcome: null, report: null }, "running")).toBe(true);
-    expect(workerWorking({ outcome: "succeeded", report: null }, "running")).toBe(true);
-    expect(workerWorking({ outcome: "failed", report: report("FAIL") }, "running")).toBe(true);
-  });
-
-  test("a freshly spawned worker gets a tab before its first execution starts", () => {
-    expect(workerWorking({ outcome: null, report: null }, "idle")).toBe(true);
-  });
-
-  test("finished idle workers are never opened automatically", () => {
-    expect(workerWorking({ outcome: "succeeded", report: null }, "idle")).toBe(false);
-    expect(workerWorking({ outcome: "succeeded", report: report("FAIL") }, "idle")).toBe(false);
-    expect(workerWorking({ outcome: "succeeded", report: report("INCONCLUSIVE") }, "idle")).toBe(false);
-    expect(workerWorking({ outcome: "failed", report: null }, "idle")).toBe(false);
-    expect(workerWorking({ outcome: "interrupted", report: null }, "idle")).toBe(false);
-  });
-
-  test("a report without a recorded outcome still counts as finished", () => {
-    expect(workerWorking({ outcome: null, report: report("FAIL") }, "idle")).toBe(false);
-  });
-});
+import { workInProgress, workflowProgressing } from "../src/idle";
 
 describe("background refresh timers", () => {
   const idle = () => "idle" as const;

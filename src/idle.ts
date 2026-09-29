@@ -1,16 +1,4 @@
-import type { z } from "zod";
-import type { WorkerView } from "./rpc";
-
 type Status = "idle" | "running";
-
-// A native tab makes OpenCode load the session's Location and keep revalidating it,
-// so a managed worker gets an automatic tab only while it works.
-export function workerWorking(
-  worker: Pick<z.infer<typeof WorkerView>, "outcome" | "report">,
-  status: Status,
-) {
-  return status === "running" || (worker.outcome === null && worker.report === null);
-}
 
 export function workInProgress(
   tabs: readonly { readonly busy: boolean; readonly attention: boolean }[],
