@@ -1,14 +1,14 @@
 {
   "name": "@op1/threads",
   "version": "0.2.6",
-  "description": "Visible worker sessions and durable dynamic workflows for OpenCode V2.",
+  "description": "Opinionated background agents for OpenCode V2: visible worker sessions that report back with a verdict, and durable parallel workflows that survive restarts.",
   "type": "module",
   "main": "./index.ts",
   "exports": {
     ".": "./index.ts",
     "./tui": "./tui.js"
   },
-  "files": ["index.ts", "tui.js", "tsconfig.json", "src/", "skills/", "docs/workflows.md", "docs/workflows-verification.md", "docs/workflow-capacity-findings.md", "docs/dynamic-workflows-plan.md"],
+  "files": ["index.ts", "tui.js", "tsconfig.json", "src/", "skills/", "docs/", "CHANGELOG.md"],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/opzero1/threads.git"
@@ -16,7 +16,27 @@
   "homepage": "https://github.com/opzero1/threads#readme",
   "bugs": "https://github.com/opzero1/threads/issues",
   "license": "MIT",
-  "keywords": ["opencode", "opencode-plugin", "agents", "threads"],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "opencode-v2",
+    "background-agents",
+    "multi-agent",
+    "parallel-agents",
+    "subagents",
+    "agent-orchestration",
+    "ai-agents",
+    "coding-agents",
+    "workflows",
+    "durable-workflows",
+    "delegation",
+    "agent-workflows",
+    "typescript",
+    "bun",
+    "tui",
+    "threads",
+    "opinionated"
+  ],
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"

@@ -53,6 +53,6 @@ A worker report is a claim to review. Run the protocol's independent verificatio
 
 ## Visibility
 
-Threads does not add role prefixes to titles. The Threads list shows `Main` for the coordinator and `Worker` for its workers in the row subtitle.
+Threads does not add role prefixes to titles. The Threads list groups the coordinator under **Main** while it is idle and shows each worker's status, such as `running`, a verdict, or `no report`, beside its title.
 
 The TUI plugin never opens worker tabs by itself. The prompt footer shows running workers and workers that need input; the user opens a worker from the Threads list (`ctrl+x j`, `/activities`, or `/threads`), which shows the current conversation's thread. Workers with `PASS` or `PASS WITH NOTES` reports hide automatically once inactive. Failed, inconclusive, and unreported workers stay listed until the coordinator hides them. Running, selected, and attention-needed workers stay visible. `/threads` restores hidden workers for inspection. Sending a valid follow-up also restores that worker. Reports are delivered silently to the coordinator and remain available through `threads_list`.

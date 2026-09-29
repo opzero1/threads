@@ -18,7 +18,7 @@ The panel shows phases, step outcomes, verdicts, evidence, retained directories,
 
 The navigator lists every run owned by the current coordinator session, including completed and failed runs. The detail panel shows one selected run. Other coordinator sessions have their own run lists.
 
-A worker that needs a directory outside its location can ask for your approval in its own conversation. Activity marks it as needing input, and the step waits for your answer. To avoid the prompt, name the directories the task needs in your request; the workflow grants them to a step with `paths`. Explicit denies in your configuration still apply.
+A worker that needs a directory outside its location can ask for your approval in its own conversation. The footer and the Threads list mark it as needing input, and the step waits for your answer. To avoid the prompt, name the directories the task needs in your request; the workflow grants them to a step with `paths`. Explicit denies in your configuration still apply.
 
 Ask the agent to inspect the run when you need its complete saved script or structured handoffs:
 
@@ -59,4 +59,8 @@ Ask for VERA when the task needs its engineering and evidence rules. The workflo
 
 Keep an implementation and its runtime verification on the same retained worktree. Give the auditor the changed paths and verification evidence. The root conversation inspects the artifacts and owns integration and the final verdict.
 
-For script syntax, limits, tools, and recovery semantics, read the [runtime contract](../skills/workflow-authoring/references/runtime.md). The [implementation plan](dynamic-workflows-plan.md) describes module ownership and verification requirements.
+## Go further
+
+- For script syntax, limits, tools, and recovery rules, read the [runtime contract](../skills/workflow-authoring/references/runtime.md).
+- To change default limits, see [server options](configuration.md#server-options).
+- For measured throughput and safe operating limits, see [capacity findings](workflow-capacity-findings.md).
