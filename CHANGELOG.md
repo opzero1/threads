@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.7
 
 - Rewrote the README and split the docs into guides, configuration, reference, and design pages.
 

@@ -1,6 +1,6 @@
 {
   "name": "@op1/threads",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "Opinionated background agents for OpenCode V2: visible worker sessions that report back with a verdict, and durable parallel workflows that survive restarts.",
   "type": "module",
   "main": "./index.ts",
