@@ -219,18 +219,10 @@ export function workflowUI(ctx: Plugin.Context) {
       </Show>;
     },
   });
-  const removeFooter = ctx.ui.slot({
-    append: "session.composer.top",
-    render: () => {
-      createEffect(() => { ownerID(); refreshInBackground(); });
-      return <Show when={runs().find((run) => ["running", "pausing", "waiting"].includes(run.status))}>{(run: Accessor<WorkflowSummary>) =>
-        <box onMouseUp={() => void openRun(run().id)}><text>{`Workflow ${run().name}: ${run().status} · ${run().counts.completed}/${run().counts.total} recorded steps · /workflows`}</text></box>
-      }</Show>;
-    },
-  });
   const removeCommands = ctx.ui.slot({
     append: "app",
     render: () => {
+      createEffect(() => { ownerID(); refreshInBackground(); });
       ctx.keymap.layer(() => ({ mode: "global", commands: [{
         id: "workflows.open", title: "Open dynamic workflows", palette: true, slash: { name: "workflows" }, run: choose,
       }] }));
@@ -252,7 +244,6 @@ export function workflowUI(ctx: Plugin.Context) {
       clearInterval(timer);
       stopEvents();
       removePanel();
-      removeFooter();
       removeCommands();
     },
   };

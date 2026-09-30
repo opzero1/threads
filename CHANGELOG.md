@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Removed the workflow status line above the prompt. Use `/workflows` to open a run's panel.
+
 ## 0.2.7
 
 - Rewrote the README and split the docs into guides, configuration, reference, and design pages.
