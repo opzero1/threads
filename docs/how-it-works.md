@@ -6,7 +6,7 @@ This page explains the design behind workers: how retries stay safe, where permi
 
 OpenCode V2 runs plugins in two places, so Threads ships two entry points from one package.
 
-The server plugin, `index.ts`, owns the tools, the worker index, the workflow runner, and the `threads` RPC. The terminal plugin, published as `tui.js`, draws the footer indicator, the Threads list, and the workflow panel. The terminal plugin only reads state. Everything that changes a worker goes through the server.
+The server plugin, `index.ts`, owns the tools, the worker index, the workflow runner, and the `threads` RPC. The terminal plugin, published as `tui.js`, draws the footer indicator, the Threads list, the workflow panel, and the sidebar's Workflows section. The terminal plugin only reads state. Everything that changes a worker goes through the server.
 
 ## Worker identity and retries
 

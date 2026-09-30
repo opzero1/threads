@@ -70,14 +70,11 @@ export function footerSummary(
 export function footerText(summary: FooterSummary) {
   const count = (value: number, noun: string) =>
     `${value} ${noun}${value === 1 ? "" : "s"}`;
-  const label = [
-    ...(summary.running ? [count(summary.running, "worker")] : []),
-    ...(summary.workflows ? [count(summary.workflows, "workflow")] : []),
-  ].join(" · ");
   return {
     visible: summary.running + summary.workflows + summary.attention > 0,
     spinning: summary.running + summary.workflows > 0,
-    label,
+    workers: summary.running ? count(summary.running, "worker") : "",
+    workflows: summary.workflows ? count(summary.workflows, "workflow") : "",
     attention: summary.attention ? `? ${summary.attention} needs input` : "",
   };
 }

@@ -42,7 +42,7 @@ The native suites start an isolated OpenCode server with a deterministic local m
 | `bun run verify:live` | Worker tools, durable messages, permissions, limits, deleted workers, restarts, and the footer indicator. |
 | `bun run verify:footer` | The footer indicator, the Threads list, its keys, tab closing, `/threads`, and restart. |
 | `bun run verify:roles` | Agent profiles: system prompts, models, delegation, read-only work, reports, and retries. |
-| `bun run verify:workflows` | Workflow pipelines, retries, roles, checkpoints, saved scripts, worktrees, restarts, and the navigator. |
+| `bun run verify:workflows` | Workflow pipelines, retries, roles, checkpoints, saved scripts, worktrees, restarts, the navigator, the footer's workflow count, and the sidebar section. |
 | `bun run verify:workflow-regressions` | Known workflow engine defects stay fixed. |
 | `bun run verify:workflow-runtime` | Script cancellation and thread cleanup in the confined runtime. |
 | `bun run verify:workflow-capacity` | Concurrency, total steps, controls, deadlines, and cleanup under load. |

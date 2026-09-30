@@ -33,7 +33,7 @@ export function activity(
   color: Pick<typeof RGBA, "fromHex">,
   solid: Pick<typeof import("solid-js"), "createEffect" | "createSignal">,
   spinner: boolean,
-  settings: { workflows: () => number },
+  settings: { workflows: () => number; openWorkflows: () => void },
 ) {
   const { createEffect, createSignal } = solid;
   const fallbackColor = color.fromHex("#808080");
@@ -412,6 +412,7 @@ export function activity(
       summary,
       shortcut: () => ctx.keymap.shortcuts("threads.activity.choose")[0],
       open: openList,
+      openWorkflows: settings.openWorkflows,
     });
   const removeFooter = ctx.ui.slot({
     append: "prompt.footer.status",

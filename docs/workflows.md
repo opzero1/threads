@@ -14,6 +14,11 @@ The run has a stable ID. Your conversation stays available while its agents work
 2. Select a run to open its panel.
 3. Select a step with the arrow keys and press **Enter**, or click it, to open its native worker conversation.
 
+You can also open a run's panel from these places:
+
+- **The prompt footer.** While workflows run, the footer shows a count such as `1 workflow`. Click it to open that run's panel. When several runs are active, the click opens the `/workflows` list.
+- **The sidebar.** The **Workflows** section lists up to five unfinished runs with their status and step count, such as `running · 1/3 steps`. Click a row to open its panel. Finished runs appear only in `/workflows`. Press `ctrl+x b` to show or hide the sidebar. The panel takes the sidebar's place. On a narrow terminal, press `ctrl+x b` again after you close the panel to bring the sidebar back.
+
 The panel shows phases, step outcomes, verdicts, evidence, retained directories, recorded usage, and the final result. Step counts include work recorded so far; a dynamic script can add more steps. Press `f` for the full-screen view or `Esc` to close the panel.
 
 The navigator lists every run owned by the current coordinator session, including completed and failed runs. The detail panel shows one selected run. Other coordinator sessions have their own run lists.

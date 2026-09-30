@@ -3,7 +3,7 @@
 Threads has two parts, and each has its own config entry:
 
 - The **server plugin** runs workers and workflows. It lives in `~/.config/opencode/opencode.json` or `opencode.jsonc`.
-- The **terminal plugin** draws the footer indicator, the Threads list, and the workflow panel. It lives in `~/.config/opencode/cli.json`.
+- The **terminal plugin** draws the footer indicator, the Threads list, the workflow panel, and the sidebar's Workflows section. It lives in `~/.config/opencode/cli.json`.
 
 Both entries use the same package, `@op1/threads`.
 

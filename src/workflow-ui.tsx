@@ -1,12 +1,17 @@
 import type { Plugin } from "@opencode/plugin/tui";
+import type { RGBA } from "@opentui/core";
 import { createEffect, createSignal, For, Show } from "solid-js";
 import type { Accessor } from "solid-js";
 import { WorkflowsRpc } from "./workflow-rpc";
 import { workflowProgressing } from "./idle";
+import { themeColor, themeMuted } from "./activity-theme";
 import { Json } from "./workflow-types";
 import type { WorkflowRun, WorkflowSummary } from "./workflow-types";
 
-export function workflowUI(ctx: Plugin.Context) {
+const finished = new Set<WorkflowSummary["status"]>(["completed", "failed", "stopped"]);
+const sidebarRows = 5;
+
+export function workflowUI(ctx: Plugin.Context, fallbackColor: RGBA) {
   const rpc = ctx.client.rpc(WorkflowsRpc);
   const [runs, setRuns] = createSignal<WorkflowSummary[]>([]);
   const [selected, setSelected] = createSignal<WorkflowRun>();
@@ -101,11 +106,19 @@ export function workflowUI(ctx: Plugin.Context) {
       title: "Dynamic workflows",
       options: fresh.runs.map((run) => ({
         title: `${run.name} · ${run.status}`,
-        description: `${run.counts.completed}/${run.counts.total} recorded steps · ${run.phase || "starting"} · ${run.usage.measured ? "" : "≥"}${run.usage.tokens} tokens`,
+        description: `${run.counts.completed} of ${run.counts.total} steps done · ${run.phase || "starting"} · ${run.usage.measured ? "" : "≥"}${run.usage.tokens} tokens`,
         value: run.id,
       })),
     });
     if (id && fresh.runs.some((run) => run.id === id) && isCurrent(fresh.context)) await openRun(id, fresh.context);
+  }
+  const progressing = () => runs().filter((run) => workflowProgressing([run.status]));
+  const unfinished = () => runs().filter((run) => !finished.has(run.status));
+  // The footer's workflow count: one running workflow opens its panel, several open the picker.
+  function open() {
+    const [only, ...others] = progressing();
+    if (only && !others.length) void openRun(only.id);
+    else void choose();
   }
   function canControl(action: "pause" | "resume" | "stop") {
     const run = selected();
@@ -219,6 +232,45 @@ export function workflowUI(ctx: Plugin.Context) {
       </Show>;
     },
   });
+  // Styled like OpenCode's own MCP sidebar section. Finished runs stay in /workflows.
+  const removeSidebar = ctx.ui.slot({
+    append: "sidebar.content",
+    render: () => {
+      const base = () => themeColor(ctx.theme.text, fallbackColor);
+      const muted = () => themeMuted(ctx.theme.text, base());
+      const warning = () => themeColor(ctx.theme.text.feedback.warning, base());
+      const bullet = (status: WorkflowSummary["status"]) =>
+        status === "waiting" ? warning()
+          : workflowProgressing([status]) || status === "stopping" ? themeColor(ctx.theme.text.feedback.info, base())
+          : muted();
+      return <Show when={unfinished().length > 0}>
+        <box id="threads-sidebar-workflows">
+          <text fg={base()}><b>Workflows</b></text>
+          <For each={unfinished().slice(0, sidebarRows)}>{(run) =>
+            <box
+              id={`threads-sidebar-workflow-${run.id}`}
+              flexDirection="row"
+              gap={1}
+              minWidth={0}
+              onMouseUp={(event) => {
+                if (event.button !== 0) return;
+                void openRun(run.id);
+              }}
+            >
+              <text flexShrink={0} fg={bullet(run.status)}>•</text>
+              <text wrapMode="none" truncate={true} flexGrow={1} flexShrink={1} minWidth={0} fg={base()}><b>{run.name}</b></text>
+              <text wrapMode="none" flexShrink={0} fg={run.status === "waiting" ? warning() : muted()}>
+                {`${run.status} · ${run.counts.completed}/${run.counts.total} steps`}
+              </text>
+            </box>
+          }</For>
+          <Show when={unfinished().length > sidebarRows}>
+            <text fg={muted()}>{`+${unfinished().length - sidebarRows} more · /workflows`}</text>
+          </Show>
+        </box>
+      </Show>;
+    },
+  });
   const removeCommands = ctx.ui.slot({
     append: "app",
     render: () => {
@@ -238,12 +290,14 @@ export function workflowUI(ctx: Plugin.Context) {
   }, 3000);
   return {
     // Runs of the current owner that are still progressing; the footer indicator counts them.
-    active: () => runs().filter((run) => workflowProgressing([run.status])).length,
+    active: () => progressing().length,
+    open,
     dispose() {
       abort.abort();
       clearInterval(timer);
       stopEvents();
       removePanel();
+      removeSidebar();
       removeCommands();
     },
   };

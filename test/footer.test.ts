@@ -43,11 +43,12 @@ describe("footer indicator", () => {
     expect(footerText(summary)).toEqual({
       visible: true,
       spinning: true,
-      label: "2 workers · 1 workflow",
+      workers: "2 workers",
+      workflows: "1 workflow",
       attention: "",
     });
-    expect(footerText({ running: 1, attention: 0, workflows: 0 }).label).toBe("1 worker");
-    expect(footerText({ running: 0, attention: 0, workflows: 2 }).label).toBe("2 workflows");
+    expect(footerText({ running: 1, attention: 0, workflows: 0 })).toMatchObject({ workers: "1 worker", workflows: "" });
+    expect(footerText({ running: 0, attention: 0, workflows: 2 })).toMatchObject({ workers: "", workflows: "2 workflows" });
   });
 
   test("a worker waiting for input is marked once, not also counted as running", () => {
@@ -58,7 +59,7 @@ describe("footer indicator", () => {
     expect(summary).toEqual({ running: 1, attention: 1, workflows: 0 });
     expect(footerText(summary).attention).toBe("? 1 needs input");
     const waiting = footerText(footerSummary([{ busy: false, attention: true }], 0));
-    expect(waiting).toEqual({ visible: true, spinning: false, label: "", attention: "? 1 needs input" });
+    expect(waiting).toEqual({ visible: true, spinning: false, workers: "", workflows: "", attention: "? 1 needs input" });
   });
 });
 

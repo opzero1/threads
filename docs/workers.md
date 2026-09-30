@@ -67,7 +67,9 @@ While workers run, the prompt footer shows a spinner and counts:
 
 The footer shows nothing when nothing is running. On the home screen, it counts all known workers.
 
-Click the indicator or press `ctrl+x j` to open the Threads list. It shows your conversation and its workers, in these groups:
+Click `1 workflow` to open that workflow's panel. When several workflows run, the click opens the workflow list instead. See [Run a dynamic workflow](workflows.md#inspect-progress).
+
+Click anywhere else on the indicator, or press `ctrl+x j`, to open the Threads list. It shows your conversation and its workers, in these groups:
 
 - **Needs attention**: workers that wait for a permission or a form answer.
 - **Running**: workers, and your conversation, while they run.

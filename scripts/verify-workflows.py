@@ -102,6 +102,38 @@ def close_workflow_panel():
     terminal.wait_for_match(lambda display: "Dynamic workflows" not in display and "Build · Fixture" in display, "workflow panel closed", 40, False)
 
 
+def tree_node(id):
+    def find(node):
+        if node.get("id") == id:
+            return node
+        return next((found for child in node["children"] if (found := find(child))), None)
+    try:
+        return find(json.loads((artifacts / "tabs.json.tree.json").read_text())["tree"])
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def node_text(node):
+    return (node.get("text") or "") + "".join(node_text(child) for child in node["children"])
+
+
+def wait_node(id, check, description):
+    # Reads the probe's renderable tree while draining the terminal so the TUI keeps drawing.
+    found = {}
+    def matches(_):
+        node = tree_node(id)
+        if node and node.get("width", 0) > 0 and check(node):
+            found["node"] = node
+            return True
+    terminal.wait_for_match(matches, description, 40, False)
+    return found["node"]
+
+
+def click(node):
+    x, y = node["x"] + 2, node["y"] + 1
+    os.write(terminal.master, f"\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m".encode())
+
+
 try:
     settings = config(target, provider)
     settings["plugins"].append(str(root / "scripts" / "workflow-probe"))
@@ -470,6 +502,10 @@ return await pipeline(args.items, item => agent(item.prompt, {{
     assert resumed["steps"][0]["workerID"] == first_worker and resumed["result"] == {"value": 4}, resumed
     passed("resume after service restart reuses the completed worker and runs only the remaining step")
 
+    cli_path = sandbox.root / "config" / "opencode" / "cli.json"
+    cli = json.loads(cli_path.read_text())
+    cli["plugins"][0]["options"]["tree"] = True
+    cli_path.write_text(json.dumps(cli))
     terminal = Terminal(sandbox, owner)
     terminal.wait_for("Build · Fixture")
     os.write(terminal.master, b"/workflows")
@@ -479,7 +515,7 @@ return await pipeline(args.items, item => agent(item.prompt, {{
     terminal.wait_for("native-parallel")
     passed("the actual TUI exposes the workflow navigator after server restart")
     os.write(terminal.master, b"native-parallel")
-    terminal.wait_for("2/2 recorded steps")
+    terminal.wait_for("2 of 2 steps done")
     os.write(terminal.master, b"\r")
     terminal.wait_for("s save")
     terminal.wait_for("fixture-reader")
@@ -525,14 +561,10 @@ return await pipeline(args.items, item => agent(item.prompt, {{
             return await checkpoint("Resume paused UI run", {key:"ui-resume"});'''),
     }))
     eventually(lambda: any(step["status"] == "running" for step in inspect(owner, ui_pause["id"])["steps"]))
-    os.write(terminal.master, b"/workflows")
-    terminal.wait_for("Open dynamic workflows")
-    os.write(terminal.master, b"\r")
-    terminal.wait_for("Dynamic workflows")
-    os.write(terminal.master, b"ui-pause")
+    click(wait_node("threads-footer-workflows", lambda node: node_text(node) == "1 workflow", "footer workflow count"))
     terminal.wait_for("ui-pause · running")
-    os.write(terminal.master, b"\r")
     terminal.wait_for("p pause")
+    passed("clicking the footer's workflow count opens the only running workflow's panel")
     os.write(terminal.master, b"p")
     settled(owner, ui_pause["id"], "pausing")
     provider.release.set()
@@ -552,26 +584,31 @@ return await pipeline(args.items, item => agent(item.prompt, {{
         "key": "ui-stop", "script": script("ui-stop", 'return await agent("WORKFLOW_UI_STOP", {key:"held",agent:"fixture-reader"});'),
     }))
     eventually(lambda: any(step["status"] == "running" for step in inspect(owner, ui_stop["id"])["steps"]))
-    os.write(terminal.master, b"/workflows")
-    terminal.wait_for("Open dynamic workflows")
-    os.write(terminal.master, b"\r")
-    terminal.wait_for("Dynamic workflows")
-    os.write(terminal.master, b"ui-stop")
+    os.write(terminal.master, b"\x18b")
+    sidebar_row = f"threads-sidebar-workflow-{ui_stop['id']}"
+    click(wait_node(sidebar_row, lambda node: node_text(node).startswith("•ui-stop") and node_text(node).endswith("running · 0/1 steps"), "running workflow in the sidebar"))
     terminal.wait_for("ui-stop · running")
-    os.write(terminal.master, b"\r")
     terminal.wait_for("x stop")
+    passed("the sidebar lists the running workflow and its row opens the run panel")
     os.write(terminal.master, b"x")
     settled(owner, ui_stop["id"], "stopped")
     provider.release.set()
     terminal.wait_for("ui-stop · stopped")
     passed("the terminal stop key interrupts active workflow work")
     close_workflow_panel()
+    # Opening a panel clears an explicitly shown sidebar, and this terminal is too narrow for the
+    # automatic one, so show it again. OpenCode's sidebar footer marks it as open.
+    os.write(terminal.master, b"\x18b")
+    wait_node("sidebar.footer.location", lambda _: tree_node("threads-sidebar-workflows") is None, "sidebar shown without the stopped workflow")
+    os.write(terminal.master, b"\x18b")
+    wait_node("session-pane", lambda _: tree_node("sidebar.footer.location") is None, "sidebar hidden again")
+    passed("a stopped workflow leaves the sidebar")
     os.write(terminal.master, b"/workflows")
     terminal.wait_for("Open dynamic workflows")
     os.write(terminal.master, b"\r")
     terminal.wait_for("Dynamic workflows")
     os.write(terminal.master, b"native-parallel")
-    terminal.wait_for("2/2 recorded steps")
+    terminal.wait_for("2 of 2 steps done")
     os.write(terminal.master, b"\r")
     terminal.wait_for("Enter open worker")
     os.write(terminal.master, b"\x1b[B")

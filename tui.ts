@@ -14,14 +14,14 @@ const CoordinatorRef = z.object({ coordinatorID: z.string() });
 export default Plugin.define({
   id: "op-threads",
   setup(ctx) {
-    const workflows = workflowUI(ctx);
+    const workflows = workflowUI(ctx, RGBA.fromHex("#808080"));
     const rpc = ctx.client.rpc(ThreadsRpc);
     const list = activity(
       ctx,
       RGBA,
       { createEffect, createSignal },
       getComponentCatalogue().spinner !== undefined,
-      { workflows: workflows.active },
+      { workflows: workflows.active, openWorkflows: workflows.open },
     );
     const closing = new Set<string>();
     const abort = new AbortController();

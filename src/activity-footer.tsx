@@ -23,6 +23,7 @@ export function ThreadsIndicator(props: {
   summary: () => FooterSummary;
   shortcut: () => string | undefined;
   open: () => void;
+  openWorkflows: () => void;
 }) {
   const text = () => footerText(props.summary());
   const foreground = () => themeColor(props.ctx.theme.text, props.fallbackColor);
@@ -56,10 +57,28 @@ export function ThreadsIndicator(props: {
             </box>
           </Show>
         </Show>
-        <Show when={text().label}>
-          <text id={`${props.id}-label`} fg={info()} wrapMode="none">
-            {text().label}
+        <Show when={text().workers}>
+          <text id={`${props.id}-workers`} fg={info()} wrapMode="none">
+            {text().workers}
           </text>
+        </Show>
+        <Show when={text().workers && text().workflows}>
+          <text fg={info()} wrapMode="none">·</text>
+        </Show>
+        <Show when={text().workflows}>
+          <box
+            id={`${props.id}-workflows`}
+            flexShrink={0}
+            onMouseUp={(event) => {
+              if (event.button !== 0) return;
+              event.stopPropagation();
+              props.openWorkflows();
+            }}
+          >
+            <text fg={info()} wrapMode="none">
+              {text().workflows}
+            </text>
+          </box>
         </Show>
         <Show when={text().attention}>
           <text id={`${props.id}-attention`} fg={warning()} wrapMode="none">

@@ -3,6 +3,9 @@
 ## Unreleased
 
 - Removed the workflow status line above the prompt. Use `/workflows` to open a run's panel.
+- Clicking the footer's workflow count opens the running workflow's panel, or the `/workflows` list when several runs are active. The rest of the indicator still opens the Threads list.
+- Added a **Workflows** section to the sidebar. It lists unfinished runs of the current conversation, and a click on a row opens that run's panel.
+- The `/workflows` list shows step progress as `2 of 3 steps done` instead of `2/3 recorded steps`.
 
 ## 0.2.7
 
