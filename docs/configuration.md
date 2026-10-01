@@ -56,7 +56,7 @@ The terminal plugin takes no options. Server options don't reach it.
 
 ## Pin a version
 
-Add the version to the package name in both files, for example `@op1/threads@0.2.7`.
+Add the version to the package name in both files, for example `@op1/threads@0.2.8`.
 
 ## Use a local checkout
 

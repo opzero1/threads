@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.8
 
 - Removed the workflow status line above the prompt. Use `/workflows` to open a run's panel.
 - Clicking the footer's workflow count opens the running workflow's panel, or the `/workflows` list when several runs are active. The rest of the indicator still opens the Threads list.
