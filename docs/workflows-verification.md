@@ -116,7 +116,7 @@ Both worker models matched their profiles and journal records. Their transcripts
 - One OpenCode service with one loaded scheduler implementation owns scheduling. Multiple services, or duplicate module instances that share storage, are unsupported.
 - Interrupted writes require inspection and resolution by the same worker. A missing worker doesn't authorize repeating its effects.
 - Scripts, arguments, and nested scripts can't change within a run. Changes require a new run key.
-- Native failures and explicit `FAIL` or `INCONCLUSIVE` reports prevent completion, even when the script catches them.
+- `FAIL` and `INCONCLUSIVE` reports are returned to the script and do not fail the run. A native failure throws into the script; if the script catches it and returns, the run completes. Both stay visible on the step.
 - Token budgets govern dispatch using reported usage. Work already running can exceed the threshold. Unmeasured usage blocks further budgeted dispatch.
 - Old journals without checkpoint settlement order can't replay answered checkpoints deterministically. They fail with a diagnostic instead of inventing an order.
 - Corrupt and exact-limit legacy records keep their evidence and produce diagnostics that the owner can see. A full legacy record may need explicit repair or a new run key.

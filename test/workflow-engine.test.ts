@@ -913,19 +913,49 @@ return await parallel([
     await fixture.api.dispose();
   });
 
-  test("cannot complete when script catches a failed worker", async () => {
+  test("completes with the script's result when it catches a failed worker", async () => {
     const fixture = await harness("missing");
     const catches = `
-export const meta = { name: "honest", description: "caught failure" };
-try { await agent("missing", { key: "missing", agent: "analyst" }); } catch (_) {}
-return "claimed-success";`;
-    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "honest", script: catches, args: null }), {
+export const meta = { name: "caught", description: "caught failure" };
+try { await agent("missing", { key: "missing", agent: "analyst" }); } catch (error) { return { caught: error.message }; }
+return "unreachable";`;
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "caught", script: catches, args: null }), {
       agent: "caller", model: { providerID: "test", id: "model" },
     });
     const run = await settled(fixture.api, fixture.ownerID, started.id);
-    expect(run.status).toBe("failed");
-    expect(run.error).toContain("unresolved step missing (failed)");
+    expect(run.status).toBe("completed");
+    expect(run.result).toEqual({ caught: expect.stringContaining("without a workflows_result report") });
+    expect(run.steps[0].status).toBe("failed");
+    expect(fixture.deliveryTexts.at(-1)).toContain(`"failed":1`);
     await fixture.api.dispose();
+  });
+
+  test("returns a FAIL report's result to the script, completes, and replays it after restart", async () => {
+    const fixture = await harness("manual");
+    const reviewed = `
+export const meta = { name: "review", description: "adverse verdict" };
+const review = await agent("Review", { key: "review", agent: "analyst" });
+const approved = await checkpoint("Continue?", { key: "continue" });
+return { review, approved };`;
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "review", script: reviewed, args: null }), {
+      agent: "caller", model: { providerID: "test", id: "model" },
+    });
+    await fixture.waitForSpawn("review");
+    await fixture.api.result(fixture.workerID("review"), { verdict: "FAIL", summary: "found a defect", evidence: ["src/a.ts:1"], result: { defects: 1 } });
+    fixture.setOutcome("review", "succeeded");
+    await reaches(fixture.api, fixture.ownerID, started.id, "waiting");
+    await fixture.api.dispose();
+    const reopened = fixture.reopen();
+    try {
+      await reopened.control(fixture.ownerID, { runID: started.id, action: "resume", checkpointKey: "continue", response: true });
+      const run = await settled(reopened, fixture.ownerID, started.id);
+      expect(run.status).toBe("completed");
+      expect(run.error).toBeUndefined();
+      expect(run.result).toEqual({ review: { defects: 1 }, approved: true });
+      expect(run.steps[0].status === "completed" && run.steps[0].report.verdict).toBe("FAIL");
+      expect(fixture.spawns()).toBe(1);
+      expect(fixture.deliveryTexts.at(-1)).toContain(`"verdict":"FAIL"`);
+    } finally { await reopened.dispose(); }
   });
 
   test("rejects a PASS report when the native worker execution fails", async () => {
@@ -1307,9 +1337,11 @@ return "done";`;
     const reopened = fixture.reopen();
     await reopened.control(fixture.ownerID, { runID: started.id, action: "resume", checkpointKey: "park", response: true });
     const replayed = await settled(reopened, fixture.ownerID, started.id);
-    expect(replayed.status).toBe("failed");
+    expect(replayed.status).toBe("completed");
+    expect(replayed.result).toBe("done");
     expect(replayed.steps.find((step) => step.key === "first")?.status).toBe("failed");
     expect(fixture.spawnedStepKeys.filter((key) => key === "first")).toHaveLength(1);
+    expect(fixture.spawnedStepKeys.filter((key) => key === "fallback")).toHaveLength(1);
     await reopened.dispose();
   });
 

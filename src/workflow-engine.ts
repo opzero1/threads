@@ -256,6 +256,7 @@ export function workflowEngine(
       const run = await store.get(runID);
       if (!terminal.has(run.status) || run.delivered) return run;
       const completed = run.steps.filter(isCompleted);
+      const adverse = (step: (typeof completed)[number]) => step.report.verdict === "FAIL" || step.report.verdict === "INCONCLUSIVE";
       const report = {
         runID: run.id,
         status: run.status,
@@ -265,7 +266,7 @@ export function workflowEngine(
           completed: completed.length,
           failed: run.steps.filter((step) => step.status === "failed").length,
         },
-        evidence: completed.slice(0, 6).map((step) => ({
+        evidence: [...completed.filter(adverse), ...completed.filter((step) => !adverse(step))].slice(0, 6).map((step) => ({
           key: step.key,
           verdict: step.report.verdict,
           summary: bounded(step.report.summary, 160),
@@ -1121,10 +1122,8 @@ export function workflowEngine(
       } else if (latest.status === "pausing" || latest.status === "paused") {
         await store.update(runID, (current) => { current.status = "paused"; }, "control");
       } else {
-        const unresolved = latest.steps.find((step) => step.status !== "completed");
+        const unresolved = latest.steps.find((step) => step.status === "running");
         if (unresolved) throw new Error(`Workflow cannot complete with unresolved step ${unresolved.key} (${unresolved.status})`);
-        const adverse = latest.steps.filter(isCompleted).find((step) => step.report.verdict === "FAIL" || step.report.verdict === "INCONCLUSIVE");
-        if (adverse) throw new Error(`Step ${adverse.key} reported ${adverse.report.verdict}: ${adverse.report.summary}`);
         await store.update(runID, (current) => {
           current.status = "completed";
           if (output === undefined) delete current.result;

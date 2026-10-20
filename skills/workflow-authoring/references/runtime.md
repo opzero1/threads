@@ -29,6 +29,8 @@ The body supports top-level `await`, ordinary data transformations, branching, a
 
 Workers submit `workflows_result({ verdict, summary, evidence, result })`. Invalid results return a validation error so the worker can repair its output. A native execution that ends without a result has no task verdict.
 
+`agent()` returns the result for every verdict. `FAIL` and `INCONCLUSIVE` stay on the step, in `workflows_inspect`, and in the completion notice, but they do not throw or fail the run. When the script must branch on a judgment, ask for it in the step's `schema`, such as `{ ok: boolean }`. A worker execution that fails or ends without an accepted report throws into the script. If the script catches that error and returns, the run completes with the returned value and the failed step stays recorded. An interrupted write still interrupts the run.
+
 Profile restrictions and the coordinator's restrictions still apply. Read access blocks other plugin and MCP tools, including those with side effects, even if the selected profile permits them. Workflow workers cannot delegate. Selecting `access: "write"` does not grant permissions that the selected profile lacks.
 
 ## External directories
@@ -54,7 +56,7 @@ The runner resolves symlinks, removes duplicates, sorts the list, and records it
 
 Errors remain errors unless the script explicitly handles them. Do not discard failed items or substitute a passing result for missing evidence.
 
-There are no retry or loop helpers. Write the loop in plain JavaScript, give each attempt or round a distinct step key, and stop on a condition from the recorded results. Add a round limit only when the user supplies one. A native execution failure or an explicit `FAIL`/`INCONCLUSIVE` report remains an unresolved failure and prevents the run from passing, even when caught by the script.
+There are no retry or loop helpers. Write the loop in plain JavaScript, give each attempt or round a distinct step key, and stop on a condition from the recorded results. Add a round limit only when the user supplies one.
 
 ### Retry until accepted
 
