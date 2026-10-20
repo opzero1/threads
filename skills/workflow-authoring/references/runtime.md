@@ -107,7 +107,7 @@ There is no cap on host calls: `phase`, `log`, and `checkpoint` calls do not cou
 
 Arguments, host-call payloads, and results are each limited to 1 MiB; error diagnostics are capped at 8 KiB. The runtime module allows 64 simultaneous interpreter calls, including nested calls, and rejects excess calls immediately. This is separate from the agent concurrency limit.
 
-Runs created before Threads 0.3.0 used the original three-attempt and ten-round helper defaults. They can be inspected and listed but not resumed; start a new run instead. A script that calls `retry`, `gate`, or `loopUntilDry` fails validation and names the pattern above that replaces it.
+A run recorded with the original helper defaults (`helperPolicy: "legacy-bounded"`) can be inspected and listed but not resumed; start a new run instead. A script that calls `retry`, `gate`, or `loopUntilDry` fails validation and names the pattern above that replaces it.
 
 The configured Threads worker limit also applies across simultaneous runs owned by one coordinator. Its default is four workers. A token budget checks recorded usage at dispatch, including failed and interrupted attempts. Already-running agents can exceed the remaining budget. Unreported usage is marked unmeasured and blocks further budgeted dispatch.
 
