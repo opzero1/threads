@@ -1,4 +1,4 @@
-export { parseWorkflow } from "./workflow-runtime-interpreter";
+export { parseWorkflow, validateBody } from "./workflow-runtime-interpreter";
 export type { WorkflowMeta } from "./workflow-runtime-interpreter";
 
 import {

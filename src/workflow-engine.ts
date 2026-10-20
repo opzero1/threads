@@ -4,7 +4,7 @@ import { Session } from "@opencode/schema/session";
 import { SessionMessage } from "@opencode/schema/session-message";
 import Ajv from "ajv";
 import type { z } from "zod";
-import { parseWorkflow, executeWorkflow, type WorkflowHost } from "./workflow-runtime";
+import { parseWorkflow, validateBody, executeWorkflow, type WorkflowHost } from "./workflow-runtime";
 import { withResolvedGrants } from "./external-access";
 import { requireDelegation } from "./permissions";
 import {
@@ -1174,6 +1174,7 @@ export function workflowEngine(
       const script = input.script ?? await options.loadSaved?.(input.name!);
       if (script === undefined) throw new Error("Saved workflow loading is not configured");
       const parsed = parseWorkflow(script);
+      validateBody(parsed.body);
       const id = runIdentity(ownerID, input.key);
       const fingerprint = workflowHash({ script, args: input.args, limits: {
         concurrency: input.concurrency, maxAgents: input.maxAgents,
