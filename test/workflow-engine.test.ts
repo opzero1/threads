@@ -2137,7 +2137,7 @@ describe("workflow worktree cleanup", () => {
       const delivered = await until(fixture.api, fixture.ownerID, started.id, (run) => run.delivered);
       expect(delivered.status).toBe("completed");
       expect(delivered.result).toEqual({ ok: true });
-      expect(delivered.worktreeCleanup).toEqual({ complete: false, worktrees: [] });
+      expect(delivered.worktreeCleanup).toBeUndefined();
       expect(fixture.deliveries).toContain(delivered.deliveryID);
       release();
       const run = await cleaned(fixture.api, fixture.ownerID, started.id);
@@ -2299,7 +2299,7 @@ return await agent("check", { key: "check", agent: "analyst", directory: ${JSON.
     } finally { await fixture.api.dispose(); }
   });
 
-  test("disposal stops a cleanup pass promptly, and the next engine finishes it", async () => {
+  test("disposal stops a cleanup pass promptly, and the next engine leaves the rest to prune", async () => {
     const fixture = await harness("valid", 2, {});
     let reopened: ReturnType<typeof workflowEngine> | undefined;
     try {
@@ -2313,12 +2313,22 @@ return await agent("check", { key: "check", agent: "analyst", directory: ${JSON.
       await fixture.api.dispose();
       expect(Date.now() - before).toBeLessThan(1_000);
       expect(stopped).toBe(true);
-      const record = WorkflowRun.parse(await fixture.getStorage(`workflows/runs/${started.id}`));
+      const key = `workflows/runs/${started.id}`;
+      let record = WorkflowRun.parse(await fixture.getStorage(key));
+      for (let count = 0; record.worktreeCleanup === undefined && count < 400; count++) {
+        await Bun.sleep(5);
+        record = WorkflowRun.parse(await fixture.getStorage(key));
+      }
       expect(record.status).toBe("completed");
-      expect(record.worktreeCleanup).toEqual({ complete: false, worktrees: [] });
+      expect(outcomes(record)).toEqual({ write: "kept:error" });
       fixture.setCheckoutState(() => "clean");
       reopened = fixture.reopen();
-      expect(outcomes(await cleaned(reopened, fixture.ownerID, started.id))).toEqual({ write: "removed" });
+      await reopened.get(fixture.ownerID, started.id);
+      await Bun.sleep(20);
+      expect(fixture.inspections).toHaveLength(1);
+      expect(fixture.removals).toEqual([]);
+      expect((await reopened.prune(fixture.ownerID, { apply: true })).counts.removed).toBe(1);
+      expect(outcomes(await reopened.get(fixture.ownerID, started.id))).toEqual({ write: "removed" });
     } finally { await reopened?.dispose(); await fixture.api.dispose(); }
   });
 
@@ -2355,33 +2365,6 @@ return await agent("check", { key: "check", agent: "analyst", directory: ${JSON.
     await fixture.api.dispose();
     expect(Date.now() - before).toBeLessThan(3_000);
     expect(fixture.removals).toEqual([]);
-  });
-
-  test("a restarted engine finishes an interrupted pass without repeating recorded worktrees", async () => {
-    const layout = { cleanupWorktrees: false };
-    const fixture = await harness("valid", 2, layout);
-    let reopened: ReturnType<typeof workflowEngine> | undefined;
-    try {
-      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "cleanup-restart", script: worktreeScript(["first", "second"]) }), runtime);
-      const finished = await until(fixture.api, fixture.ownerID, started.id, (run) => run.delivered);
-      await fixture.api.dispose();
-      await fixture.mutateRun(started.id, (run) => {
-        run.worktreeCleanup = { complete: false, worktrees: [{ key: "first", directory: stepDirectory(finished, "first"), outcome: "kept", reason: "changes", at: 1 }] };
-      });
-      const disabled = fixture.reopen();
-      try {
-        await disabled.get(fixture.ownerID, started.id);
-        await Bun.sleep(20);
-        expect((await disabled.get(fixture.ownerID, started.id)).worktreeCleanup?.complete).toBe(false);
-        expect(fixture.inspections).toEqual([]);
-      } finally { await disabled.dispose(); }
-      layout.cleanupWorktrees = true;
-      reopened = fixture.reopen();
-      const run = await cleaned(reopened, fixture.ownerID, started.id);
-      expect(outcomes(run)).toEqual({ first: "kept:changes", second: "removed" });
-      expect(fixture.inspections).toEqual([stepDirectory(finished, "second")]);
-      expect(fixture.removals.map((removal) => removal.directory)).toEqual([stepDirectory(finished, "second")]);
-    } finally { await reopened?.dispose(); await fixture.api.dispose(); }
   });
 
   test("runs recorded before cleanup existed still load, and prune keeps their finish time", async () => {

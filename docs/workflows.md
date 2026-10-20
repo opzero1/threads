@@ -62,7 +62,7 @@ Threads removes a checkout through OpenCode, which runs `git worktree remove` wi
 
 A workflow step can't start in a checkout while Threads removes it. If the checkout is gone by the time the step is recorded, the step fails with an error that says the directory no longer exists. A follow-up you send to a worker in that checkout waits until the removal finishes.
 
-Cleanup starts after the run's final status and result are recorded and Threads has tried to deliver its completion notice, so it can't delay or change them. Ask the agent to inspect the run to see what happened. Its `worktreeCleanup` lists each checkout as `removed`, `missing` (already gone), or `kept` with a reason:
+Cleanup runs once, after the run's final status and result are recorded and Threads has delivered its completion notice, so it can't delay or change them. Ask the agent to inspect the run to see what happened. Its `worktreeCleanup` lists each checkout as `removed`, `missing` (already gone), or `kept` with a reason:
 
 | Reason | Meaning |
 | --- | --- |
@@ -75,7 +75,7 @@ Cleanup starts after the run's final status and result are recorded and Threads 
 
 To keep a writer's work for integration after the run, ask it to commit to a named branch or to leave its changes uncommitted.
 
-If OpenCode stops during cleanup, Threads finishes it the next time the owning conversation lists, inspects, or controls its workflows, for example when you open `/workflows` there. `workflows_prune` also finds anything it left. If you send a follow-up to a finished run's worker, its checkout may already be gone.
+If OpenCode stops during cleanup, Threads doesn't resume it. Run `workflows_prune` to remove what it left. If you send a follow-up to a finished run's worker, its checkout may already be gone.
 
 To turn automatic cleanup off, set [`workflowWorktreeCleanup`](configuration.md#server-options) to `false`. The setting applies to runs that end while it's on. Runs that ended earlier, or while it was off, are left for `workflows_prune`.
 
