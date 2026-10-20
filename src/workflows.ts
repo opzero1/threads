@@ -42,9 +42,7 @@ export async function workflows(
     },
     save: async ({ ownerID, runID, name, scope }) => {
       const run = await engine.get(ownerID, runID);
-      const result = await saved.save(name, run.script, scope);
-      await refreshCommands();
-      return result;
+      return saved.save(name, run.script, scope);
     },
   });
   await ctx.session.hook("prompt", (event) => engine.preparePrompt(event.sessionID, event.messageID));
@@ -125,20 +123,19 @@ export async function workflows(
     });
     editor.add({
       name: "save",
-      description: "Save a run's JavaScript as a reusable workflow in the current project's .opencode/workflows or your OpenCode config's workflows directory. Existing files are never overwritten. Saves the script, not run arguments or worker transcripts.",
-      input: z.object({ runID: z.string(), name: z.string(), scope: z.enum(["project", "user"]).default("project") }).strict(),
+      description: "Save a run's JavaScript as a reusable workflow in the current project's .opencode/workflows or your OpenCode config's workflows directory. Set overwrite: true to replace an existing file of that name. Saves the script, not run arguments or worker transcripts.",
+      input: z.object({ runID: z.string(), name: z.string(), scope: z.enum(["project", "user"]).default("project"), overwrite: z.boolean().default(false) }).strict(),
       output: z.object({ path: z.string() }),
       options: { namespace: "workflows", codemode: true, permission: "edit" },
       execute: async (input, tool) => {
         const run = await engine.get(tool.sessionID, input.runID);
-        const output = await saved.save(input.name, run.script, input.scope);
-        await refreshCommands();
+        const output = await saved.save(input.name, run.script, input.scope, input.overwrite);
         return { content: JSON.stringify(output), output };
       },
     });
     editor.add({
       name: "saved",
-      description: "List reusable workflow scripts available in this project and your OpenCode configuration. Project names take precedence over user names.",
+      description: "List reusable workflow scripts available in this project and your OpenCode configuration, with each script's description and optional whenToUse. Start one with workflows_start and its name. Project names take precedence over user names.",
       input: z.object({}).strict(),
       output: z.object({ workflows: z.array(SavedWorkflow) }),
       options: { namespace: "workflows", codemode: true },
@@ -157,12 +154,11 @@ export async function workflows(
     path: Skill.Info.fields.path.make(skillPath),
     content: skill.replace(/^---\n[\s\S]*?\n---\n/, ""),
   }));
-  let commands = await saved.list();
   await ctx.command.transform((editor) => {
     editor.add({
       name: "workflow-refresh",
-      description: "Reload saved workflow commands for this location",
-      execute: refreshCommands,
+      description: "Activate workflow tools for this location without prompting the agent",
+      execute: async () => {},
     });
     editor.add({
       name: "workflow-run",
@@ -174,22 +170,6 @@ export async function workflows(
         text: `Load workflow-authoring and use a dynamic workflow for this task. Choose explicit roles and verification requirements, then start it with workflows_start.\n\n${prompt.text}`,
       }).then(() => {}),
     });
-    for (const command of commands) {
-      editor.add({
-        name: `workflow-${command.name}`,
-        description: command.description,
-        execute: ({ sessionID, prompt, delivery }) => ctx.session.prompt({
-          ...prompt,
-          sessionID,
-          delivery,
-          text: `Load workflow-authoring, then run saved workflow ${JSON.stringify(command.name)} through workflows_start with arguments from this request:\n\n${prompt.text}`,
-        }).then(() => {}),
-      });
-    }
   });
-  async function refreshCommands() {
-    commands = await saved.list();
-    await ctx.command.reload();
-  }
   return () => engine.dispose();
 }

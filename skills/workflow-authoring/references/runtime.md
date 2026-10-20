@@ -6,7 +6,7 @@ Keep each result below 1 MiB and the combined run journal below 16 MiB. Payload 
 
 ## Script shape
 
-The first statement is `export const meta = { name: "name", description: "description" }`. Metadata contains literal values. An optional `phases` array contains objects with a `title`.
+The first statement is `export const meta = { name: "name", description: "description" }`. Metadata contains literal values. An optional `whenToUse` string tells an agent when to pick the saved workflow. An optional `phases` array contains objects with a `title`.
 
 The body supports top-level `await`, ordinary data transformations, branching, and bounded loops. Return a JSON value. Intermediate agent results stay in script variables and the durable journal.
 
@@ -105,8 +105,6 @@ Checkpoint responses are stored in both checkpoint state and settlement order, s
 
 ## Saved workflows
 
-`tools.workflows.save` writes a run's script to `.opencode/workflows/<name>.js` in the current directory or to `workflows/<name>.js` under the user's OpenCode configuration. Existing files are not overwritten. Project workflows take precedence over user workflows of the same name.
+`tools.workflows.save` writes a run's script to `.opencode/workflows/<name>.js` in the current directory or to `workflows/<name>.js` under the user's OpenCode configuration. It replaces an existing file only with `overwrite: true`, and never writes through a symlink. Project workflows take precedence over user workflows of the same name.
 
-Use `tools.workflows.saved` to list scripts and `/workflow-<name>` to ask the agent to invoke one with arguments. `/workflow-run <task>` asks the current agent to author a workflow. `/workflows` opens the terminal run navigator.
-
-After editing saved files directly, use `/workflow-refresh` to reload their commands. The saved names `run` and `refresh` are reserved for built-in workflow commands.
+Use `tools.workflows.saved` to list scripts with their `description` and optional `whenToUse`, then run one with `workflows_start({ key, name, args })`. Saved scripts are read on each call, so direct edits apply without a reload. `/workflow-run <task>` asks the current agent to author a workflow. `/workflows` opens the terminal run navigator.

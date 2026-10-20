@@ -394,23 +394,11 @@ def saved_commands():
     before = len(provider.requests)
     sandbox.api("POST", f"/api/session/{owner}/command", {"name": "workflow-refresh", "text": ""})
     commands = sandbox.api("GET", "/api/command", location=sandbox.directory)["data"]
-    assert any(command["name"] == "workflow-command-example" for command in commands), commands
+    names = {command["name"] for command in commands}
+    assert {"workflow-run", "workflow-refresh"} <= names, commands
+    assert "workflow-command-example" not in names, commands
     assert len(provider.requests) == before, "Refresh unexpectedly generated a model request"
-    marker = "SAVED_COMMAND_INVOCATION"
-    provider.responses[marker] = {"name": "workflows_start", "arguments": {"key": "command-example-run", "name": "command-example", "args": {"value": 9}}}
-    sandbox.api("POST", f"/api/session/{owner}/command", {"name": "workflow-command-example", "text": marker})
-    def started_run():
-        for message in messages(owner):
-            if message["type"] != "assistant":
-                continue
-            for part in message["content"]:
-                if part["type"] == "tool" and part["name"] == "workflows_start" and part["state"]["status"] == "completed":
-                    return json.loads(part["state"]["content"][0]["text"])
-        return None
-    run = eventually(started_run)
-    final = settled(run)
-    assert final["result"] == 10, final
-    return final
+    return sorted(name for name in names if name.startswith("workflow-"))
 
 
 def nesting_limit():

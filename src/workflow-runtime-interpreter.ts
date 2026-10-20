@@ -14,6 +14,7 @@ export type WorkflowHost = {
 export type WorkflowMeta = {
   name: string;
   description: string;
+  whenToUse?: string;
   phases?: { title: string }[];
 };
 
@@ -113,14 +114,17 @@ function validateMeta(value: unknown): WorkflowMeta {
       typeof value.description !== "string" || !value.description.trim())
     throw new Error("Workflow metadata requires non-empty name and description strings");
   const keys = Object.keys(value);
-  if (keys.some((key) => !["name", "description", "phases"].includes(key)))
+  if (keys.some((key) => !["name", "description", "whenToUse", "phases"].includes(key)))
     throw new Error("Workflow metadata contains an unknown field");
+  if (value.whenToUse !== undefined && typeof value.whenToUse !== "string")
+    throw new Error("Workflow metadata whenToUse must be a string");
   if (value.phases !== undefined && (!Array.isArray(value.phases) || value.phases.some((phase) =>
     !isRecord(phase) || Object.keys(phase).length !== 1 || typeof phase.title !== "string" || !phase.title.trim())))
     throw new Error("Workflow metadata phases must contain only non-empty titles");
   return {
     name: value.name,
     description: value.description,
+    ...(value.whenToUse === undefined ? {} : { whenToUse: value.whenToUse }),
     ...(value.phases === undefined ? {} : { phases: value.phases as { title: string }[] }),
   };
 }
