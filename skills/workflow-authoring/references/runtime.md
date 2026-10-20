@@ -2,7 +2,7 @@
 
 Scripts run in OpenCode's confined Code Mode interpreter inside a terminable Bun worker. When a deadline is supplied, the parent service enforces it, including during synchronous script work. Scripts cannot import modules or use host filesystem, process, network, clock, or randomness APIs. Agents inspect the outside world and return recorded data. Use arguments for timestamps and other variable inputs.
 
-Keep each result below 1 MiB and the combined run journal below 16 MiB. Payload admission reserves space for control metadata and bounded failure diagnostics, so usable payload capacity is lower. Return concise structured findings and artifact paths instead of complete file contents. Run lists and completion notifications omit the full result; inspect a run to read it.
+Keep each result below 1 MiB and the combined run journal below 16 MiB. Payload admission reserves space for control metadata and bounded failure diagnostics, so usable payload capacity is lower. Return concise structured findings and artifact paths instead of complete file contents. Run lists omit the result. Completion notifications include the run's total usage and the first 2,000 characters of the result as JSON text, marked `…[truncated]` when cut off; inspect a run to read the full result.
 
 ## Script shape
 

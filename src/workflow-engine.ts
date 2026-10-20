@@ -28,6 +28,7 @@ import {
   WorkflowRun,
   WorkflowSettlement,
   WorkflowStart,
+  workflowSummary,
   type WorkflowPruneResult,
   type WorkflowStep,
   type WorkflowWorktreeOutcome,
@@ -265,6 +266,9 @@ export function workflowEngine(
           completed: completed.length,
           failed: run.steps.filter((step) => step.status === "failed").length,
         },
+        usage: workflowSummary(run).usage,
+        // Small enough that the preview and step evidence fit the 7,000-character notice together.
+        ...(run.result === undefined ? {} : { result: bounded(JSON.stringify(run.result), 2_000) }),
         evidence: completed.slice(0, 6).map((step) => ({
           key: step.key,
           verdict: step.report.verdict,

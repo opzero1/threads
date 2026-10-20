@@ -2031,6 +2031,25 @@ return await agent("c", { key: "c", agent: "analyst" });`;
     expect(fixture.deliveries.length).toBe(before + 1);
     await fixture.api.dispose();
   });
+
+  test("completion notice previews the result with total usage and marks a cut-off preview", async () => {
+    const fixture = await harness("valid");
+    try {
+      const notice = async (key: string, script: string, args: unknown = null) => {
+        const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key, script, args }), runtime);
+        await until(fixture.api, fixture.ownerID, started.id, (run) => run.delivered);
+        const text = fixture.deliveryTexts.find((item) => item.includes(`(${started.id}) finished:`))!;
+        return JSON.parse(text.split("\n")[1]);
+      };
+      const small = await notice("preview", script);
+      expect(small.result).toBe(`{"ok":true}`);
+      expect(small.usage).toEqual({ tokens: 18, cost: 0.02, measured: true });
+
+      const large = await notice("cut-off", `export const meta = { name: "large", description: "large result" }; return args;`, "x".repeat(5_000));
+      expect(large.result).toBe(`"${"x".repeat(1_999)}\n…[truncated]`);
+      expect(large.usage).toEqual({ tokens: 0, cost: 0, measured: false });
+    } finally { await fixture.api.dispose(); }
+  });
 });
 
 const runtime = { agent: "caller", model: { providerID: "test", id: "model" } };
