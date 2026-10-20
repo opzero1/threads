@@ -171,7 +171,7 @@ function isReference(node: Node, parent?: Node): boolean {
   return true;
 }
 
-function validateBody(body: string): void {
+export function validateBody(body: string): void {
   const program = ast(body, "script");
   const declared = new Set<string>();
   const nodes: { node: Node; parent?: Node }[] = [];

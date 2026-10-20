@@ -695,6 +695,31 @@ return await checkpoint("Continue?", { key: "approval" });` }), { agent: "caller
     } finally { await reopened.dispose(); }
   });
 
+  test("rejects a removed helper before creating the run and leaves the key unused", async () => {
+    const fixture = await harness("valid");
+    const runtime = { agent: "caller", model: { providerID: "test", id: "model" } };
+    for (const [name, call, pattern] of [
+      ["retry", `retry(() => agent("draft"), { attempts: 2 })`, "Retry until accepted"],
+      ["gate", `gate(() => agent("draft"), (value) => value)`, "Retry until accepted"],
+      ["loopUntilDry", `loopUntilDry(() => agent("find"))`, "Loop until dry"],
+    ]) {
+      const script = `export const meta = { name: "${name}", description: "removed helper" }; return await ${call};`;
+      const message = `Workflow helper ${name}() was removed; write a plain JavaScript loop instead (see "${pattern}"`;
+      await expect(fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: name, script, args: null }), runtime))
+        .rejects.toThrow(message);
+      fixture.setSaved(name, script);
+      await expect(fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: `saved-${name}`, name, args: null }), runtime))
+        .rejects.toThrow(message);
+    }
+    expect(await fixture.api.list(fixture.ownerID)).toHaveLength(0);
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({
+      key: "retry", script: `export const meta = { name: "retry", description: "plain loop" }; return 1;`, args: null,
+    }), runtime);
+    expect((await settled(fixture.api, fixture.ownerID, started.id)).result).toBe(1);
+    expect(fixture.spawns()).toBe(0);
+    await fixture.api.dispose();
+  });
+
   test("persists a checkpoint, interrupts on engine disposal, and resumes only after an explicit response", async () => {
     const fixture = await harness("valid");
     const checkpointScript = `
