@@ -22,15 +22,13 @@ var policyFields = {
   idleGraceMs: clock.min(1000),
   stalledMs: clock.min(1000),
   cooldownMs: clock.min(1000),
-  maxWakes: clock.optional(),
-  maxAckRetries: clock.max(100)
+  maxWakes: clock.optional()
 };
 var HeartbeatPolicy = z.object({
   ...policyFields,
   idleGraceMs: policyFields.idleGraceMs.default(60000),
   stalledMs: policyFields.stalledMs.default(300000),
-  cooldownMs: policyFields.cooldownMs.default(300000),
-  maxAckRetries: policyFields.maxAckRetries.default(3)
+  cooldownMs: policyFields.cooldownMs.default(300000)
 }).strict();
 var PolicyPatch = z.object(policyFields).partial().extend({ deadlineAt: clock.optional() }).strict();
 var HeartbeatBinding = z.object({ epoch: clock, runID: id, projectID: id, directory: z.string().min(1), runFingerprint: id }).strict();
@@ -38,7 +36,6 @@ var Admission = z.object({
   messageID: id,
   sequence: clock,
   reservedAt: clock,
-  checks: clock,
   nextCheckAt: clock,
   state: z.enum(["uncertain", "acknowledged", "retired"]),
   evidence: z.array(z.string().max(2000))
@@ -367,7 +364,7 @@ async function heartbeatObserve(client, snapshot) {
     }
     let admission = null;
     const pending = record.pendingAdmission;
-    if (pending && pending.checks < record.policy.maxAckRetries && Date.now() >= pending.nextCheckAt) {
+    if (pending && Date.now() >= pending.nextCheckAt) {
       const inbox = await client.session.inbox.list({ sessionID: record.ownerID });
       const item = inbox.find((entry) => entry.id === pending.messageID);
       if (item) {

@@ -12,7 +12,7 @@ sys.path.insert(0, str(root / 'scripts'))
 source = (root / 'scripts/verify-heartbeat.py').read_text().split('\ntry:\n    # Keep')[0]
 source = source.replace('root = Path(__file__).resolve().parent.parent', 'root = Path(' + repr(str(root)) + ')')
 destination = '.audit/recovery/lifecycle-fix/' + os.environ.get('LIFECYCLE_RECEIPT', 'native')
-source = source.replace('artifacts = root / ".audit/recovery/heartbeat/native"', 'artifacts = root / ' + repr(destination))
+sys.argv[1:] = ['--artifacts', str(root / destination)]
 exec(compile(source, str(root / 'scripts/verify-heartbeat.py'), 'exec'))
 paths = [root / p for p in ['src/workflow-engine.ts', 'src/workflow-types.ts', 'src/heartbeat-policy.ts', 'src/heartbeat-rpc.ts', 'src/heartbeat.ts', 'bin/op-threads-heartbeat.mjs', 'scripts/verify-workflow-lifecycle.py', 'scripts/verify-heartbeat.py', 'scripts/sandbox.py', 'scripts/fixture.py']]
 receipt = {'probe': 'explicit native task invalidation and graceful isolated restart; NOT automatic TTL proof', 'hashes': {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}}

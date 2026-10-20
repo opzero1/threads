@@ -1,8 +1,19 @@
-"""Isolated loopback heartbeat lifecycle; never uses the shared service or global config."""
+"""Isolated heartbeat verification; never uses the shared service, global config, or global LaunchAgents.
+
+Scenarios:
+  workflow  workflow and blocker holds, exact reminders, restarts, and CLI install and cleanup
+  outage    an installed runner survives an OpenCode outage and reconnects through the refreshed registration
+  ipv6      the outage scenario against an unchanged native IPv6 registration
+
+--target is one package directory that provides both the plugin and bin/op-threads-heartbeat.mjs.
+"""
+import argparse
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import time
 import uuid
@@ -11,11 +22,19 @@ from sandbox import Sandbox, eventually
 from fixture import Provider, code_mode_result, config, exposed, tool_call
 
 root = Path(__file__).resolve().parent.parent
-runner = Path(os.environ.get("HEARTBEAT_TEST_BIN", str(root / "bin/op-threads-heartbeat.mjs"))).resolve()
-artifacts = Path(os.environ.get("HEARTBEAT_TEST_ARTIFACTS", str(root / ".audit/recovery/heartbeat/native"))).resolve()
+parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+parser.add_argument("--target", type=Path, default=root)
+parser.add_argument("--artifacts", type=Path, default=root / ".audit/recovery/heartbeat/native")
+parser.add_argument("--scenario", action="append", choices=["workflow", "outage", "ipv6"])
+options = parser.parse_args()
+target = options.target.resolve()
+runner = target / "bin/op-threads-heartbeat.mjs"
+artifacts = options.artifacts.resolve()
 artifacts.mkdir(parents=True, exist_ok=True)
+domain = "gui/" + str(os.getuid())
 checks = []
 commands = []
+labels = []
 provider = Provider()
 sandbox = None
 installed = False
@@ -23,14 +42,6 @@ label = "com.opthreads.heartbeat.test-" + uuid.uuid4().hex
 config_file = None
 
 class IsolatedSandbox(Sandbox):
-    def api(self, method, path, body=None, location=None):
-        try:
-            return super().api(method, path, body, location)
-        except RuntimeError as error:
-            if path == "/api/info" and ": 503 " in str(error):
-                return {}
-            raise
-
     def start(self):
         self.env["OPENCODE_DISABLE_PROJECT_CONFIG"] = "true"
         if not (self.directory / ".git").exists():
@@ -40,16 +51,22 @@ class IsolatedSandbox(Sandbox):
             subprocess.run(["git", "-c", "user.name=fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "fixture"], cwd=self.directory, check=True, capture_output=True)
         super().start()
 
+class IPv6Sandbox(IsolatedSandbox):
+    hostname = "::1"
+
 def check(label, value=True):
     assert value, label
     checks.append(label)
     print("PASS:", label, flush=True)
 
-def cli(*args, success=True):
-    command = ["node", str(runner), *args, "--config", str(config_file)]
-    result = subprocess.run(command, cwd=root, text=True, capture_output=True, timeout=90)
-    commands.append({"command": command, "exit": result.returncode, "stdout": result.stdout, "stderr": result.stderr})
+def command(args):
+    result = subprocess.run(args, cwd=root, text=True, capture_output=True, timeout=90)
+    commands.append({"command": args, "exit": result.returncode, "stdout": result.stdout, "stderr": result.stderr})
     (artifacts / "commands.json").write_text(json.dumps(commands, indent=2))
+    return result
+
+def cli(*args, success=True):
+    result = command(["node", str(runner), *args, "--config", str(config_file)])
     if success:
         assert result.returncode == 0, commands[-1]
         return json.loads(result.stdout)
@@ -70,34 +87,49 @@ def tool(session, name, arguments):
     assert result["state"]["status"] == "completed", result
     return json.loads(result["state"]["content"][0]["text"])
 
-try:
-    # Keep the existing deterministic fixture, but constrain every filesystem write to this worktree.
+def start(kind, directory):
+    global sandbox
+    # Keep each sandbox root, not only its evidence, under the artifacts directory.
     original_mkdtemp = sandbox_module.tempfile.mkdtemp
     sandbox_module.tempfile.mkdtemp = lambda prefix, dir: original_mkdtemp(prefix=prefix, dir=artifacts)
     try:
-        sandbox = IsolatedSandbox(config(root, provider), artifacts)
+        sandbox = kind(config(target, provider), directory)
     finally:
         sandbox_module.tempfile.mkdtemp = original_mkdtemp
     sandbox.await_plugin()
+    return sandbox
+
+def install(host):
+    global installed
+    result = cli("install", "--service-file", str(sandbox.root / "state/opencode/service.json"), "--host-directory", str(host), "--label", label, "--launchagents-directory", str(sandbox.root / "launchagents"))
+    installed = True
+    return result
+
+def uninstall():
+    global installed
+    result = cli("uninstall")
+    installed = False
+    return result
+
+def workflow():
+    global config_file
+    start(IsolatedSandbox, artifacts / "workflow")
     owner = sandbox.api("POST", "/api/session", {"permissions": [{"action": "heartbeat-fixture", "resource": "*", "effect": "ask"}]}, location=sandbox.directory)["data"]["id"]
     run = tool(owner, "workflows_start", {"key": "heartbeat-native", "script": 'export const meta = { name: "heartbeat", description: "fixture" }; return await checkpoint("Inspect", { key: "arbitrary", reviewer: "coordinator" });'})
     enrolled = tool(owner, "workflows_heartbeat_enroll", {"key": "native", "runID": run["id"], "deadlineAt": int(time.time() * 1000) + 600_000,
-        "policy": {"cooldownMs": 1_000, "idleGraceMs": 1_000, "stalledMs": 1_000, "maxAckRetries": 1}})
+        "policy": {"cooldownMs": 1_000, "idleGraceMs": 1_000, "stalledMs": 1_000}})
     check("enrollment makes no immediate wake", enrolled["wakesReserved"] == 0)
     patched = tool(owner, "workflows_heartbeat_update", {"key": "native", "expectedRevision": enrolled["revision"], "change": {"type": "policy", "patch": {"maxWakes": 2}}})
-    check("native registered maxWakes-only patch preserves custom intervals and maxAckRetries1", patched["policy"] == {**enrolled["policy"], "maxWakes": 2})
+    check("native registered maxWakes-only patch preserves custom intervals", patched["policy"] == {**enrolled["policy"], "maxWakes": 2})
     enrolled = patched
     host = sandbox.root / "host"
     host.mkdir()
     config_file = sandbox.root / "runner.json"
-    config_data = {"protocol": 1, "serviceFile": str(sandbox.root / "state/opencode/service.json"), "hostDirectory": str(host),
-                   "node": subprocess.check_output(["which", "node"], text=True).strip(), "runner": str(runner),
-                   "intervalMs": 60_000, "label": label, "launchAgentsDirectory": str(sandbox.root / "launchagents")}
-    config_file.write_text(json.dumps(config_data))
+    config_file.write_text(json.dumps({"protocol": 1, "serviceFile": str(sandbox.root / "state/opencode/service.json"), "hostDirectory": str(host),
+                   "node": shutil.which("node"), "runner": str(runner), "intervalMs": 60_000, "label": label, "launchAgentsDirectory": str(sandbox.root / "launchagents")}))
     snapshot = sandbox.api("POST", "/api/rpc/workflows-heartbeat/snapshot", {"input": {"limit": 100}}, location=host)["output"]
     check("cold host RPC activates plugin and reads coordinator checkpoint", snapshot["entries"][0]["run"]["checkpoints"][0]["reviewer"] == "coordinator")
-    schema = sandbox.api("GET", "/openapi.json")
-    (artifacts / "openapi.json").write_text(json.dumps(schema, indent=2))
+    (sandbox.artifacts / "openapi.json").write_text(json.dumps(sandbox.api("GET", "/openapi.json"), indent=2))
     shadow = cli("once", "--shadow")
     check("actual Node shadow returns complete observation", shadow["decisions"][0]["observation"]["kind"] == "complete")
     after_shadow = sandbox.api("POST", "/api/rpc/workflows-heartbeat/snapshot", {"input": {}}, location=host)["output"]
@@ -106,7 +138,7 @@ try:
 
     def native_hold(field):
         observed = cli("once", "--shadow")["decisions"][0]
-        (artifacts / (field + "-observation.json")).write_text(json.dumps(observed, indent=2))
+        (sandbox.artifacts / (field + "-observation.json")).write_text(json.dumps(observed, indent=2))
         check("native " + field + " observed by actual heartbeat path", observed["observation"]["kind"] == "complete" and
               any(item["id"] == owner and item[field] for item in observed["observation"]["sessions"]))
         check("native " + field + " shadow holds", observed["decision"]["kind"] == "hold" and observed["decision"]["reason"] == "input, permission, form, revert or interruption hold")
@@ -120,7 +152,7 @@ try:
     native_hold("form")
     sandbox.api("DELETE", f"/api/session/{owner}/form/{form}")
     permission_result = sandbox.api("POST", f"/api/session/{owner}/permission", {"action": "heartbeat-fixture", "resources": ["task-owned"]})["data"]
-    (artifacts / "permission-create.json").write_text(json.dumps(permission_result, indent=2))
+    (sandbox.artifacts / "permission-create.json").write_text(json.dumps(permission_result, indent=2))
     try:
         permission = eventually(lambda: next((request for request in sandbox.api("GET", f"/api/session/{owner}/permission")["data"] if request["id"] == permission_result["id"]), None))
         check("task-owned permission creation returned ask and exact pending ID", permission_result["effect"] == "ask" and permission["action"] == "heartbeat-fixture")
@@ -161,21 +193,74 @@ try:
     sandbox.start()
     restarted = cli("once", "--shadow")
     check("isolated server restart conserves stop/deadline/spent budget", restarted["decisions"][0]["mode"] == "stopped" and restarted["decisions"][0]["wakesReserved"] == 1)
-    # Install only a unique task-owned LaunchAgent with paths under the receipt directory.
     config_file.unlink()
-    install = cli("install", "--service-file", config_data["serviceFile"], "--host-directory", str(host), "--label", label, "--launchagents-directory", config_data["launchAgentsDirectory"])
-    installed = True
-    check("isolated LaunchAgent installer reads back task-owned label", label in install["readback"]["stdout"])
+    check("isolated LaunchAgent installer reads back task-owned label", label in install(host)["readback"]["stdout"])
     status = cli("status")
     check("actual status observes existing service and launcher", status["launcher"]["code"] == 0 and status["observation"]["available"])
-    removed = cli("uninstall")
-    installed = False
-    check("uninstall removes only task-owned launcher with negative readback", removed["readback"]["code"] != 0 and not config_file.exists())
+    check("uninstall removes only task-owned launcher with negative readback", uninstall()["readback"]["code"] != 0 and not config_file.exists())
+
+def outage(kind):
+    global config_file
+    start(kind, artifacts / ("ipv6" if kind is IPv6Sandbox else "outage"))
+    name = "IPv6 " if kind is IPv6Sandbox else ""
+    binary = Path(sandbox.binary).resolve()
+    binary_sha = hashlib.sha256(binary.read_bytes()).hexdigest()
+    service = sandbox.root / "state/opencode/service.json"
+    before_bytes = service.read_bytes()
+    before = json.loads(before_bytes)
+    prefix = "http://127.0.0.1:"
+    if kind is IPv6Sandbox:
+        prefix = "http://::1:" if before["version"] == "2.0.26" else "http://[::1]:"
+        listener = command(["/usr/sbin/lsof", "-nP", "-a", "-p", str(sandbox.process.pid), "-iTCP", "-sTCP:LISTEN"]).stdout
+        check("OS confirms an IPv6 loopback listener", "IPv6" in listener and "[::1]:" in listener)
+    check(f"unchanged native {before['version']} writes its expected {name}registration", before["url"].startswith(prefix))
+    host = sandbox.root / "host"
+    host.mkdir()
+    config_file = sandbox.root / "runner.json"
+    def lines(file):
+        path = sandbox.root / file
+        return path.read_text().splitlines() if path.exists() else []
+    def runner_pid():
+        result = command(["/bin/launchctl", "print", domain + "/" + label])
+        assert result.returncode == 0, commands[-1]
+        return int(re.search(r"\bpid = (\d+)", result.stdout)[1])
+    install(host)
+    eventually(lambda: len(lines("runner.log")) > 0)
+    check(f"installed external Node runner completes a real {name}tick", json.loads(lines("runner.log")[-1]) == {"protocol": 1, "shadow": False, "decisions": []})
+    check(f"runner leaves the native {name}registration byte-identical", service.read_bytes() == before_bytes)
+    pid = runner_pid()
+    before_ticks = len(lines("runner.log"))
+    before_errors = len(lines("runner.error.log"))
+    sandbox.stop()
+    eventually(lambda: len(lines("runner.error.log")) > before_errors, timeout=80)
+    check(f"same {name}runner survives outage without starting a service", runner_pid() == pid and not service.exists() and sandbox.process.poll() is not None)
+    check(f"{name}outage tick reports connect-only failure", "connect-only" in json.loads(lines("runner.error.log")[-1])["unavailable"])
+    sandbox.start()
+    after_bytes = service.read_bytes()
+    after = json.loads(after_bytes)
+    check(f"native restart refreshes {name}PID and URL", after["pid"] != before["pid"] and after["url"] != before["url"] and after["url"].startswith(prefix))
+    eventually(lambda: len(lines("runner.log")) > before_ticks, timeout=80)
+    check(f"same external {name}runner reconnects through fresh registration", runner_pid() == pid and json.loads(lines("runner.log")[-1]) == {"protocol": 1, "shadow": False, "decisions": []})
+    check(f"refreshed {name}registration remains byte-identical", service.read_bytes() == after_bytes)
+    check(f"installed OpenCode executable remains unchanged after {name}outage", hashlib.sha256(binary.read_bytes()).hexdigest() == binary_sha)
+    uninstall()
+
+scenarios = {"workflow": workflow, "outage": lambda: outage(IsolatedSandbox), "ipv6": lambda: outage(IPv6Sandbox)}
+try:
+    # Keep scenarios sequential: each owns one sandbox and at most one task-owned LaunchAgent label.
+    for scenario in options.scenario or list(scenarios):
+        label = "com.opthreads.heartbeat.test-" + uuid.uuid4().hex
+        labels.append(label)
+        scenarios[scenario]()
+        sandbox.stop()
 finally:
     if installed:
-        cli("uninstall")
+        uninstall()
     if sandbox:
         sandbox.stop()
     provider.close()
-    hashes = {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest() for path in [root / "package.json", root / "bun.lock", runner, root / "scripts/verify-heartbeat.py", *sorted((root / "src").glob("heartbeat*.ts"))]}
-    (artifacts / "receipt.json").write_text(json.dumps({"checks": checks, "hashes": hashes, "commands": commands, "label": label, "cleaned": not installed and (sandbox is None or sandbox.process.poll() is not None)}, indent=2))
+    hashes = {str(path.relative_to(target)): hashlib.sha256(path.read_bytes()).hexdigest() for path in [target / "package.json", runner, *sorted((target / "src").glob("heartbeat*.ts"))]}
+    hashes["scripts/verify-heartbeat.py"] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    absent = all(command(["/bin/launchctl", "print", domain + "/" + item]).returncode != 0 for item in labels)
+    (artifacts / "receipt.json").write_text(json.dumps({"target": str(target), "checks": checks, "hashes": hashes, "commands": commands, "labels": labels,
+        "cleaned": not installed and absent and (sandbox is None or sandbox.process.poll() is not None)}, indent=2))

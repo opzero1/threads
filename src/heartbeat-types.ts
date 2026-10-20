@@ -7,19 +7,17 @@ const policyFields = {
   stalledMs: clock.min(1_000),
   cooldownMs: clock.min(1_000),
   maxWakes: clock.optional(),
-  maxAckRetries: clock.max(100),
 };
 export const HeartbeatPolicy = z.object({
   ...policyFields,
   idleGraceMs: policyFields.idleGraceMs.default(60_000),
   stalledMs: policyFields.stalledMs.default(300_000),
   cooldownMs: policyFields.cooldownMs.default(300_000),
-  maxAckRetries: policyFields.maxAckRetries.default(3),
 }).strict();
 const PolicyPatch = z.object(policyFields).partial().extend({ deadlineAt: clock.optional() }).strict();
 export const HeartbeatBinding = z.object({ epoch: clock, runID: id, projectID: id, directory: z.string().min(1), runFingerprint: id }).strict();
 export const Admission = z.object({
-  messageID: id, sequence: clock, reservedAt: clock, checks: clock, nextCheckAt: clock,
+  messageID: id, sequence: clock, reservedAt: clock, nextCheckAt: clock,
   state: z.enum(["uncertain", "acknowledged", "retired"]), evidence: z.array(z.string().max(2_000)),
 }).strict();
 export const HeartbeatRecord = z.object({

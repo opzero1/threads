@@ -29,6 +29,8 @@ def eventually(check, timeout=30):
 
 
 class Sandbox:
+    hostname = "127.0.0.1"
+
     def __init__(self, configuration, artifact_dir):
         self.binary = shutil.which("opencode")
         tmp = subprocess.check_output([self.binary, "debug", "paths", "tmp"], text=True).strip()
@@ -71,14 +73,15 @@ class Sandbox:
 
     def start(self):
         self.password = None
-        with socket.socket() as listener:
-            listener.bind(("127.0.0.1", 0))
+        ipv6 = ":" in self.hostname
+        with socket.socket(socket.AF_INET6 if ipv6 else socket.AF_INET) as listener:
+            listener.bind((self.hostname, 0))
             port = listener.getsockname()[1]
-        self.url = f"http://127.0.0.1:{port}"
+        self.url = f"http://[{self.hostname}]:{port}" if ipv6 else f"http://{self.hostname}:{port}"
         self.log = (self.artifacts / "server.log").open("ab")
         start = self.log.tell()
         self.process = subprocess.Popen(
-            [self.binary, "serve", "--service", "--hostname", "127.0.0.1", "--port", str(port)],
+            [self.binary, "serve", "--service", "--hostname", self.hostname, "--port", str(port)],
             cwd=self.directory, env=self.env, stdout=self.log, stderr=self.log,
         )
 
@@ -89,7 +92,7 @@ class Sandbox:
                 registration = self.root / "state" / "opencode" / "service.json"
                 if registration.exists():
                     info = json.loads(registration.read_text())
-                    if info.get("url", "").rstrip("/") == self.url.rstrip("/"):
+                    if info.get("pid") == self.process.pid:
                         self.password = info.get("password")
                 content = (self.artifacts / "server.log").read_bytes()[start:].decode()
                 match = re.search(r"server password (\S+)", content)

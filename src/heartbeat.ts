@@ -106,7 +106,7 @@ export function heartbeatService(ctx: Pick<Plugin.Context, "storage" | "session"
         if (change.type === "policy") {
           const { deadlineAt, ...patch } = change.patch;
           const next = HeartbeatPolicy.parse({ ...record.policy, ...patch });
-          if ((record.policy.maxWakes !== undefined && (next.maxWakes === undefined || next.maxWakes > record.policy.maxWakes)) || next.maxAckRetries > record.policy.maxAckRetries || next.cooldownMs < record.policy.cooldownMs || next.idleGraceMs < record.policy.idleGraceMs || next.stalledMs < record.policy.stalledMs || (deadlineAt !== undefined && record.deadlineAt !== undefined && deadlineAt > record.deadlineAt)) throw new Error("Heartbeat policy can only tighten");
+          if ((record.policy.maxWakes !== undefined && (next.maxWakes === undefined || next.maxWakes > record.policy.maxWakes)) || next.cooldownMs < record.policy.cooldownMs || next.idleGraceMs < record.policy.idleGraceMs || next.stalledMs < record.policy.stalledMs || (deadlineAt !== undefined && record.deadlineAt !== undefined && deadlineAt > record.deadlineAt)) throw new Error("Heartbeat policy can only tighten");
           if (record.pendingAdmission) record.pendingAdmission.nextCheckAt += next.cooldownMs - record.policy.cooldownMs;
           record.policy = next;
           if (deadlineAt !== undefined) record.deadlineAt = deadlineAt;
@@ -164,12 +164,13 @@ export function heartbeatService(ctx: Pick<Plugin.Context, "storage" | "session"
           record.lastClockAt = now;
           record.lastObservationAt = input.observation.at;
           const pending = record.pendingAdmission;
-          if (pending && pending.checks < record.policy.maxAckRetries && now >= pending.nextCheckAt) {
-            pending.checks++;
+          if (pending && now >= pending.nextCheckAt) {
             pending.nextCheckAt = now + record.policy.cooldownMs;
             const observation = input.observation;
             const ack = observation.kind === "complete" && observation.ownerID === record.ownerID && observation.runID === record.binding.runID && observation.directory === record.binding.directory && observation.at <= now && now - observation.at <= 30_000 ? observation.admission : null;
             pending.evidence.push(ack?.messageID === pending.messageID ? ack.evidence : "exact-ID observation unavailable");
+            // Checks repeat until the exact ID is found or retired: keep the two reservation entries and the latest results.
+            pending.evidence.splice(2, pending.evidence.length - 10);
             if (ack?.messageID === pending.messageID && ack.found) {
               pending.state = "acknowledged";
               record.admissions.push(pending);
@@ -183,7 +184,7 @@ export function heartbeatService(ctx: Pick<Plugin.Context, "storage" | "session"
           record.wakesReserved++;
           record.lastWakeAt = now;
           record.nextWakeAt = now + record.policy.cooldownMs;
-          record.pendingAdmission = { messageID: `msg_${heartbeatFingerprint("reminder", { monitorID: record.monitorID, sequence: record.sequence }).slice(0, 32)}`, sequence: record.sequence, reservedAt: now, checks: 0, nextCheckAt: record.nextWakeAt, state: "uncertain", evidence: ["durable reservation; never automatically repost"] };
+          record.pendingAdmission = { messageID: `msg_${heartbeatFingerprint("reminder", { monitorID: record.monitorID, sequence: record.sequence }).slice(0, 32)}`, sequence: record.sequence, reservedAt: now, nextCheckAt: record.nextWakeAt, state: "uncertain", evidence: ["durable reservation; never automatically repost"] };
           await store.write(state);
           try {
             const admitted = await ctx.session.synthetic({ sessionID: Session.ID.make(record.ownerID), id: SessionMessage.ID.make(record.pendingAdmission.messageID), delivery: "queue", text: heartbeatReminder(record), metadata: { heartbeatMonitorID: record.monitorID, heartbeatSequence: record.sequence } });

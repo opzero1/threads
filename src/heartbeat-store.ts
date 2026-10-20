@@ -22,16 +22,33 @@ export const OwnerState = z.object({
   receipts: z.array(z.object({ fingerprint: z.string(), output: HeartbeatView }).strict()),
 }).strict();
 export type OwnerState = z.infer<typeof OwnerState>;
+type Legacy = { policy: { maxAckRetries?: number }; pendingAdmission: { checks?: number } | null; admissions: { checks?: number }[] };
+// Earlier records carry an acknowledgement cap and counter. Checks now continue until the exact ID is found or
+// retired, so drop both and, for a stored monitor, say so in its history.
+function withoutAckCap<T extends Legacy>(record: T, history?: { lastClockAt: number; history: unknown[] }) {
+  const cap = record.policy.maxAckRetries;
+  if (cap === undefined) return record;
+  delete record.policy.maxAckRetries;
+  for (const admission of [record.pendingAdmission, ...record.admissions]) delete admission?.checks;
+  history?.history.push({ at: history.lastClockAt, event: "migrate", detail: `removed maxAckRetries ${cap}; unresolved admissions are checked every cooldown until found or retired` });
+  return record;
+}
+function ownerState(raw: unknown) {
+  const value = structuredClone(raw) as { monitors?: (Legacy & { lastClockAt: number; history: unknown[] })[]; receipts?: { output: Legacy }[] };
+  for (const record of value.monitors ?? []) withoutAckCap(record, record);
+  for (const receipt of value.receipts ?? []) withoutAckCap(receipt.output);
+  return OwnerState.parse(value);
+}
 export function heartbeatStore(storage: Plugin.Context["storage"]) {
   const key = (ownerID: string) => `heartbeat/v1/owners/${ownerID}`;
   return {
     async read(ownerID: string): Promise<OwnerState> {
       const value = await storage.get(key(ownerID));
-      return value === undefined ? { protocol: 1, ownerID, monitors: [], receipts: [] } : OwnerState.parse(value);
+      return value === undefined ? { protocol: 1, ownerID, monitors: [], receipts: [] } : ownerState(value);
     },
     async write(state: OwnerState) {
       const previousRaw = await storage.get(key(state.ownerID));
-      const previousState = previousRaw === undefined ? undefined : OwnerState.parse(previousRaw);
+      const previousState = previousRaw === undefined ? undefined : ownerState(previousRaw);
       for (const receipt of previousState?.receipts ?? []) await storage.set(`heartbeat/v1/receipts/${state.ownerID}/${receipt.fingerprint}`, json(receipt.output));
       for (const record of state.monitors) {
         const prefix = `heartbeat/v1/archive/${state.ownerID}/${record.monitorID}`;
@@ -60,12 +77,12 @@ export function heartbeatStore(storage: Plugin.Context["storage"]) {
     },
     async receipt(ownerID: string, fingerprint: string) {
       const raw = await storage.get(`heartbeat/v1/receipts/${ownerID}/${fingerprint}`);
-      return raw === undefined ? undefined : HeartbeatView.parse(raw);
+      return raw === undefined ? undefined : HeartbeatView.parse(withoutAckCap(structuredClone(raw) as Legacy));
     },
     async usedRun(ownerID: string, runID: string) { return storage.get(`heartbeat/v1/run-index/${ownerID}/${runID}`); },
     async page(after?: string, limit = 100) {
       const page = await storage.scan({ prefix: "heartbeat/v1/owners/", after: after && key(after), limit });
-      return { owners: page.entries.map((entry) => OwnerState.parse(entry.value)), next: page.next?.slice("heartbeat/v1/owners/".length) };
+      return { owners: page.entries.map((entry) => ownerState(entry.value)), next: page.next?.slice("heartbeat/v1/owners/".length) };
     },
   };
 }
