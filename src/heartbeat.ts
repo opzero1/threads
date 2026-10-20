@@ -64,7 +64,9 @@ export function heartbeatService(ctx: Pick<Plugin.Context, "storage" | "session"
         const fingerprint = heartbeatFingerprint("enroll", { ...input, policy });
         const existing = state.monitors.find((item) => item.key === input.key);
         if (existing) {
-          if (existing.enrollmentFingerprint !== fingerprint) throw new Error("Heartbeat enrollment conflicts with retained request");
+          // Enrollments stored before the acknowledgement cap was removed hashed its default, maxAckRetries: 3.
+          const legacy = heartbeatFingerprint("enroll", { ...input, policy: { ...policy, maxAckRetries: 3 } });
+          if (existing.enrollmentFingerprint !== fingerprint && existing.enrollmentFingerprint !== legacy) throw new Error("Heartbeat enrollment conflicts with retained request");
           return view(existing);
         }
         if (state.monitors.some((item) => item.bindings.some((binding) => binding.runID === input.runID))) throw new Error("Run already enrolled, including retained tombstones");

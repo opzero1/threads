@@ -158,6 +158,36 @@ test("a stored acknowledgement cap is dropped in history; checks continue until 
   } finally { clock.mockRestore(); await rm(directory, { recursive: true, force: true }); }
 });
 
+test("an identical enrollment retry matches a fingerprint stored before the acknowledgement cap was removed", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "threads-heartbeat-legacy-"));
+  try {
+    const ownerID = Session.ID.create();
+    const values = new Map<string, Schema.Json>();
+    const storage: Plugin.Context["storage"] = { get: async (key) => structuredClone(values.get(key)), set: async (key, value) => { values.set(key, structuredClone(value)); }, remove: async () => {}, scan: async () => ({ entries: [] }) };
+    const api = heartbeatService({ storage, session: { get: async () => ({ id: ownerID, projectID: "project", metadata: {}, location: { directory } }) } as unknown as Plugin.Context["session"] });
+    await storage.set("workflows/runs/run", Json.parse({ ...base, ownerID, directory, updated: 1 }));
+    const enrolled = await api.enroll(ownerID, { key: "legacy", runID: "run" });
+    // Fingerprints produced by 4cbd6d0 for { key: "legacy", runID: "run" } without a policy, and with { maxAckRetries: 1 }.
+    async function storeLegacy(enrollmentFingerprint: string, maxAckRetries: number) {
+      const key = `heartbeat/v1/owners/${ownerID}`;
+      const state = structuredClone(values.get(key)) as { monitors: { policy: object; enrollmentFingerprint: string }[] };
+      state.monitors[0] = { ...state.monitors[0], enrollmentFingerprint, policy: { ...state.monitors[0].policy, maxAckRetries } };
+      await storage.set(key, Json.parse(state));
+      await storage.set(`heartbeat/v1/run-index/${ownerID}/run`, { monitorID: enrolled.monitorID, enrollmentFingerprint });
+    }
+    await storeLegacy("c0b4b97818abe4139526176b8b81e145e4588c70658cae6f322a0d1f21379b11", 3);
+    const before = JSON.stringify([...values]);
+    const retried = await api.enroll(ownerID, { key: "legacy", runID: "run" });
+    expect(retried.enrollmentFingerprint).toBe("c0b4b97818abe4139526176b8b81e145e4588c70658cae6f322a0d1f21379b11");
+    expect(retried.policy).toEqual(enrolled.policy);
+    expect((await api.enroll(ownerID, { key: "legacy", runID: "run", policy: { cooldownMs: 300_000 } })).monitorID).toBe(enrolled.monitorID);
+    await expect(api.enroll(ownerID, { key: "legacy", runID: "run", policy: { cooldownMs: 1_000 } })).rejects.toThrow("conflicts with retained request");
+    expect(JSON.stringify([...values])).toBe(before);
+    await storeLegacy("c80d89896bfed89f54d1086c709e45954cf20c7281f8daef613cf3d86068dfbf", 1);
+    await expect(api.enroll(ownerID, { key: "legacy", runID: "run" })).rejects.toThrow("conflicts with retained request");
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test("default enrollment stays watching beyond seven days and forty wakes; hot receipts are bounded and durable archives survive rebind", async () => {
   const directory = await mkdtemp(join(tmpdir(), "threads-heartbeat-uncapped-"));
   const realNow = Date.now();
