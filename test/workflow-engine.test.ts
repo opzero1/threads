@@ -2066,7 +2066,7 @@ describe("workflow worktree cleanup", () => {
         key: "cleanup-mixed",
         script: worktreeScript(["clean", "dirty", "committed", "racing"], `await agent("shared", { key: "shared", agent: "analyst", access: "write" });\nreturn "done";`),
       }), runtime);
-      const run = await cleaned(fixture.api, fixture.ownerID, started.id);
+      const run = await until(fixture.api, fixture.ownerID, started.id, (latest) => latest.delivered && latest.worktreeCleanup?.complete === true);
       expect(run.status).toBe("completed");
       expect(run.result).toBe("done");
       expect(run.error).toBeUndefined();
@@ -2150,6 +2150,44 @@ describe("workflow worktree cleanup", () => {
       ]);
       expect(fixture.deliveries.filter((id) => id === run.deliveryID)).toHaveLength(1);
     } finally { await fixture.api.dispose(); }
+  });
+
+  test("sweeps a finished run once even when its completion notice can't be delivered", async () => {
+    const fixture = await harness("valid", 2, {});
+    try {
+      fixture.failDeliveries(100);
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "undelivered", script: worktreeScript(["write"]) }), runtime);
+      const run = await cleaned(fixture.api, fixture.ownerID, started.id);
+      expect(run.status).toBe("completed");
+      expect(run.delivered).toBeFalsy();
+      expect(outcomes(run)).toEqual({ write: "removed" });
+      fixture.failDeliveries(0);
+      await until(fixture.api, fixture.ownerID, started.id, (latest) => latest.delivered);
+      await Bun.sleep(20);
+      expect(fixture.inspections).toHaveLength(1);
+      expect(fixture.removals).toHaveLength(1);
+    } finally { await fixture.api.dispose(); }
+  });
+
+  test("a run that ended with cleanup off is not swept when it is delivered after a restart with cleanup on", async () => {
+    const layout = { cleanupWorktrees: false };
+    const fixture = await harness("valid", 2, layout);
+    let reopened: ReturnType<typeof workflowEngine> | undefined;
+    try {
+      fixture.failDeliveries(100);
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "late-delivery", script: worktreeScript(["write"]) }), runtime);
+      const ended = await until(fixture.api, fixture.ownerID, started.id, (run) => run.status === "completed");
+      await fixture.api.dispose();
+      fixture.failDeliveries(0);
+      layout.cleanupWorktrees = true;
+      reopened = fixture.reopen();
+      const delivered = await until(reopened, fixture.ownerID, started.id, (run) => run.delivered);
+      await Bun.sleep(20);
+      expect(delivered.worktreeCleanup).toBeUndefined();
+      expect(fixture.inspections).toEqual([]);
+      expect(fixture.removals).toEqual([]);
+      expect(await exists(stepDirectory(ended, "write"))).toBe(true);
+    } finally { await reopened?.dispose(); await fixture.api.dispose(); }
   });
 
   test("prune is a dry run by default, and apply removes only clean worktrees", async () => {

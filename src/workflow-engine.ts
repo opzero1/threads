@@ -193,8 +193,9 @@ export function workflowEngine(
   const journal = workflowStore(ctx.storage, { onDiagnostic: diagnose });
   const store = {
     ...journal,
-    update(id: string, update: (run: WorkflowRun) => void, kind: "payload" | "control" = "payload", lifecycle?: "engine-disposed" | "lease-lost") {
-      return journal.update(id, (run) => {
+    async update(id: string, update: (run: WorkflowRun) => void, kind: "payload" | "control" = "payload", lifecycle?: "engine-disposed" | "lease-lost") {
+      let ended = false;
+      const updated = await journal.update(id, (run) => {
         const previous = run.status;
         const previousError = run.error;
         update(run);
@@ -207,8 +208,15 @@ export function workflowEngine(
           run.attention ??= { checkpoints: [], interruption: 0, deliveredInterruption: 0 };
           run.attention.interruption++;
         }
-        if (terminal.has(run.status) && !terminal.has(previous)) run.finished ??= Date.now();
+        if (terminal.has(run.status) && !terminal.has(previous)) {
+          run.finished ??= Date.now();
+          ended = true;
+        }
       }, kind);
+      // A run ends once, so it is swept once, under the setting in force when it ended. A pass that
+      // doesn't start or finish before OpenCode stops leaves the rest for workflows_prune.
+      if (ended && cleanupWorktrees && !disposed && worktreeSteps(updated).length > 0) void cleanRun(updated).catch(() => {});
+      return updated;
     },
   };
   const maxWorkers = options.maxWorkers ?? 4;
@@ -264,10 +272,7 @@ export function workflowEngine(
         delivery: "queue",
         resume: true,
       });
-      const delivered = await store.update(run.id, (current) => { current.delivered = true; }, "control");
-      // Once per run: the delivered flag gates it. A pass that stops early leaves the rest for workflows_prune.
-      if (cleanupWorktrees && !disposed && worktreeSteps(delivered).length > 0) void cleanRun(delivered).catch(() => {});
-      return delivered;
+      return store.update(run.id, (current) => { current.delivered = true; }, "control");
     });
   }
 
