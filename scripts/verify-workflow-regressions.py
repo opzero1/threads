@@ -6,7 +6,7 @@ import subprocess
 import time
 import uuid
 
-from fixture import Provider, config
+from fixture import Provider, code_mode_result, config, exposed, tool_call
 from sandbox import Sandbox, eventually
 
 
@@ -60,12 +60,12 @@ def messages(session):
 def tool(session, name, arguments):
     def results():
         return [part for message in messages(session) if message["type"] == "assistant" for part in message["content"]
-                if part["type"] == "tool" and part["name"] == name and part["state"]["status"] in ["completed", "error"]]
+                if part["type"] == "tool" and part["name"] == exposed(name) and part["state"]["status"] in ["completed", "error"]]
     before = {part["id"] for part in results()}
     marker = f"REGRESSION_TOOL_{uuid.uuid4().hex}"
-    provider.responses[marker] = {"name": name, "arguments": arguments}
+    provider.responses[marker] = tool_call(name, arguments)
     sandbox.api("POST", f"/api/session/{session}/prompt", {"text": marker})
-    result = eventually(lambda: next((part for part in results() if part["id"] not in before), None), timeout=60)
+    result = code_mode_result(name, eventually(lambda: next((part for part in results() if part["id"] not in before), None), timeout=60))
     eventually(lambda: session not in sandbox.api("GET", "/api/session/active")["data"])
     assert result["state"]["status"] == "completed", result
     return json.loads(result["state"]["content"][0]["text"])

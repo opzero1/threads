@@ -15,6 +15,21 @@ The tools use the namespace `threads`. Each tool returns JSON in the native `con
 | `threads_hide` | `{ workerID }` | `WorkerView` | The worker's coordinator |
 | `threads_report` | `{ verdict, summary, evidence }` | `{ workerID, report }` | The worker itself, once |
 
+## Native and Code Mode tools
+
+Five tools are native tools that the model calls directly: `threads_spawn`, `threads_send`, `threads_report`, `workflows_start`, and `workflows_result`. Every other Threads tool is a [Code Mode](https://opencode.ai/v2/docs/build/plugins) tool, so its schema stays out of each request until an agent needs it. An agent calls these tools inside OpenCode's `execute` tool:
+
+| Tool ID | Code Mode path |
+| --- | --- |
+| `threads_list`, `threads_interrupt`, `threads_hide` | `tools.threads.list`, `tools.threads.interrupt`, `tools.threads.hide` |
+| `workflows_list`, `workflows_inspect`, `workflows_control` | `tools.workflows.list`, `tools.workflows.inspect`, `tools.workflows.control` |
+| `workflows_save`, `workflows_saved`, `workflows_prune` | `tools.workflows.save`, `tools.workflows.saved`, `tools.workflows.prune` |
+| `workflows_heartbeat_enroll`, `_update`, `_rebind`, `_stop`, `_inspect` | `tools.workflows.heartbeat_enroll`, and so on |
+
+For example, `execute` with `return await tools.threads.list({});` lists your workers. Inside `execute`, `search({ namespace: "threads" })` or `search({ namespace: "workflows" })` finds the tools that are not in the initial catalog.
+
+Inputs, results, and ownership checks are the same either way. Permission rules still match the tool IDs, such as `threads_list`, and `workflows_prune` and `workflows_save` still need the `edit` permission. An agent whose permissions deny `execute` can't reach the Code Mode tools. The report tools stay native because read-only workers can't use `execute`.
+
 All fields are strings except `evidence` and `paths`, which are arrays of strings.
 
 The plugin identifies the caller from the calling session. The conversation that starts a worker is its **coordinator**.
@@ -95,7 +110,7 @@ Workers have no native `parentID`. They are top-level sessions.
 
 ## `workflows_prune`
 
-Lists, and with `apply: true` removes, the step worktrees that finished workflow runs left behind. See [clean up worktrees](workflows.md#clean-up-worktrees) for the rules.
+Lists, and with `apply: true` removes, the step worktrees that finished workflow runs left behind. Agents call it through Code Mode as `tools.workflows.prune`. See [clean up worktrees](workflows.md#clean-up-worktrees) for the rules.
 
 | Field | Required | Meaning |
 | --- | --- | --- |

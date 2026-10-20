@@ -50,10 +50,10 @@ export async function workflows(
   await ctx.session.hook("prompt", (event) => engine.preparePrompt(event.sessionID, event.messageID));
   await ctx.session.hook("context", (event) => engine.prepareContext(event.sessionID));
   await ctx.tool.transform((editor) => {
-    editor.namespace({ name: "workflows", description: "Durable background JavaScript workflows using native OpenCode agents" });
+    editor.namespace({ name: "workflows", description: "List, inspect, control, save, and prune durable workflow runs, and manage heartbeat monitors. Start runs with the native workflows_start tool." });
     editor.add({
       name: "start",
-      description: "Start a dynamic JavaScript workflow in the background. Load workflow-authoring first. Supply script or a saved name, a stable retry key, and optional JSON args. The runner owns parallel agents, structured results, checkpoints, and resumable progress. Keep the same key and identical inputs for an exact retry. Configured role permissions apply to every agent. An agent step's paths option grants existing absolute directories outside its location for use without asking, within its access; explicit external_directory denies still win. Without a grant, a write worker gets an approval request in its tab where you would be asked, unless its role denies the directory; read workers follow their role's rules. Returns immediately; inspect/control using the run ID.",
+      description: "Start a dynamic JavaScript workflow in the background. Load workflow-authoring first. Supply script or a saved name, a stable retry key, and optional JSON args. The runner owns parallel agents, structured results, checkpoints, and resumable progress. Keep the same key and identical inputs for an exact retry. Configured role permissions apply to every agent. An agent step's paths option grants existing absolute directories outside its location for use without asking, within its access; explicit external_directory denies still win. Without a grant, a write worker gets an approval request in its tab where you would be asked, unless its role denies the directory; read workers follow their role's rules. Returns immediately; inspect or control the run by ID through execute with tools.workflows.inspect and tools.workflows.control.",
       input: startInput,
       output: WorkflowSummary,
       options: { namespace: "workflows", codemode: false },
@@ -71,7 +71,7 @@ export async function workflows(
       description: "List your dynamic workflow runs and recorded progress. The final result and explicit worker evidence determine task success.",
       input: z.object({}).strict(),
       output: z.object({ runs: z.array(WorkflowSummary) }),
-      options: { namespace: "workflows", codemode: false },
+      options: { namespace: "workflows", codemode: true },
       execute: async (_input, tool) => {
         const output = { runs: (await engine.list(tool.sessionID)).map(workflowSummary) };
         return { content: JSON.stringify(output), output };
@@ -82,7 +82,7 @@ export async function workflows(
       description: "Read a workflow's saved script, phases, step sessions, structured reports, usage, checkpoints, and final result.",
       input: z.object({ runID: z.string().min(1) }).strict(),
       output: WorkflowRun,
-      options: { namespace: "workflows", codemode: false },
+      options: { namespace: "workflows", codemode: true },
       execute: async (input, tool) => {
         const output = await engine.get(tool.sessionID, input.runID);
         return { content: JSON.stringify(output), output };
@@ -93,7 +93,7 @@ export async function workflows(
       description: "Pause new workflow scheduling, stop active work, or explicitly resume the same recorded script. Resume a waiting checkpoint with checkpointKey and a JSON response. Only the owning session controls the run. Resume reconciles existing workers and recorded results.",
       input: WorkflowControl,
       output: WorkflowSummary,
-      options: { namespace: "workflows", codemode: false },
+      options: { namespace: "workflows", codemode: true },
       execute: async (input, tool) => {
         const run = await engine.control(tool.sessionID, input);
         await rpc.events.emit("updated", { ownerID: tool.sessionID, runID: run.id });
@@ -106,7 +106,7 @@ export async function workflows(
       description: "List step worktrees left by finished workflow runs in this project, and remove them with apply: true. Dry run by default; it changes nothing. Apply removes only checkouts without uncommitted or untracked changes, whose commits a branch, tag, or remote contains, and that hold no other worktree or running worker. It never forces removal or deletes branches, run records, or sessions. Worktrees of active, paused, waiting, or interrupted runs are kept. olderThanDays limits it to runs that finished at least that many days ago.",
       input: WorkflowPrune,
       output: WorkflowPruneResult,
-      options: { namespace: "workflows", codemode: false, permission: "edit" },
+      options: { namespace: "workflows", codemode: true, permission: "edit" },
       execute: async (input, tool) => {
         const output = await engine.prune(tool.sessionID, input);
         return { content: JSON.stringify(output), output };
@@ -128,7 +128,7 @@ export async function workflows(
       description: "Save a run's JavaScript as a reusable workflow in the current project's .opencode/workflows or your OpenCode config's workflows directory. Existing files are never overwritten. Saves the script, not run arguments or worker transcripts.",
       input: z.object({ runID: z.string(), name: z.string(), scope: z.enum(["project", "user"]).default("project") }).strict(),
       output: z.object({ path: z.string() }),
-      options: { namespace: "workflows", codemode: false, permission: "edit" },
+      options: { namespace: "workflows", codemode: true, permission: "edit" },
       execute: async (input, tool) => {
         const run = await engine.get(tool.sessionID, input.runID);
         const output = await saved.save(input.name, run.script, input.scope);
@@ -141,7 +141,7 @@ export async function workflows(
       description: "List reusable workflow scripts available in this project and your OpenCode configuration. Project names take precedence over user names.",
       input: z.object({}).strict(),
       output: z.object({ workflows: z.array(SavedWorkflow) }),
-      options: { namespace: "workflows", codemode: false },
+      options: { namespace: "workflows", codemode: true },
       execute: async () => {
         const output = { workflows: await saved.list() };
         return { content: JSON.stringify(output), output };

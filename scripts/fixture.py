@@ -1,7 +1,69 @@
 import json
+import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+# Threads registers these administrative tools for Code Mode. A model reaches them only through
+# the native `execute` tool at these catalog paths. threads_spawn, threads_send, threads_report,
+# workflows_start, and workflows_result stay native, so read-only workers keep their report tools.
+CODE_MODE_TOOLS = {
+    "threads_list": "threads.list",
+    "threads_interrupt": "threads.interrupt",
+    "threads_hide": "threads.hide",
+    "workflows_list": "workflows.list",
+    "workflows_inspect": "workflows.inspect",
+    "workflows_control": "workflows.control",
+    "workflows_prune": "workflows.prune",
+    "workflows_save": "workflows.save",
+    "workflows_saved": "workflows.saved",
+    "workflows_heartbeat_enroll": "workflows.heartbeat_enroll",
+    "workflows_heartbeat_update": "workflows.heartbeat_update",
+    "workflows_heartbeat_rebind": "workflows.heartbeat_rebind",
+    "workflows_heartbeat_stop": "workflows.heartbeat_stop",
+    "workflows_heartbeat_inspect": "workflows.heartbeat_inspect",
+}
+NATIVE_TOOLS = {"threads_spawn", "threads_send", "threads_report", "workflows_start", "workflows_result"}
+
+
+def tool_call(name, arguments):
+    """The fixture model's call for a Threads tool: native, or one Code Mode call inside `execute`."""
+    path = CODE_MODE_TOOLS.get(name)
+    if path is None:
+        return {"name": name, "arguments": arguments}
+    return {"name": "execute", "arguments": {"code": f"return await tools.{path}({json.dumps(arguments)});"}}
+
+
+def exposed(name):
+    return "execute" if name in CODE_MODE_TOOLS else name
+
+
+def code_mode_result(name, part):
+    """Present a finished `execute` part like the native part of the Threads tool it called.
+
+    `execute` itself completes when the inner call fails and marks the failure in its metadata.
+    A success must show exactly one completed call to the expected Code Mode path."""
+    path = CODE_MODE_TOOLS.get(name)
+    if path is None or part["state"]["status"] != "completed":
+        return part
+    metadata = part["state"].get("metadata") or {}
+    calls = metadata.get("toolCalls") or []
+    failed = metadata.get("error") is True or any(call.get("status") == "error" for call in calls)
+    if not failed:
+        assert [(call.get("tool"), call.get("status")) for call in calls] == [(path, "completed")], part
+    return {**part, "state": {**part["state"], "status": "error" if failed else "completed"}}
+
+
+def native_tools(request):
+    return {tool["function"]["name"] for tool in request.get("tools", [])}
+
+
+def code_mode_namespace(request, namespace, count=None):
+    """Whether the request's Code Mode catalog lists `namespace`, with exactly `count` tools when given."""
+    text = json.dumps(request.get("messages", []))
+    tools = r"\d+" if count is None else str(count)
+    return re.search(rf"- {re.escape(namespace)} \({tools} tools?[,)]", text) is not None
 
 
 class Provider:

@@ -85,11 +85,11 @@ The configured Threads worker limit also applies across simultaneous runs owned 
 
 The same start key and identical input identify the same run. Start retries do not restart completed or stopped runs. Pause stops new scheduling and drains active steps. Stop interrupts active work. Resume uses the same recorded script and arguments, reconciles existing sessions, and reuses completed results. A changed step request under an existing key fails rather than returning a stale result. Save edits as a new workflow run.
 
-After upgrading from finite defaults, an old start request that omitted its budgets no longer has the same input fingerprint. Resume the existing run through `workflows_control`, or supply its original recorded limits for an exact start retry.
+After upgrading from finite defaults, an old start request that omitted its budgets no longer has the same input fingerprint. Resume the existing run through `tools.workflows.control`, or supply its original recorded limits for an exact start retry.
 
 A service restart leaves interrupted work available for explicit resume. Worktrees and session evidence are retained. A missing result after an interrupted write requires inspection; it does not prove that no write occurred.
 
-When a run completes, fails, or stops, Threads removes each step worktree that has no uncommitted or untracked changes, no commits outside a branch, tag, or remote, no nested worktree, and no running worker. It never forces removal or deletes branches. A later step whose `directory` is in a removed checkout fails. The run's `worktreeCleanup` records what it removed and kept. The `workflowWorktreeCleanup` plugin option turns this off. `workflows_prune` lists leftover worktrees of finished runs in the project and removes the clean ones with `apply: true`. Running, waiting, paused, and interrupted runs keep their worktrees.
+When a run completes, fails, or stops, Threads removes each step worktree that has no uncommitted or untracked changes, no commits outside a branch, tag, or remote, no nested worktree, and no running worker. It never forces removal or deletes branches. A later step whose `directory` is in a removed checkout fails. The run's `worktreeCleanup` records what it removed and kept. The `workflowWorktreeCleanup` plugin option turns this off. `tools.workflows.prune` lists leftover worktrees of finished runs in the project and removes the clean ones with `apply: true`. Running, waiting, paused, and interrupted runs keep their worktrees.
 
 Unanswered checkpoints and interruptions send durable, deduplicated notices to the owner. Checkpoint notices include the exact key and prompt. Each interruption has a separate notice. Delivery failures retry at a later boundary, recovery, or inspection with the same message ID. A notice never supplies a checkpoint response or resumes the run. Resuming after the original deadline interrupts retained workers and fails the run.
 
@@ -105,8 +105,8 @@ Checkpoint responses are stored in both checkpoint state and settlement order, s
 
 ## Saved workflows
 
-`workflows_save` writes a run's script to `.opencode/workflows/<name>.js` in the current directory or to `workflows/<name>.js` under the user's OpenCode configuration. Existing files are not overwritten. Project workflows take precedence over user workflows of the same name.
+`tools.workflows.save` writes a run's script to `.opencode/workflows/<name>.js` in the current directory or to `workflows/<name>.js` under the user's OpenCode configuration. Existing files are not overwritten. Project workflows take precedence over user workflows of the same name.
 
-Use `workflows_saved` to list scripts and `/workflow-<name>` to ask the agent to invoke one with arguments. `/workflow-run <task>` asks the current agent to author a workflow. `/workflows` opens the terminal run navigator.
+Use `tools.workflows.saved` to list scripts and `/workflow-<name>` to ask the agent to invoke one with arguments. `/workflow-run <task>` asks the current agent to author a workflow. `/workflows` opens the terminal run navigator.
 
 After editing saved files directly, use `/workflow-refresh` to reload their commands. The saved names `run` and `refresh` are reserved for built-in workflow commands.

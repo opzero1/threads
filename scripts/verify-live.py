@@ -4,7 +4,7 @@ import sys
 import time
 import uuid
 
-from fixture import Provider, config
+from fixture import CODE_MODE_TOOLS, NATIVE_TOOLS, Provider, code_mode_namespace, code_mode_result, config, exposed, native_tools, tool_call
 from sandbox import Sandbox, Terminal, eventually
 
 
@@ -40,14 +40,14 @@ def tool_results(session_id, name):
 
 def run_tool(session_id, name, arguments):
     marker = f"FIXTURE_{uuid.uuid4().hex}"
-    provider.responses[marker] = {"name": name, "arguments": arguments}
-    before = {part["id"] for part in tool_results(session_id, name)}
+    provider.responses[marker] = tool_call(name, arguments)
+    before = {part["id"] for part in tool_results(session_id, exposed(name))}
     sandbox.api("POST", f"/api/session/{session_id}/prompt", {"text": marker})
     result = eventually(lambda: next((
-        part for part in tool_results(session_id, name) if part["id"] not in before
+        part for part in tool_results(session_id, exposed(name)) if part["id"] not in before
     ), None), timeout=60)
     eventually(lambda: session_id not in sandbox.api("GET", "/api/session/active")["data"])
-    return result
+    return code_mode_result(name, result)
 
 
 def roots():
@@ -114,7 +114,7 @@ try:
     passed("a running worker opens no tab and leaves coordinator focus unchanged")
     hidden = run_tool(coordinator_id, "threads_hide", {"workerID": worker_id})
     assert hidden["state"]["status"] == "completed", hidden
-    terminal.wait_for("threads_hide")
+    terminal.wait_for("execute")
     terminal.wait_for_match(lambda _: "1 worker" in footer(), "hidden running worker still counted", 20, False)
     assert all(tab["sessionID"] != worker_id for tab in tab_state()["tabs"]), tab_state()
     passed("an orchestrator hide request leaves a running worker counted in the footer")
@@ -168,6 +168,17 @@ try:
     listed = run_tool(coordinator_id, "threads_list", {})
     assert listed["state"]["status"] == "completed" and worker_id in json.dumps(listed), listed
     passed("the coordinator can list its persisted managed workers")
+
+    discovery = run_tool(coordinator_id, "execute", {"code": """const found = search({ namespace: "threads", limit: 20 });
+const listed = await tools.threads.list({});
+return { paths: found.items.map((item) => item.path), workers: listed.workers.map((worker) => worker.workerID) };"""})
+    assert discovery["state"]["status"] == "completed" and not (discovery["state"].get("metadata") or {}).get("error"), discovery
+    discovered = json.loads(discovery["state"]["content"][0]["text"])
+    (artifacts / "code-mode-discovery.json").write_text(json.dumps(discovered, indent=2) + "\n")
+    suffixes = lambda paths: {path.split(".")[-1] for path in paths}
+    assert suffixes(discovered["paths"]) == {"list", "interrupt", "hide"}, discovered
+    assert worker_id in discovered["workers"], discovered
+    passed("Code Mode search finds exactly the threads list, interrupt, and hide tools, and a discovered call returns live workers")
 
     followup = {"workerID": worker_id, "key": "clarify-1", "text": "Clarify the verification evidence already reported."}
     sent = run_tool(coordinator_id, "threads_send", followup)
@@ -283,9 +294,11 @@ try:
     passed("a fresh TUI opens no worker tabs, so it loads neither running nor finished workers' Locations")
     provider.release.set()
 
-    tool_names = {tool["function"]["name"] for request in provider.requests for tool in request.get("tools", [])}
-    assert {"threads_spawn", "threads_list", "threads_send", "threads_interrupt", "threads_report", "subagent"} <= tool_names, tool_names
-    passed("managed thread tools and native subagent are available together")
+    tool_names = set().union(*(native_tools(request) for request in provider.requests))
+    assert NATIVE_TOOLS | {"subagent", "execute"} <= tool_names, tool_names
+    assert not tool_names & set(CODE_MODE_TOOLS), tool_names & set(CODE_MODE_TOOLS)
+    assert any(code_mode_namespace(request, "threads", 3) and code_mode_namespace(request, "workflows", 11) for request in provider.requests)
+    passed("spawn, send, and report stay native beside subagent, and the administrative tools appear only in the Code Mode catalog")
 finally:
     if terminal:
         terminal.close(artifacts / "tui-recovered.txt")

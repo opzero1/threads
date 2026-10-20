@@ -1926,7 +1926,7 @@ return await agent("read", { key: "read", agent: "analyst" });`;
     await fixture.mutateRun(started.id, (run) => { run.status = "running"; delete run.interruption; });
     const reopened = fixture.reopen();
     await expect(reopened.prepareContext(workerID)).rejects.toThrow("explicitly resumed");
-    expect(fixture.deliveryTexts.some((text) => text.includes(started.id) && text.includes("read") && text.includes(workerID) && text.includes("running") && text.includes("workflows_control"))).toBe(true);
+    expect(fixture.deliveryTexts.some((text) => text.includes(started.id) && text.includes("read") && text.includes(workerID) && text.includes("running") && text.includes("tools.workflows.control"))).toBe(true);
     authorizeWorkflowExecution(workerID);
     await expect(reopened.prepareContext(workerID)).resolves.toBeUndefined();
     expect((await reopened.get(fixture.ownerID, started.id)).status).toBe("interrupted");

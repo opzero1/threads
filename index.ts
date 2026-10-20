@@ -42,7 +42,7 @@ export default Plugin.define({
     await ctx.tool.transform((editor) => {
       editor.namespace({
         name: "threads",
-        description: "Independent managed worker sessions",
+        description: "List, interrupt, and hide your managed workers. Spawn, follow-up, and report are the native threads_spawn, threads_send, and threads_report tools.",
       });
       editor.add({
         name: "spawn",
@@ -72,7 +72,7 @@ export default Plugin.define({
           "List your managed workers, last native execution outcomes, and explicit reports. Idle is not task success.",
         input: z.object({}).strict(),
         output: z.object({ workers: z.array(WorkerView) }),
-        options: { namespace: "threads", codemode: false },
+        options: { namespace: "threads", codemode: true },
         execute: async (_input, tool) => {
           const output = { workers: await workers.list(tool.sessionID) };
           return { content: JSON.stringify(output), output };
@@ -95,7 +95,7 @@ export default Plugin.define({
         description: "Interrupt your worker without claiming task success.",
         input: WorkerTarget,
         output: WorkerView,
-        options: { namespace: "threads", codemode: false },
+        options: { namespace: "threads", codemode: true },
         execute: async (input, tool) => {
           const output = await workers.interrupt(tool.sessionID, input);
           return { content: JSON.stringify(output), output };
@@ -106,7 +106,7 @@ export default Plugin.define({
         description: "Hide a worker you no longer need from the Threads list without deleting its conversation or report. Only its coordinator may hide it. A running, selected, or attention-needed worker stays visible until idle. Use /threads to restore hidden workers.",
         input: WorkerTarget,
         output: WorkerView,
-        options: { namespace: "threads", codemode: false },
+        options: { namespace: "threads", codemode: true },
         execute: async (input, tool) => {
           const output = await workers.hide(tool.sessionID, input);
           return { content: JSON.stringify(output), output };

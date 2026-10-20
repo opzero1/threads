@@ -3,7 +3,7 @@ from pathlib import Path
 import sys
 import uuid
 
-from fixture import Provider, config
+from fixture import Provider, code_mode_namespace, code_mode_result, config, exposed, native_tools, tool_call
 from sandbox import Sandbox, eventually
 
 
@@ -28,13 +28,13 @@ def run_tool(session_id, name, arguments):
     def results():
         return [
             part for message in messages(session_id) if message["type"] == "assistant"
-            for part in message["content"] if part["type"] == "tool" and part["name"] == name
+            for part in message["content"] if part["type"] == "tool" and part["name"] == exposed(name)
             and part["state"]["status"] in ["completed", "error"]
         ]
 
     before = {part["id"] for part in results()}
     marker = f"FIXTURE_{uuid.uuid4().hex}"
-    provider.responses[marker] = {"name": name, "arguments": arguments}
+    provider.responses[marker] = tool_call(name, arguments)
     sandbox.api("POST", f"/api/session/{session_id}/prompt", {"text": marker})
 
     def result():
@@ -42,7 +42,7 @@ def run_tool(session_id, name, arguments):
 
     output = eventually(result, timeout=60)
     eventually(lambda: session_id not in sandbox.api("GET", "/api/session/active")["data"])
-    return output
+    return code_mode_result(name, output)
 
 
 try:
@@ -160,6 +160,11 @@ try:
     })
     assert reported["state"]["status"] == "completed", reported
     passed("a deny-all reader can submit its own ownership-checked managed report")
+    reader_requests = [request for request in provider.requests if "FIXTURE_READER_SYSTEM" in json.dumps(request.get("messages", []))]
+    assert reader_requests and all("execute" not in native_tools(request) and not code_mode_namespace(request, "threads")
+                                   for request in reader_requests), [sorted(native_tools(request)) for request in reader_requests]
+    assert any("threads_report" in native_tools(request) for request in reader_requests), [sorted(native_tools(request)) for request in reader_requests]
+    passed("a deny-all reader has no Code Mode execute and still receives threads_report as a native tool")
 
     for agent, effect in [("fixture-reader", "deny"), ("fixture-core", "ask")]:
         restricted = sandbox.api("POST", "/api/session", {

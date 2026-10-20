@@ -4,7 +4,7 @@ Heartbeat monitoring sends queued inspection reminders to the root workflow owne
 
 ## Task tools
 
-Only a root, non-managed owning session can use these tools:
+Only a root, non-managed owning session can use these tools. They are [Code Mode tools](reference.md#native-and-code-mode-tools): an agent calls `workflows_heartbeat_enroll` as `tools.workflows.heartbeat_enroll` inside `execute`, and likewise for the others.
 
 - `workflows_heartbeat_enroll({ key, runID, policy?, deadlineAt? })` records monitoring without an immediate wake. Neither `maxWakes` nor `deadlineAt` has a default. Omission means unlimited wakes and no monitoring deadline. `wakesRemaining: null` means uncapped, not an unknown count.
 - `workflows_heartbeat_inspect({ key? })` reads the owner's monitors without workflow recovery or notification delivery.

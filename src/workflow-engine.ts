@@ -276,7 +276,7 @@ export function workflowEngine(
       await ctx.session.synthetic({
         sessionID: run.ownerID,
         id: SessionMessage.ID.make(run.deliveryID),
-        text: `Workflow ${run.name} (${run.id}) finished:\n${compact}\nUse workflows_inspect with runID ${run.id} for the full durable result and step details.`,
+        text: `Workflow ${run.name} (${run.id}) finished:\n${compact}\nUse tools.workflows.inspect through execute with runID ${run.id} for the full durable result and step details.`,
         metadata: { opWorkflowDelivery: Json.parse(report), runID: run.id },
         delivery: "queue",
         resume: true,
@@ -408,12 +408,12 @@ export function workflowEngine(
         : pending.map((checkpoint) => ({ kind: "checkpoint", key: checkpoint.key, checkpoints: [checkpoint] }));
       for (const notice of notices) {
         const instructions = notice.checkpoints.map((checkpoint) =>
-          `Checkpoint ${JSON.stringify(checkpoint.key)}: ${checkpoint.prompt}\nAfter obtaining an explicit response, use workflows_control with runID ${runID}, action "resume", checkpointKey ${JSON.stringify(checkpoint.key)}, and response containing that response.`).join("\n");
+          `Checkpoint ${JSON.stringify(checkpoint.key)}: ${checkpoint.prompt}\nAfter obtaining an explicit response, use tools.workflows.control through execute with runID ${runID}, action "resume", checkpointKey ${JSON.stringify(checkpoint.key)}, and response containing that response.`).join("\n");
         await ctx.session.synthetic({
           sessionID: run.ownerID,
           id: SessionMessage.ID.make(`msg_${digest(runID, "attention", notice.kind, notice.key).slice(0, 32)}`),
           text: interrupted
-            ? `Workflow ${run.name} (${runID}) interrupted: ${run.error ?? "Execution stopped."}\n${run.steps.filter((step) => step.status !== "completed").map((step) => `Step ${JSON.stringify(step.key)}: ${step.status}; worker ${step.workerID}; access ${step.input.access}.`).join("\n")}\nInspect this exact run with workflows_inspect before resuming. Do not automatically answer gates, replay writes, or change reports.\n${instructions || `After explicitly resolving the interruption, use workflows_control with runID ${runID} and action "resume".`}`
+            ? `Workflow ${run.name} (${runID}) interrupted: ${run.error ?? "Execution stopped."}\n${run.steps.filter((step) => step.status !== "completed").map((step) => `Step ${JSON.stringify(step.key)}: ${step.status}; worker ${step.workerID}; access ${step.input.access}.`).join("\n")}\nInspect this exact run with tools.workflows.inspect through execute before resuming. Do not automatically answer gates, replay writes, or change reports.\n${instructions || `After explicitly resolving the interruption, use tools.workflows.control through execute with runID ${runID} and action "resume".`}`
             : `Workflow ${run.name} (${runID}) checkpoint requires an explicit response. Do not automatically answer or resume this gate.\n${instructions}`,
           metadata: { opWorkflowAttention: { runID, kind: notice.kind, key: notice.key } },
           delivery: "queue", resume: true,
@@ -1350,7 +1350,7 @@ export function workflowEngine(
         await recover(run.ownerID);
         const recovered = await owned(run.ownerID, run.id);
         throw new Error(
-          `Workflow worker generation is blocked: run ${run.id} (${recovered.status}), step ${JSON.stringify(step.key)} (${step.status}), worker ${sessionID}. Inspect this exact run with workflows_inspect. Execution remains blocked until its owning workflow is explicitly resumed with workflows_control or the owner sends an authorized follow-up to this same worker. Restart metadata is not authorization; inspect uncertain external effects before recovery.`,
+          `Workflow worker generation is blocked: run ${run.id} (${recovered.status}), step ${JSON.stringify(step.key)} (${step.status}), worker ${sessionID}. Inspect this exact run with tools.workflows.inspect through execute. Execution remains blocked until its owning workflow is explicitly resumed with tools.workflows.control or the owner sends an authorized follow-up to this same worker. Restart metadata is not authorization; inspect uncertain external effects before recovery.`,
         );
       }
     },

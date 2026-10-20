@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Administrative tools are now Code Mode tools, so their schemas leave every request's native tool list. Agents call them inside OpenCode's `execute` tool: `tools.threads.list`, `interrupt`, and `hide`, and `tools.workflows.list`, `inspect`, `control`, `save`, `saved`, `prune`, and the five `heartbeat_*` tools. `threads_spawn`, `threads_send`, `threads_report`, `workflows_start`, and `workflows_result` stay native, so read-only workers, which can't use `execute`, can still report. Tool IDs, inputs, results, and permission rules are unchanged. An agent whose permissions deny `execute` loses the administrative tools.
+- Workflow notices and the bundled skills point agents to the Code Mode paths.
+
 ## 0.3.2
 
 - When a workflow run completes, fails, or stops, Threads removes each step worktree that has no uncommitted or untracked changes and whose commits a branch, tag, or remote contains. It runs `git worktree remove` without `--force` and never deletes branches. Shared steps, runs that can still resume, checkouts that contain another worktree, and checkouts where a worker is still running keep their directories. The run's new `worktreeCleanup` field records what was removed and kept, and why. Cleanup starts after the result is recorded and can't change it.

@@ -14,8 +14,10 @@ When a step needs a directory outside its location, such as a reference reposito
 1. Define the result, named slices, and verification predicate. For VERA tasks, retain the selected protocol and role profiles.
 2. Read [the runtime contract](references/runtime.md). Write a script with a literal `export const meta` first, named agent steps, and a final JSON result.
 3. Call `workflows_start` with a unique task key, `script` or saved `name`, JSON `args`, and suitable concurrency. Omit task budgets unless the user requested them. It returns immediately.
-4. Continue independent work. The runner delivers a final notification. Use `workflows_inspect` for evidence and `workflows_control` for pause, stop, resume, and checkpoint responses. Never infer success from an idle worker.
-5. Inspect the result and the affected artifacts before giving the final verdict. Save a useful script with `workflows_save`; its arguments and transcripts are not saved with it.
+4. Continue independent work. The runner delivers a final notification. Use `tools.workflows.inspect` for evidence and `tools.workflows.control` for pause, stop, resume, and checkpoint responses. Never infer success from an idle worker.
+5. Inspect the result and the affected artifacts before giving the final verdict. Save a useful script with `tools.workflows.save`; its arguments and transcripts are not saved with it.
+
+`workflows_start` and the worker's `workflows_result` are native tools. The other workflow tools, including heartbeats, are Code Mode tools: call them inside `execute` as `tools.workflows.<name>`, for example `return await tools.workflows.inspect({ runID });`. If one is missing from the catalog, run `search({ namespace: "workflows" })` inside `execute`. Older plugin versions expose them as native `workflows_<name>` tools.
 
 Every step selects an actual configured `agent`. Use `vera-operator-readonly` for discovery, `vera-engineer` for implementation, and `vera-auditor-readonly` for independent review. Model choices remain in the profiles. Workflow workers are leaves. Any user-supplied run budgets also cover nested workflows.
 
@@ -27,7 +29,7 @@ Verification evidence is part of the handoff. `FAIL` and `INCONCLUSIVE` cannot e
 
 Workers finish required commands and inspect their results before reporting or ending their execution. Keep dependent checks in a foreground tool call; if a tool backgrounds them, collect its completion before finishing. A missing-report reminder asks the worker to complete the handoff, not cancel unfinished checks. Native idle while a command is still running is not task completion.
 
-For requested unattended monitoring, use the packaged `workflows_heartbeat_*` tools and shared runner described in [Workflow heartbeats](../../docs/heartbeat.md). Enroll the recorded run instead of creating a project-specific monitor. Heartbeat reminders ask for inspection; they do not answer checkpoints or establish completion. Mark an authorized coordinator review with `checkpoint(prompt, { key, reviewer: "coordinator" })`; checkpoints default to human review.
+For requested unattended monitoring, use the packaged `tools.workflows.heartbeat_*` Code Mode tools and shared runner described in [Workflow heartbeats](../../docs/heartbeat.md). Enroll the recorded run instead of creating a project-specific monitor. Heartbeat reminders ask for inspection; they do not answer checkpoints or establish completion. Mark an authorized coordinator review with `checkpoint(prompt, { key, reviewer: "coordinator" })`; checkpoints default to human review.
 
 ## Example
 

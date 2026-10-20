@@ -6,7 +6,7 @@ import sys
 import time
 from pathlib import Path
 
-from fixture import Provider, config
+from fixture import Provider, config, tool_call
 from sandbox import Sandbox, Terminal, eventually
 
 
@@ -455,7 +455,7 @@ try:
     search("Footer worker one", one)
     os.write(terminal.master, b"\r")
     wait(lambda: route() == one and one in native_tabs(), "reported worker tab opened from the list")
-    provider.responses["FOOTER_HIDE_ONE"] = {"name": "threads_hide", "arguments": {"workerID": one}}
+    provider.responses["FOOTER_HIDE_ONE"] = tool_call("threads_hide", {"workerID": one})
     sandbox.api("POST", f"/api/session/{coordinator_id}/prompt", {"text": "FOOTER_HIDE_ONE"})
     eventually(lambda: worker_view(coordinator_id, one)["hidden"], timeout=60)
     idle(coordinator_id)

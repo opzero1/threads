@@ -6,7 +6,7 @@ import subprocess
 import sys
 import uuid
 
-from fixture import Provider, config
+from fixture import Provider, code_mode_namespace, code_mode_result, config, exposed, tool_call
 from sandbox import Sandbox, eventually
 
 
@@ -54,17 +54,17 @@ def run_tool(session_id, name, arguments):
     def results():
         return [
             part for message in messages(session_id) if message["type"] == "assistant"
-            for part in message["content"] if part["type"] == "tool" and part["name"] == name
+            for part in message["content"] if part["type"] == "tool" and part["name"] == exposed(name)
             and part["state"]["status"] in ["completed", "error"]
         ]
 
     before = {part["id"] for part in results()}
     marker = f"FIXTURE_{uuid.uuid4().hex}"
-    provider.responses[marker] = {"name": name, "arguments": arguments}
+    provider.responses[marker] = tool_call(name, arguments)
     sandbox.api("POST", f"/api/session/{session_id}/prompt", {"text": marker})
     output = eventually(lambda: next((part for part in results() if part["id"] not in before), None), timeout=60)
     eventually(lambda: session_id not in sandbox.api("GET", "/api/session/active")["data"])
-    return output
+    return code_mode_result(name, output)
 
 
 def decoded(part):
@@ -186,10 +186,14 @@ try:
     passed("prune with apply removes a worktree once it is clean and keeps run records and worker sessions")
 
     restricted = sandbox.api("POST", "/api/session", {"agent": "fixture-no-edit", "location": {"directory": str(sandbox.directory)}})["data"]["id"]
+    earlier = len(provider.requests)
     denied = run_tool(restricted, "workflows_prune", {"apply": True})
     assert denied["state"]["status"] == "error", denied
     assert directory(run, "detached").is_dir()
-    passed("an agent that cannot edit cannot prune")
+    # prune and save use the edit permission, so the restricted catalog lists 9 of the 11 workflows tools.
+    assert any(code_mode_namespace(request, "workflows", 9) for request in provider.requests[earlier:]), "restricted Code Mode catalog"
+    assert any(code_mode_namespace(request, "workflows", 11) for request in provider.requests[:earlier]), "owner Code Mode catalog"
+    passed("an agent that cannot edit cannot prune, and its Code Mode catalog omits the edit-gated workflow tools")
 
     decoded(run_tool(owner, "workflows_control", {"runID": waiting_start["id"], "action": "stop"}))
     stopped = eventually(lambda: (lambda value: value if value.get("worktreeCleanup", {}).get("complete") else None)(inspect(owner, waiting_start["id"])), timeout=60)

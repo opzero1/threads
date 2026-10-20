@@ -6,7 +6,7 @@ import subprocess
 import sys
 import uuid
 
-from fixture import Provider, config
+from fixture import Provider, code_mode_namespace, code_mode_result, config, exposed, native_tools, tool_call
 from sandbox import Sandbox, Terminal, eventually
 
 
@@ -55,17 +55,17 @@ def run_tool(session_id, name, arguments):
     def results():
         return [
             part for message in messages(session_id) if message["type"] == "assistant"
-            for part in message["content"] if part["type"] == "tool" and part["name"] == name
+            for part in message["content"] if part["type"] == "tool" and part["name"] == exposed(name)
             and part["state"]["status"] in ["completed", "error"]
         ]
 
     before = {part["id"] for part in results()}
     marker = f"FIXTURE_{uuid.uuid4().hex}"
-    provider.responses[marker] = {"name": name, "arguments": arguments}
+    provider.responses[marker] = tool_call(name, arguments)
     sandbox.api("POST", f"/api/session/{session_id}/prompt", {"text": marker})
     output = eventually(lambda: next((part for part in results() if part["id"] not in before), None), timeout=60)
     eventually(lambda: session_id not in sandbox.api("GET", "/api/session/active")["data"])
-    return output
+    return code_mode_result(name, output)
 
 
 def decoded(part):
@@ -210,6 +210,10 @@ return await pipeline(args.items, item => agent(item.prompt, {{
     assert any(request.get("model") == "role" and request.get("role_variant_probe") == "deep" for request in provider.requests)
     assert any("FIXTURE_WORKFLOW_READER" in json.dumps(request) for request in provider.requests)
     passed("a native tool starts a background pipeline with named profiles and validated structured results")
+    reader_requests = [request for request in provider.requests if "FIXTURE_WORKFLOW_READER" in json.dumps(request.get("messages", []))]
+    assert reader_requests and all("workflows_result" in native_tools(request) and "execute" not in native_tools(request)
+                                   for request in reader_requests), [sorted(native_tools(request)) for request in reader_requests]
+    passed("read-only workflow workers submit through native workflows_result without Code Mode execute")
 
     again = decoded(run_tool(owner, "workflows_start", start))
     assert again["id"] == begun["id"] and len(inspect(owner, begun["id"])["steps"]) == 2
@@ -247,6 +251,21 @@ return await pipeline(args.items, item => agent(item.prompt, {{
     denied = run_tool(inherited_run["steps"][0]["workerID"], "shell", {"command": f"touch '{forbidden}'"})
     assert denied["state"]["status"] == "error" and not forbidden.exists(), denied
     passed("a workflow worker inherits restrictions from the coordinator agent as well as its session")
+    writer_requests = [request for request in provider.requests if "FIXTURE_WORKFLOW_WRITER" in json.dumps(request.get("messages", []))]
+    assert any("execute" in native_tools(request) for request in writer_requests), [sorted(native_tools(request)) for request in writer_requests]
+    # prune and save intentionally use the edit permission instead of their tool IDs. Write workers
+    # can therefore discover them, just as they received the native tools before Code Mode, but the
+    # runtime's root-session and run-ownership checks must still reject their calls.
+    assert all("workflows_result" in native_tools(request) and not code_mode_namespace(request, "threads")
+               and (code_mode_namespace(request, "workflows", 2) if "execute" in native_tools(request)
+                    else not code_mode_namespace(request, "workflows")) for request in writer_requests), writer_requests
+    writer = inherited_run["steps"][0]["workerID"]
+    discovery = decoded(run_tool(writer, "execute", {"code": 'return search({namespace:"workflows",limit:100}).items.map(item => item.path);'}))
+    assert set(discovery) == {"tools.workflows.prune", "tools.workflows.save"}, discovery
+    assert run_tool(writer, "workflows_prune", {})["state"]["status"] == "error"
+    assert run_tool(writer, "workflows_save", {"runID": inherited["id"], "name": "worker-forbidden"})["state"]["status"] == "error"
+    assert not (sandbox.directory / ".opencode/workflows/worker-forbidden.js").exists()
+    passed("workflow workers keep native workflows_result; write workers discover only edit-gated prune and save, whose root and ownership checks reject their calls")
 
     provider.responses["WORKFLOW_DEFAULT_READ"] = {"sequence": [
         {"name": "read", "arguments": {"path": str(sandbox.directory / "README.md")}},

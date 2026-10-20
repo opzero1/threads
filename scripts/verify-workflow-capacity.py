@@ -15,7 +15,7 @@ import threading
 import time
 import uuid
 
-from fixture import Provider, config
+from fixture import Provider, code_mode_result, config, exposed, tool_call
 from sandbox import Sandbox, eventually
 
 
@@ -107,17 +107,17 @@ def main():
         def results():
             return [
                 part for message in messages(session_id) if message["type"] == "assistant"
-                for part in message["content"] if part["type"] == "tool" and part["name"] == name
+                for part in message["content"] if part["type"] == "tool" and part["name"] == exposed(name)
                 and part["state"]["status"] in ["completed", "error"]
             ]
 
         before = {part["id"] for part in results()}
         marker = f"FIXTURE_{uuid.uuid4().hex}"
-        provider.responses[marker] = {"name": name, "arguments": arguments}
+        provider.responses[marker] = tool_call(name, arguments)
         sandbox.api("POST", f"/api/session/{session_id}/prompt", {"text": marker})
         output = eventually(lambda: next((part for part in results() if part["id"] not in before), None), timeout=60)
         eventually(lambda: session_id not in sandbox.api("GET", "/api/session/active")["data"], timeout=60)
-        return output
+        return code_mode_result(name, output)
 
     def decoded(part):
         assert part["state"]["status"] == "completed", part

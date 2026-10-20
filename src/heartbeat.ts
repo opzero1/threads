@@ -210,7 +210,7 @@ export async function heartbeat(ctx: Plugin.Context) {
   await ctx.rpc.register(HeartbeatRpc, { snapshot: service.snapshot, apply: service.apply });
   await ctx.tool.transform((editor) => {
     function add<I extends z.ZodType>(name: string, input: I, operation: (ownerID: string, input: z.output<I>) => Promise<HeartbeatView>) {
-      editor.add({ name: `heartbeat_${name}`, description: "Explicit owner-requested heartbeat monitoring only. Reminders inspect; they never control workflows or certify acceptance. Limits are lifetime-conserved.", input, output: HeartbeatView, options: { namespace: "workflows", codemode: false }, execute: async (value, tool) => {
+      editor.add({ name: `heartbeat_${name}`, description: "Explicit owner-requested heartbeat monitoring only. Reminders inspect; they never control workflows or certify acceptance. Limits are lifetime-conserved.", input, output: HeartbeatView, options: { namespace: "workflows", codemode: true }, execute: async (value, tool) => {
         const output = await operation(tool.sessionID, input.parse(value));
         return { content: JSON.stringify(output), output };
       } });
@@ -219,7 +219,7 @@ export async function heartbeat(ctx: Plugin.Context) {
     add("update", Update, service.update);
     add("rebind", Rebind, service.rebind);
     add("stop", Stop, service.stop);
-    editor.add({ name: "heartbeat_inspect", description: "Read only your heartbeat monitors; does not recover workflows or deliver notifications.", input: Inspect, output: Inspection, options: { namespace: "workflows", codemode: false }, execute: async (input, tool) => {
+    editor.add({ name: "heartbeat_inspect", description: "Read only your heartbeat monitors; does not recover workflows or deliver notifications.", input: Inspect, output: Inspection, options: { namespace: "workflows", codemode: true }, execute: async (input, tool) => {
       const output = await service.inspect(tool.sessionID, input);
       return { content: JSON.stringify(output), output };
     } });

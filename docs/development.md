@@ -41,7 +41,7 @@ The native suites start an isolated OpenCode server with a deterministic local m
 
 | Command | What it checks |
 | --- | --- |
-| `bun run verify:live` | Worker tools, durable messages, permissions, limits, deleted workers, restarts, and the footer indicator. |
+| `bun run verify:live` | Worker tools, durable messages, permissions, limits, deleted workers, restarts, the footer indicator, and which tools are native or reached through Code Mode `search` and `execute`. |
 | `bun run verify:footer` | The footer indicator, the Threads list, its keys, tab closing, `/threads`, and restart. |
 | `bun run verify:roles` | Agent profiles: system prompts, models, delegation, read-only work, reports, and retries. |
 | `bun run verify:workflows` | Workflow pipelines, retries, roles, checkpoints, saved scripts, worktrees, restarts, the navigator, the footer's workflow count, and the sidebar section. |
@@ -55,6 +55,8 @@ The native suites start an isolated OpenCode server with a deterministic local m
 | `bun run verify:package-ui <package>` | A packed or published package, installed under `node_modules`, in a clean terminal. |
 
 Run the checks that match your change. Evidence goes to `.audit/`, which git ignores.
+
+The fixture model calls Code Mode tools through `execute`. `scripts/fixture.py` maps each of those tool IDs to its Code Mode path and reports an inner call's failure as a tool error, so the suites keep using tool IDs.
 
 Use `THREADS_ARTIFACT_DIR=<new-directory>` to retain separate footer and workflow attempts. To compare streaming load, run `uv run --with pyte python scripts/measure-native-load.py <baseline-package> <changed-package> <new-directory>`. The harness measures native snapshots, journal reads, and concurrent health requests with closed and open workflow panels.
 

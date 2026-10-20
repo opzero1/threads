@@ -102,6 +102,8 @@ When the follow-up finishes, inspect its completion notice and the worker's evid
 
 ## Stop or hide a worker
 
+Agents call these tools, and `threads_list`, through [Code Mode](reference.md#native-and-code-mode-tools).
+
 - `threads_interrupt` stops the worker's current run. The conversation stays.
 - `threads_hide` removes the worker from the list and closes its tab. It keeps the conversation and the report. Hiding doesn't stop the worker and doesn't free its slot.
 
