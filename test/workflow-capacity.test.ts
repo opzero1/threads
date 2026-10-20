@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { Plugin } from "@opencode/plugin";
-import { withWorkflowSlot } from "../src/workflow-worker";
+import { acquire, withWorkflowSlot } from "../src/workflow-worker";
 import { workflowStore } from "../src/workflow-store";
 import { WorkflowLimits, WorkflowRun, WorkflowStart } from "../src/workflow-types";
 
@@ -48,6 +48,54 @@ test("owner and run semaphores cap at eight and abort queued work without leakin
   expect(active).toBe(0);
   await expect(withWorkflowSlot("capacity-owner", 8, "fresh", 8, new AbortController().signal, async () => "ok"))
     .resolves.toBe("ok");
+});
+
+test("a released slot passes its permit to the next queued workflow", async () => {
+  const order: string[] = [];
+  let release = () => {};
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const signal = new AbortController().signal;
+  const first = withWorkflowSlot("handoff-owner", 1, "handoff-run", 1, signal, async () => {
+    order.push("first");
+    await blocked;
+    order.push("first done");
+  });
+  const second = withWorkflowSlot("handoff-owner", 1, "handoff-run", 1, signal, async () => {
+    order.push("second");
+    return "handed off";
+  });
+  while (order.length === 0) await Bun.sleep(1);
+  await Bun.sleep(5);
+  expect(order).toEqual(["first"]);
+  release();
+  await first;
+  await expect(second).resolves.toBe("handed off");
+  expect(order).toEqual(["first", "first done", "second"]);
+  const slots = (globalThis as { __opWorkflowRunSlots?: Map<string, unknown> }).__opWorkflowRunSlots;
+  expect(slots?.has("handoff-run")).toBe(false);
+});
+
+test("releasing a permit twice frees only one slot", async () => {
+  const states = new Map();
+  const signal = new AbortController().signal;
+  const releaseFirst = await acquire(states, "idempotent", 1, signal);
+  let releaseSecond: (() => void) | undefined;
+  let releaseThird: (() => void) | undefined;
+  const second = acquire(states, "idempotent", 1, signal).then((release) => { releaseSecond = release; });
+  const third = acquire(states, "idempotent", 1, signal).then((release) => { releaseThird = release; });
+  releaseFirst();
+  releaseFirst();
+  await second;
+  await Bun.sleep(1);
+  expect(releaseThird).toBeUndefined();
+  expect(states.get("idempotent")).toMatchObject({ active: 1 });
+  releaseSecond!();
+  releaseSecond!();
+  await third;
+  expect(states.get("idempotent")).toMatchObject({ active: 1, queue: [] });
+  releaseThird!();
+  releaseThird!();
+  expect(states.has("idempotent")).toBe(false);
 });
 
 test("durable run journal rejects content beyond 16 MiB without replacing prior evidence", async () => {

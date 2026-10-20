@@ -8,6 +8,7 @@ import { parseWorkflow, executeWorkflow, type WorkflowHost } from "./workflow-ru
 import { withResolvedGrants } from "./external-access";
 import { requireDelegation } from "./permissions";
 import {
+  loadAgent,
   serialized,
   type threads,
   WorkflowWorker,
@@ -530,17 +531,6 @@ export function workflowEngine(
     };
     const nestedIndexes = new Map<string, number>();
     let active = 0;
-    const agentProfile = async (agentID: string, directory: string) => {
-      for (let attempt = 0;; attempt++) {
-        if (controller.signal.aborted) throw controller.signal.reason;
-        try {
-          return await ctx.agent.get({ agentID, location: { directory } });
-        } catch (error) {
-          if (attempt >= 49 || !String(error).includes(`Agent not found: ${agentID}`)) throw error;
-          await Bun.sleep(100);
-        }
-      }
-    };
     const hostFor = (prefix: string, depth: number): WorkflowHost => ({
       agent: async (raw) => {
         countCall();
@@ -566,7 +556,7 @@ export function workflowEngine(
           const existing = await nativeWorker(sourceWorker.workerID);
           if (existing) await options.warmWorker(existing.id);
         }
-        const sourceProfile = await agentProfile(input.agent, source);
+        const sourceProfile = await loadAgent(ctx, input.agent, source, controller.signal);
         // Fails fast at the source; spawnWorkflow repeats the check with the role where the worker runs.
         if (granted) {
           const worktree = input.isolation === "worktree" ? workflowDirectoryPlan(beforeAdmission, directoryInput, key).directory : undefined;
@@ -614,7 +604,7 @@ export function workflowEngine(
         if (priorSettlement?.kind === "agent" && priorSettlement.outcome === "failure") {
           let expectedFingerprint = `pending:${sourceProfileFingerprint}`;
           if (!previous.profileFingerprint.startsWith("pending:")) {
-            const replayProfile = await agentProfile(input.agent, previous.directory);
+            const replayProfile = await loadAgent(ctx, input.agent, previous.directory, controller.signal);
             const replayModel = replayProfile.data.model ?? run.model;
             expectedFingerprint = workflowHash({ model: replayModel, permissions: replayProfile.data.permissions, system: replayProfile.data.system ?? null });
           }
@@ -721,7 +711,7 @@ export function workflowEngine(
           });
           const finalizeProfile = async () => {
             if (options.warmWorker && await nativeWorker(current.workerID)) await options.warmWorker(current.workerID);
-            const profile = await agentProfile(input.agent, directory);
+            const profile = await loadAgent(ctx, input.agent, directory, controller.signal);
             const model = profile.data.model ?? run.model;
             const profileFingerprint = workflowHash({ model, permissions: profile.data.permissions, system: profile.data.system ?? null });
             run = await store.update(run.id, (value) => {

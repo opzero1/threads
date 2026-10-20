@@ -85,6 +85,35 @@ export const fingerprint = (input: z.infer<typeof Spawn>) =>
     ...(input.paths === undefined || input.paths.length === 0 ? [] : [{ paths: input.paths }]),
   ]);
 
+const proposedLink = (workerID: Session.ID, coordinatorID: string, request: z.infer<typeof Spawn>) =>
+  Link.parse({
+    workerID,
+    coordinatorID,
+    key: request.key,
+    fingerprint: fingerprint(request),
+    initialMessageID: SessionMessage.ID.create(),
+    reportMessageID: SessionMessage.ID.create(),
+  });
+
+// A location loads its agents on first use, so a new worker directory can briefly report a
+// configured agent as missing.
+export async function loadAgent(
+  ctx: Pick<Plugin.Context, "agent">,
+  agentID: string,
+  directory: string,
+  signal?: AbortSignal,
+) {
+  for (let attempt = 0; ; attempt++) {
+    if (signal?.aborted) throw signal.reason;
+    try {
+      return await ctx.agent.get({ agentID, location: { directory } });
+    } catch (error) {
+      if (attempt >= 49 || !String(error).includes(`Agent not found: ${agentID}`)) throw error;
+      await Bun.sleep(100);
+    }
+  }
+}
+
 const locks = new Map<string, Promise<void>>();
 type WorkflowExecutionGrant = { watching: boolean; revoked: boolean };
 const workflowState = globalThis as typeof globalThis & { __opWorkflowExecutionGrantsV3?: Map<string, WorkflowExecutionGrant> };
@@ -321,19 +350,6 @@ export function threads(
     return [...agent.data.permissions, ...(session.permissions ?? [])];
   }
 
-  // A location loads its agents on first use, so a new worker directory can briefly report a
-  // configured agent as missing. Retry like the workflow engine's profile lookup.
-  async function rolePermissions(agentID: string, directory: string) {
-    for (let attempt = 0; ; attempt++) {
-      try {
-        return (await ctx.agent.get({ agentID, location: { directory } })).data.permissions;
-      } catch (error) {
-        if (attempt >= 49 || !String(error).includes(`Agent not found: ${agentID}`)) throw error;
-        await Bun.sleep(100);
-      }
-    }
-  }
-
   // Read workers start with an empty placeholder profile; prepareWorkflowPrompt applies the real
   // profile from the worker's location. Grants are checked against that profile before creation.
   async function workflowWorkerPermissions(
@@ -344,7 +360,7 @@ export function threads(
     paths: readonly string[] | undefined,
   ) {
     const needsRole = paths !== undefined || (access === "write" && asksExternal(inherited));
-    const role = needsRole ? await rolePermissions(agentID, directory) : [];
+    const role = needsRole ? (await loadAgent(ctx, agentID, directory)).data.permissions : [];
     assertGrantsReachable([...role, ...workflowPermissions(inherited, { access, role, paths })], paths);
     return { role, permissions: workflowPermissions(inherited, { access, role: access === "read" ? [] : role, paths }) };
   }
@@ -473,6 +489,19 @@ export function threads(
     return { session, link };
   }
 
+  async function sessionOrMissing(sessionID: Session.ID) {
+    return ctx.session.get({ sessionID }).catch((error: unknown) => {
+      const missing = MissingSession.safeParse(error);
+      if (!missing.success || missing.data.sessionID !== sessionID) throw error;
+      return undefined;
+    });
+  }
+
+  async function unfinishedWorkers(coordinatorID: string) {
+    return (await list(coordinatorID)).filter((worker) =>
+      !worker.report && worker.outcome !== "failed" && worker.outcome !== "interrupted").length;
+  }
+
   return {
     list,
     reconcileFollowups,
@@ -545,34 +574,13 @@ export function threads(
         }
         const request = await withResolvedGrants(input);
         const workerID = workerIdentity(actor, input.key);
-        let session = await ctx.session.get({ sessionID: workerID }).catch(
-          (error: unknown) => {
-            const missing = MissingSession.safeParse(error);
-            if (!missing.success || missing.data.sessionID !== workerID)
-              throw error;
-            return undefined;
-          },
-        );
-        const existing = await list(actor);
-        if (
-          !session &&
-          existing.filter(
-            (worker) =>
-              !worker.report &&
-              worker.outcome !== "failed" &&
-              worker.outcome !== "interrupted",
-          ).length >= limit
-        ) {
+        let session = await sessionOrMissing(workerID);
+        // Listing also reconciles the coordinator's workers, so it runs even for an existing worker.
+        const unfinished = await unfinishedWorkers(actor);
+        if (!session && unfinished >= limit) {
           throw new Error(`Coordinator worker limit reached (${limit})`);
         }
-        const proposed = Link.parse({
-          workerID,
-          coordinatorID: actor,
-          key: input.key,
-          fingerprint: fingerprint(request),
-          initialMessageID: SessionMessage.ID.create(),
-          reportMessageID: SessionMessage.ID.create(),
-        });
+        const proposed = proposedLink(workerID, actor, request);
         if (!session) {
           const inherited = await callerPermissions(coordinator, runtime.agent);
           if (input.agent !== undefined) requireDelegation(inherited, input.agent);
@@ -580,7 +588,7 @@ export function threads(
           // is loaded when a preserved ask or a grant must be checked against the role's denies.
           const restricted = coordinator.permissions ?? [];
           const role = input.agent !== undefined && (request.paths !== undefined || asksExternal(restricted))
-            ? await rolePermissions(input.agent, input.directory)
+            ? (await loadAgent(ctx, input.agent, input.directory)).data.permissions
             : [];
           const permissions: Permission.Rule[] = [
             ...(input.agent === undefined ? inherited : workerRestrictions(restricted, role)),
@@ -648,18 +656,10 @@ export function threads(
         if (input.agent === undefined) throw new Error("Workflow workers require an explicit role agent");
         const request = await withResolvedGrants(input);
         const workerID = workerIdentity(actor, input.key);
-        const proposed = Link.parse({
-          workerID, coordinatorID: actor, key: input.key, fingerprint: fingerprint(request),
-          initialMessageID: SessionMessage.ID.create(), reportMessageID: SessionMessage.ID.create(),
-        });
-        let session = await ctx.session.get({ sessionID: workerID }).catch((error: unknown) => {
-          const missing = MissingSession.safeParse(error);
-          if (!missing.success || missing.data.sessionID !== workerID) throw error;
-          return undefined;
-        });
+        const proposed = proposedLink(workerID, actor, request);
+        let session = await sessionOrMissing(workerID);
         if (!session) {
-          const existing = await list(actor);
-          if (existing.filter((worker) => !worker.report && worker.outcome !== "failed" && worker.outcome !== "interrupted").length >= limit) {
+          if (await unfinishedWorkers(actor) >= limit) {
             throw new Error(`Coordinator worker limit reached (${limit}); wait for existing managed work before starting another workflow`);
           }
           const inherited = await callerPermissions(coordinator, runtime.agent);
@@ -719,19 +719,8 @@ export function threads(
         const agent = input.agent;
         const request = await withResolvedGrants(input);
         const workerID = workerIdentity(actor, input.key);
-        let session = await ctx.session.get({ sessionID: workerID }).catch((error: unknown) => {
-          const missing = MissingSession.safeParse(error);
-          if (!missing.success || missing.data.sessionID !== workerID) throw error;
-          return undefined;
-        });
-        const proposed = Link.parse({
-          workerID,
-          coordinatorID: actor,
-          key: input.key,
-          fingerprint: fingerprint(request),
-          initialMessageID: SessionMessage.ID.create(),
-          reportMessageID: SessionMessage.ID.create(),
-        });
+        let session = await sessionOrMissing(workerID);
+        const proposed = proposedLink(workerID, actor, request);
         // A worker's first prompt runs under the coordinator's current rules and the role at
         // `input.directory`, which can differ from the role at the step's source. A step that only a
         // grant admits must keep its project there clear of explicit denies.
@@ -744,8 +733,7 @@ export function threads(
         };
         let created = false;
         if (!session) {
-          const existing = await list(actor);
-          if (existing.filter((worker) => !worker.report && worker.outcome !== "failed" && worker.outcome !== "interrupted").length >= limit) {
+          if (await unfinishedWorkers(actor) >= limit) {
             throw new Error(`Coordinator worker limit reached (${limit}); wait for existing managed work before starting another workflow`);
           }
           const inherited = await callerPermissions(coordinator, runtime.agent);

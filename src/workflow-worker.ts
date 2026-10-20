@@ -26,7 +26,7 @@ const globalState = globalThis as typeof globalThis & {
 const ownerSlots = globalState.__opWorkflowOwnerSlots ??= new Map();
 const runSlots = globalState.__opWorkflowRunSlots ??= new Map();
 
-async function acquire(
+export async function acquire(
   states: Map<string, Semaphore>,
   key: string,
   limit: number,
@@ -35,28 +35,9 @@ async function acquire(
   if (signal.aborted) throw signal.reason ?? new Error("Workflow cancelled");
   const state = states.get(key) ?? { active: 0, queue: [] };
   states.set(key, state);
-  let released = false;
-  const release = () => {
-    if (released) return;
-    released = true;
-    state.active--;
-    for (;;) {
-      const waiter = state.queue[0];
-      if (!waiter || state.active >= waiter.limit) break;
-      state.queue.shift();
-      waiter.signal.removeEventListener("abort", waiter.abort);
-      if (waiter.signal.aborted) {
-        waiter.reject(waiter.signal.reason ?? new Error("Workflow cancelled"));
-        continue;
-      }
-      state.active++;
-      waiter.resolve(releaseFor(states, key, state));
-    }
-    if (state.active === 0 && state.queue.length === 0) states.delete(key);
-  };
   if (state.active < limit) {
     state.active++;
-    return release;
+    return releaseFor(states, key, state);
   }
   return new Promise<() => void>((resolve, reject) => {
     const waiter: Waiter = {
