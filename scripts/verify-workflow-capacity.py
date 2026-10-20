@@ -323,16 +323,6 @@ def main():
         }
         passed("worker and run timers enforce the supported one-second minimum under the deterministic provider")
 
-        # The cumulative host-call formula is maxAgents * 8 + 100 (108 here).
-        calls_ok = start(owner, "calls-108", 'for (let i = 0; i < 108; i++) await log("x"); return 108;', maxAgents=1)
-        assert settled(owner, calls_ok["id"])["result"] == 108
-        calls_bad = start(owner, "calls-109", 'for (let i = 0; i < 109; i++) await log("x"); return 109;', maxAgents=1)
-        calls_failed = settled(owner, calls_bad["id"], expected="failed")
-        assert "call limit exceeded (108)" in calls_failed["error"], calls_failed["error"]
-        assert len(inspect(owner, calls_ok["id"])["logs"]) == 108
-        metrics["scenarios"]["hostCalls"] = {"accepted": 108, "rejected": 109, "retainedLogs": 108}
-        passed("the real runtime accepts 108 host calls and rejects the 109th when maxAgents is one")
-
         logs = start(owner, "logs-205", 'for (let i = 0; i < 205; i++) await log("log-" + i); return true;', maxAgents=20)
         logs_run = settled(owner, logs["id"])
         assert len(logs_run["logs"]) == 200

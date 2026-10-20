@@ -52,9 +52,7 @@ self.onmessage = (event) => {
         args: message.args,
         signal: controller.signal,
         host,
-        maxCalls: message.maxCalls,
         timeoutMs: message.timeoutMs,
-        helperPolicy: message.helperPolicy,
       });
       assertBoundedMessage(value, "Workflow result");
       send({ type: "result", ok: true, value });

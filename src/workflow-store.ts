@@ -32,12 +32,7 @@ export function workflowStore(storage: Plugin.Context["storage"], options: {
   };
   const key = (id: string) => `workflows/runs/${id}`;
   async function persist(run: WorkflowRun, kind: "payload" | "control") {
-    const value = structuredClone(Json.parse(run)) as Record<string, Json>;
-    const limits = value.limits as Record<string, Json>;
-    if (limits.concurrency === 3) delete limits.concurrency;
-    if (limits.maxAgents === 4) delete limits.maxAgents;
-    if (limits.agentTimeoutMs === 1_800_000) delete limits.agentTimeoutMs;
-    if (limits.timeoutMs === 86_400_000) delete limits.timeoutMs;
+    const value = structuredClone(Json.parse(run));
     const limit = journalLimit - (kind === "payload" ? controlHeadroom(run) : 0);
     if (Buffer.byteLength(JSON.stringify(value), "utf8") > limit) {
       if (kind === "payload") {

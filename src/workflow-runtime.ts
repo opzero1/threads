@@ -5,7 +5,6 @@ import {
   assertBoundedMessage,
   boundedDiagnostic,
   type HostMethod,
-  type WorkflowHelperPolicy,
   type ParentToWorker,
   type WorkerToParent,
 } from "./workflow-runtime-protocol";
@@ -23,9 +22,7 @@ type ExecuteInput = {
   args: unknown;
   signal: AbortSignal;
   host: WorkflowHost;
-  maxCalls?: number;
   timeoutMs?: number;
-  helperPolicy?: WorkflowHelperPolicy;
 };
 
 const MAX_RUNTIME_WORKERS = 64;
@@ -57,7 +54,6 @@ async function boundedDrain(operations: Set<Promise<void>>): Promise<void> {
  * rather than waiting and deadlocking nested workflows.
  */
 export async function executeWorkflow(input: ExecuteInput): Promise<unknown> {
-  const maxCalls = positiveOption(input.maxCalls, "maxCalls");
   const timeoutMs = positiveOption(input.timeoutMs, "timeoutMs");
   if (input.signal.aborted) throw abortError(input.signal);
   if (liveWorkers >= MAX_RUNTIME_WORKERS) throw new Error(`Workflow runtime worker limit reached (${MAX_RUNTIME_WORKERS})`);
@@ -132,7 +128,7 @@ export async function executeWorkflow(input: ExecuteInput): Promise<unknown> {
   worker.onerror = (event: ErrorEvent) => stop(new Error(boundedDiagnostic(event.error ?? event.message)));
 
   try {
-    worker.postMessage({ type: "start", script: input.script, args: input.args, maxCalls, timeoutMs, helperPolicy: input.helperPolicy } satisfies ParentToWorker);
+    worker.postMessage({ type: "start", script: input.script, args: input.args, timeoutMs } satisfies ParentToWorker);
     return await result;
   } finally {
     acceptingCalls = false;

@@ -166,17 +166,10 @@ describe("real CodeMode workflow execution", () => {
     expect(finished).toEqual([0, 2]);
   });
 
-  test("preserves failures and enforces bounded helpers", async () => {
-    let calls = 0;
+  test("preserves host failures", async () => {
     expect((await failure(run(`return await agent("bad");`, {
       host: host({ agent: async (input) => { if ((input as { prompt: string }).prompt === "bad") throw new Error("host exploded"); return "ok"; } }),
     }))).message).toContain("host exploded");
-    expect(await run(`return await retry(async (attempt) => { await agent("try"); if (attempt < 3) throw new Error("again"); return "done"; });`,
-      { host: host({ agent: async () => { calls++; return null; } }) })).toBe("done");
-    expect(calls).toBe(3);
-    expect((await failure(run(`return retry(() => 1, { attempts: 0 });`))).message).toContain("positive integer");
-    expect((await failure(run(`return retry(() => 1, { attempts: 9007199254740992 });`))).message).toContain("safe positive integer");
-    expect((await failure(run(`return loopUntilDry({ round: async () => [], key: "id", maxRounds: 1001 });`))).message).toContain("no greater than 1000");
   });
 
   test("preempts synchronous native RegExp work without blocking the parent event loop", async () => {
@@ -250,24 +243,36 @@ describe("real CodeMode workflow execution", () => {
     expect(error.message).toContain("truncated");
   });
 
-  test("gate and loopUntilDry retry deterministically and retain ordered unique results", async () => {
-    const value = await run(`
-      let gateAttempt = 0;
-      const accepted = await gate(async () => ++gateAttempt, (result) => result === 2);
-      const found = await loopUntilDry({
-        key: "id",
-        consecutiveEmpty: 2,
-        maxRounds: 6,
-        round: async (round) => round === 1 ? [{ id: "a" }, { id: "b" }] : round === 2 ? [{ id: "b" }, { id: "c" }] : [],
-      });
-      return { accepted, found };
-    `);
-    expect(value).toEqual({ accepted: 2, found: [{ id: "a" }, { id: "b" }, { id: "c" }] });
-    expect(await run(`return gate(() => "yes", () => ({ ok: true }));`)).toBe("yes");
-    expect((await failure(run(`return gate(() => "no", () => ({ ok: false, feedback: "bad evidence" }), { attempts: 1 });`))).message)
-      .toContain("bad evidence");
-    expect((await failure(run(`return gate(() => "no", () => ({ truthy: true }), { attempts: 1 });`))).message)
-      .toContain("boolean or { ok");
+  test("the runtime reference's retry and discovery loops run as written", async () => {
+    const reference = await Bun.file(new URL("../skills/workflow-authoring/references/runtime.md", import.meta.url)).text();
+    const example = (heading: string) => reference.split(`### ${heading}\n\n\`\`\`js\n`)[1]!.split("```")[0]!;
+    const keys: string[] = [];
+    const reply = (replies: Record<string, unknown>) => host({ agent: async (input) => {
+      const key = (input as { key: string }).key;
+      keys.push(key);
+      return replies[key];
+    } });
+    expect(await run(`${example("Retry until accepted")}return draft;`, { host: reply({
+      "draft:1": "first", "check:1": { ok: false, feedback: "cite evidence" },
+      "draft:2": "second", "check:2": { ok: true },
+    }) })).toBe("second");
+    expect(keys).toEqual(["draft:1", "check:1", "draft:2", "check:2"]);
+    keys.length = 0;
+    expect(await run(`${example("Loop until dry")}return findings;`, { host: reply({
+      "find:1": [{ id: "a" }, { id: "b" }], "find:2": [{ id: "b" }, { id: "c" }], "find:3": [{ id: "a" }],
+    }) })).toEqual([{ id: "a" }, { id: "b" }, { id: "c" }]);
+    expect(keys).toEqual(["find:1", "find:2", "find:3"]);
+  });
+
+  test("removed helpers fail validation with their plain-JavaScript replacement", async () => {
+    for (const [name, pattern] of [["retry", "Retry until accepted"], ["gate", "Retry until accepted"], ["loopUntilDry", "Loop until dry"]]) {
+      let called = false;
+      const error = await failure(run(`await agent("first"); return await ${name}(() => 1);`, { host: host({ agent: async () => { called = true; } }) }));
+      expect(error.message).toContain(`${name}() was removed`);
+      expect(error.message).toContain(pattern);
+      expect(called).toBe(false);
+    }
+    expect(await run(`const retry = async (thunk) => thunk(); return retry(() => 3);`)).toBe(3);
   });
 
   test("cancels an in-flight real tool through Effect.runPromise signal", async () => {
@@ -332,11 +337,10 @@ describe("real CodeMode workflow execution", () => {
     }
   });
 
-  test("validates wrapper inputs and call/timeout options", async () => {
+  test("validates wrapper inputs and timeout options", async () => {
     expect((await failure(run(`return await agent(4);`))).message).toContain("prompt");
     expect((await failure(run(`return await checkpoint("x", {});`))).message).toContain("key");
-    expect((await failure(run(`await log("a"); await log("b"); return true;`, { maxCalls: 1 }))).message).toContain("call limit");
-    expect((await failure(run(`return true;`, { maxCalls: 0 }))).message).toContain("positive integer");
+    expect((await failure(run(`return true;`, { timeoutMs: 0 }))).message).toContain("positive integer");
     expect((await failure(run(`while (true) {}`, { timeoutMs: 10 }))).message).toMatch(/Timeout|timed out/);
     expect((await failure(run(`return await agent("large");`, {
       host: host({ agent: async () => "x".repeat(2 * 1024 * 1024) }),

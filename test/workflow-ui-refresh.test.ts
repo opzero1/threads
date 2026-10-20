@@ -18,7 +18,6 @@ function summary(id: string): WorkflowSummary {
   return {
     version: 1, id, key: id, ownerID: id, model: { providerID: "test", id: "test" },
     projectID: "test", directory: "/test", name: id, description: "", status: "running",
-    helperPolicy: "optional-counts",
     limits: { concurrency: 1, maxAgents: 1, agentTimeoutMs: 1000, timeoutMs: 1000 },
     created: 0, updated: 0, phase: "", counts: { completed: 0, running: 1, failed: 0, total: 1 },
     usage: { tokens: 0, cost: 0, measured: false },
