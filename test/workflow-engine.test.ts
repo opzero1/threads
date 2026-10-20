@@ -7,7 +7,7 @@ import { Session } from "@opencode/schema/session";
 import { SessionMessage } from "@opencode/schema/session-message";
 import { workflowEngine } from "../src/workflow-engine";
 import { authorizeWorkflowExecution, serialized, threads, workerIdentity } from "../src/threads";
-import { WORKFLOW_CONTROL_HEADROOM, WORKFLOW_DIAGNOSTIC_JSON_BYTES, WorkflowAgentInput, WorkflowRun, WorkflowStart } from "../src/workflow-types";
+import { WORKFLOW_CONTROL_HEADROOM, WORKFLOW_DIAGNOSTIC_JSON_BYTES, WorkflowAgentInput, WorkflowRun, WorkflowStart, workflowSummary } from "../src/workflow-types";
 import { withWorkflowSlot, workflowDirectoryPlan } from "../src/workflow-worker";
 import type { CheckoutState } from "../src/workflow-cleanup";
 
@@ -1769,6 +1769,8 @@ return await parallel(["one", "two", "three"].map(key => () => agent(key, {
     });
     while (fixture.spawns() < 1) await Bun.sleep(2);
     expect(fixture.reservations).toHaveLength(1);
+    while ((await fixture.api.get(fixture.ownerID, started.id)).steps.length < 3) await Bun.sleep(2);
+    expect(workflowSummary(await fixture.api.get(fixture.ownerID, started.id)).counts).toMatchObject({ running: 1, queued: 2, total: 3 });
     for (let index = 0; index < 3; index++) {
       while (fixture.spawns() < index + 1) await Bun.sleep(2);
       await fixture.complete(fixture.spawnedStepKeys[index]);

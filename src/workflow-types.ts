@@ -174,7 +174,7 @@ export const WorkflowPruneResult = z.object({
 });
 export type WorkflowPruneResult = z.infer<typeof WorkflowPruneResult>;
 export const WorkflowSummary = WorkflowRun.omit({ script: true, args: true, result: true, steps: true, logs: true, checkpoints: true, settlements: true, attention: true, fingerprint: true, callerAgent: true, deliveryID: true, delivered: true, worktreeCleanup: true }).extend({
-  counts: z.object({ completed: z.number(), running: z.number(), failed: z.number(), total: z.number() }),
+  counts: z.object({ completed: z.number(), running: z.number(), queued: z.number(), failed: z.number(), total: z.number() }),
   usage: WorkflowUsage,
 });
 export type WorkflowSummary = z.infer<typeof WorkflowSummary>;
@@ -185,7 +185,8 @@ export function workflowSummary(run: WorkflowRun): WorkflowSummary {
     ...run,
     counts: {
       completed: completed.length,
-      running: run.steps.filter((step) => step.status === "running" || step.status === "prepared").length,
+      running: run.steps.filter((step) => step.status === "running").length,
+      queued: run.steps.filter((step) => step.status === "prepared").length,
       failed: run.steps.filter((step) => step.status === "failed").length,
       total: run.steps.length,
     },
