@@ -130,6 +130,42 @@ describe("real CodeMode workflow execution", () => {
     expect(events.indexOf("s2-2")).toBeLessThan(events.indexOf("s2-1"));
   });
 
+  test("parallel settles every slot before rethrowing and rejects non-function elements", async () => {
+    const finished: string[] = [];
+    const agentHost = host({ agent: async (input) => {
+      const prompt = (input as { prompt: string }).prompt;
+      if (prompt.startsWith("bad")) throw new Error(prompt + " exploded");
+      await Bun.sleep(10);
+      finished.push(prompt);
+      return prompt;
+    } });
+    expect((await failure(run(`return await parallel([() => agent("bad-0"), () => agent("slow")]);`, { host: agentHost }))).message)
+      .toContain("bad-0 exploded");
+    expect(finished).toEqual(["slow"]);
+    expect(await run(`try { await parallel([() => agent("bad-0"), () => agent("ok"), () => agent("bad-2")]); }
+      catch (error) { return { name: error.name, message: error.message, errors: error.errors.map((item) => item.message) }; }`, { host: agentHost }))
+      .toEqual({ name: "AggregateError", message: "parallel items 0, 2 failed: bad-0 exploded; bad-2 exploded", errors: ["bad-0 exploded", "bad-2 exploded"] });
+    expect(finished).toEqual(["slow", "ok"]);
+    expect((await failure(run(`return await parallel([agent("eager")]);`))).message).toContain("parallel expects an array of functions, not promises");
+  });
+
+  test("pipeline passes the original item and index to every stage and settles every item", async () => {
+    expect(await run(`return await pipeline(["a", "b"],
+      async (value, item, index) => value + index,
+      async (value, item, index) => [value, item, index]
+    );`)).toEqual([["a0", "a", 0], ["b1", "b", 1]]);
+    const finished: number[] = [];
+    expect(await run(`try { await pipeline([0, 1, 2], async (value) => agent(String(value)), async (value, item) => item); }
+      catch (error) { return { name: error.name, message: error.message }; }`, { host: host({ agent: async (input) => {
+      const prompt = Number((input as { prompt: string }).prompt);
+      if (prompt === 1) throw new Error("item 1 exploded");
+      await Bun.sleep(10);
+      finished.push(prompt);
+      return prompt;
+    } }) })).toEqual({ name: "Error", message: "item 1 exploded" });
+    expect(finished).toEqual([0, 2]);
+  });
+
   test("preserves failures and enforces bounded helpers", async () => {
     let calls = 0;
     expect((await failure(run(`return await agent("bad");`, {

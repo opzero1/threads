@@ -232,12 +232,28 @@ const positiveInteger = (value, name) => {
     throw new RangeError(name + " must be a safe positive integer no greater than " + MAX_HELPER_ITERATIONS);
   return value;
 };
-const parallel = async (thunks) => Promise.all(thunks.map((thunk) => thunk()));
-const pipeline = async (items, ...stages) => Promise.all(items.map(async (item) => {
-  let value = item;
-  for (const stage of stages) value = await stage(value);
-  return value;
-}));
+const settleAll = async (name, promises) => {
+  const outcomes = await Promise.allSettled(promises);
+  const failed = outcomes.flatMap((outcome, index) => outcome.status === "rejected" ? [index] : []);
+  if (failed.length === 1) throw outcomes[failed[0]].reason;
+  if (failed.length > 1) throw new AggregateError(failed.map((index) => outcomes[index].reason),
+    name + " items " + failed.join(", ") + " failed: " + failed.map((index) => String(outcomes[index].reason?.message ?? outcomes[index].reason)).join("; "));
+  return outcomes.map((outcome) => outcome.value);
+};
+const parallel = async (thunks) => {
+  if (!Array.isArray(thunks) || !thunks.every((thunk) => typeof thunk === "function"))
+    throw new TypeError("parallel expects an array of functions, not promises. Wrap each call: () => agent(...)");
+  return settleAll("parallel", thunks.map(async (thunk) => thunk()));
+};
+const pipeline = async (items, ...stages) => {
+  if (!Array.isArray(items)) throw new TypeError("pipeline items must be an array");
+  if (!stages.every((stage) => typeof stage === "function")) throw new TypeError("pipeline stages must be functions");
+  return settleAll("pipeline", items.map(async (item, index) => {
+    let value = item;
+    for (const stage of stages) value = await stage(value, item, index);
+    return value;
+  }));
+};
 const retry = async (thunk, options = {}) => {
   ${policy === "optional-counts" ? 'if (typeof thunk !== "function") throw new TypeError("retry thunk must be a function");' : ""}
   const attempts = options.attempts === undefined ? ${policy === "legacy-bounded" ? "3" : "undefined"} : positiveInteger(options.attempts, "attempts");
