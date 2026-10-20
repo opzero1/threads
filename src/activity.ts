@@ -6,11 +6,11 @@ import {
   activityTime,
   cleanRoleTitle,
   footerSummary,
+  reportedTabAction,
   workerState,
   type ListItem,
 } from "./activity-model";
 import { ThreadsIndicator } from "./activity-footer";
-import { ActivityPicker } from "./activity-picker";
 import { workInProgress } from "./idle";
 import { ThreadsRpc, WorkerView } from "./rpc";
 import { applyWorkerSnapshot, transportGrace, uiState } from "./ui-location";
@@ -29,6 +29,7 @@ const Link = z
     reportMessageID: z.string(),
   })
   .strict();
+const CoordinatorRef = z.object({ coordinatorID: z.string() });
 
 export function activity(
   ctx: Plugin.Context,
@@ -50,6 +51,7 @@ export function activity(
   });
   const openedHere = () => listOpened.folders[folder()] ?? [];
   const closingRows = new Set<string>();
+  const closingTabs = new Set<string>();
   const sessions = new Map<string, Session>();
   const workers = new Map<string, z.infer<typeof WorkerView>>();
   const deleted = new Set<string>();
@@ -57,6 +59,7 @@ export function activity(
   const rpc = ctx.client.rpc(ThreadsRpc);
   let stopped = false;
   let loading = false;
+  let pending = false;
   let lastError: string | undefined;
   const transport = transportGrace();
   const changed = () => {
@@ -117,18 +120,26 @@ export function activity(
         : route.sessionID)
     );
   }
-  function trackedSessionIDs() {
-    const directory = folder();
+  function openSessionIDs() {
     const route = ctx.ui.router.current();
     const current = currentCoordinator();
-    return new Set([
-      ...[...sessions.values()]
-        .filter((session) => session.location.directory === directory)
-        .map((session) => session.id),
+    return [
       ...ctx.ui.tabs.list().map((tab) => tab.sessionID),
       ...(route.type === "session" ? [route.sessionID] : []),
       ...(current ? [current] : []),
-    ]);
+    ];
+  }
+  function withCoordinators(ids: Iterable<string>) {
+    return [
+      ...new Set(
+        [...ids].flatMap((id) => {
+          const link = CoordinatorRef.safeParse(
+            (ctx.data.session.get(id) ?? sessions.get(id))?.metadata?.opThreads,
+          );
+          return link.success ? [id, link.data.coordinatorID] : [id];
+        }),
+      ),
+    ];
   }
   // The Threads list: the current conversation's thread, meaning its main conversation and
   // that conversation's managed workers. Closed workers stay reachable.
@@ -276,9 +287,50 @@ export function activity(
       await restore([id]);
     }
   }
+  // Worker tabs open only from the Threads list. This closes the ones that are no longer
+  // needed: list-opened tabs after their worker reports, and tabs of hidden workers.
+  async function reconcileTabs() {
+    if (!ctx.ui.tabs.enabled()) return;
+    for (const worker of [...workers.values()]) {
+      const id = worker.workerID;
+      if (stopped) return;
+      if (closingRows.has(id) || dismissed.ids.includes(id)) continue;
+      const tab = ctx.ui.tabs.list().find((tab) => tab.sessionID === id);
+      if (closingTabs.has(id) && tab) continue;
+      closingTabs.delete(id);
+      const status = ctx.data.session.status(id);
+      if (openedHere().includes(id)) {
+        const action = reportedTabAction(worker, status, tab);
+        if (action === "forget") await forgetListOpened(id);
+        if (action === "close") {
+          if (ctx.ui.tabs.close(id)) {
+            closingTabs.add(id);
+            await forgetListOpened(id);
+          }
+          continue;
+        }
+      }
+      if (
+        tab &&
+        worker.hidden &&
+        !tab.active &&
+        !tab.busy &&
+        !tab.attention &&
+        status !== "running" &&
+        ctx.ui.tabs.close(id)
+      )
+        closingTabs.add(id);
+    }
+  }
   async function load() {
-    if (loading || stopped) return;
+    if (stopped) return;
+    if (loading) {
+      // Coalesce, never drop: the last session event can be the one that finishes a worker.
+      pending = true;
+      return;
+    }
     loading = true;
+    pending = false;
     try {
       const page = await ctx.client.session.list(
         { parentID: null, limit: 100, order: "desc", directory: folder() },
@@ -287,17 +339,7 @@ export function activity(
       if (stopped) return;
       for (const session of page.data) sessions.set(session.id, session);
       for (const id of dismissed.ids) await resolveSession(id);
-      const ids = [
-        ...new Set([
-          ...trackedSessionIDs(),
-          ...[...sessions.values()].flatMap((session) => {
-            const link = Link.safeParse(session.metadata?.opThreads);
-            return link.success
-              ? [session.id, link.data.coordinatorID]
-              : [session.id];
-          }),
-        ]),
-      ];
+      const ids = withCoordinators([...openSessionIDs(), ...sessions.keys()]);
       for (let index = 0; index < ids.length && !stopped; index += 100) {
         const coordinatorIDs = ids.slice(index, index + 100);
         const result = await uiState(ctx, coordinatorIDs, (location) => rpc.snapshot(
@@ -310,6 +352,7 @@ export function activity(
         if (stopped) return;
         applyWorkerSnapshot(workers, coordinatorIDs, result.workers);
       }
+      await reconcileTabs();
       for (const id of new Set(
         [...workers.values()].map((worker) => worker.coordinatorID),
       )) {
@@ -325,16 +368,41 @@ export function activity(
       if (stopped) return;
       if (transport.shouldReport(value)) error(value);
       else
-        refreshTimer ??= setTimeout(() => {
-          refreshTimer = undefined;
+        retry ??= setTimeout(() => {
+          retry = undefined;
           void load();
         }, 2000);
     } finally {
       loading = false;
       changed();
+      if (pending && !stopped) void load();
     }
   }
-  let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+  let retry: ReturnType<typeof setTimeout> | undefined;
+  // /threads restores hidden and dismissed workers into the list instead of reopening a
+  // tab (and so loading a Location) for each of them.
+  async function restoreWorkers() {
+    try {
+      const ids = withCoordinators(openSessionIDs());
+      for (let index = 0; index < ids.length && !stopped; index += 100) {
+        const coordinatorIDs = ids.slice(index, index + 100);
+        const result = await uiState(ctx, coordinatorIDs, (location) => rpc.restore(
+          { coordinatorIDs },
+          {
+            signal: abort.signal,
+            location,
+          },
+        ));
+        if (stopped) return;
+        applyWorkerSnapshot(workers, coordinatorIDs, result.workers);
+        await restore(result.workers.map((worker) => worker.workerID));
+      }
+    } catch (value) {
+      error(value);
+    }
+    changed();
+    if (!stopped) await openList();
+  }
   const stopEvents = ctx.data.listen(({ details }) => {
     if (!snapshotEvent(details.type)) return;
     if (details.type === "session.deleted") {
@@ -350,21 +418,16 @@ export function activity(
       deleted.delete(details.data.sessionID);
       changed();
     }
-    if (!refreshTimer)
-      refreshTimer = setTimeout(() => {
-        refreshTimer = undefined;
-        void load();
-      }, 1000);
+    void load();
   });
   const timer = setInterval(() => {
-    changed();
     if (
       workInProgress(ctx.ui.tabs.list(), workers.keys(), (id) =>
         ctx.data.session.status(id),
       )
     )
       void load();
-  }, 30000);
+  }, 3000);
   const removeSlot = ctx.ui.slot({
     append: "app",
     render() {
@@ -375,6 +438,10 @@ export function activity(
         if (id === selected) return;
         selected = id;
         if (id && !closingRows.has(id)) void restore([id]).catch(error);
+      });
+      createEffect(() => {
+        ctx.ui.tabs.list();
+        void load();
       });
       ctx.keymap.layer(() => ({
         mode: "global",
@@ -387,33 +454,60 @@ export function activity(
             slash: { name: "activities" },
             run: openList,
           },
+          {
+            id: "threads.reopen",
+            title: "Restore and list managed workers",
+            palette: true,
+            slash: { name: "threads" },
+            run: restoreWorkers,
+          },
         ],
       }));
       return null;
     },
   });
-  function openList() {
+  const row = (id: string) =>
+    listItems().flatMap(([category, group]) =>
+      group.flatMap((item) => (item.id === id ? [{ ...item, category }] : [])),
+    )[0];
+  async function openList() {
+    const items = listItems();
+    if (!items.length) {
+      ctx.ui.toast.show({ message: "Open a conversation to see its workers", variant: "info" });
+      return;
+    }
     const route = ctx.ui.router.current();
-    const current = route.type === "session" ? route.sessionID : undefined;
     const main = currentCoordinator();
     const session = main
       ? ctx.data.session.get(main) ?? sessions.get(main)
       : undefined;
-    ctx.ui.dialog.show(() =>
-      ActivityPicker({
-        ctx,
-        fallbackColor,
-        title: "Threads",
-        note: session ? cleanRoleTitle(session.title ?? "Untitled", true) : undefined,
-        empty: "Open a conversation to see its workers",
-        current,
-        items: () => listItems().flatMap(([category, group]) =>
-          group.map((item) => ({ ...item, category })),
-        ),
-        dismiss: toggleDismiss,
-        open: focus,
-      }));
-    ctx.ui.dialog.set({ size: "large" });
+    const id = await ctx.ui.dialog.select({
+      title: session
+        ? `Threads · ${cleanRoleTitle(session.title ?? "Untitled", true)}`
+        : "Threads",
+      current: route.type === "session" ? route.sessionID : undefined,
+      options: items.flatMap(([category, group]) =>
+        group.map((item) => ({
+          title: item.title,
+          description: [category, item.subtitle].filter(Boolean).join(" · "),
+          value: item.id,
+        })),
+      ),
+    });
+    const chosen = id === undefined || stopped ? undefined : row(id);
+    if (!chosen) return;
+    const action = await ctx.ui.dialog.select({
+      title: chosen.title,
+      options: [
+        { title: "Open", value: "open" as const },
+        { title: chosen.closed ? "Restore" : "Dismiss", value: "dismiss" as const },
+      ],
+    });
+    // The list can change while a dialog is open; act only on a row that is still listed.
+    const fresh = row(chosen.id);
+    if (!action || stopped || !fresh || (action === "dismiss" && fresh.closed !== chosen.closed))
+      return;
+    await (action === "open" ? focus(chosen.id) : toggleDismiss(chosen.id));
   }
   const indicator = (id: string) => () =>
     ThreadsIndicator({
@@ -423,7 +517,7 @@ export function activity(
       spinner,
       summary,
       shortcut: () => ctx.keymap.shortcuts("threads.activity.choose")[0],
-      open: openList,
+      open: () => void openList(),
       openWorkflows: settings.openWorkflows,
     });
   const removeFooter = ctx.ui.slot({
@@ -435,25 +529,14 @@ export function activity(
     render: indicator("threads-home-footer"),
   });
   void load();
-  return {
-    isDismissed: (id: string) => closingRows.has(id) || dismissed.ids.includes(id),
-    restore,
-    openList,
-    listOpened: (id: string) => openedHere().includes(id),
-    forgetListOpened,
-    updateWorkers(values: z.infer<typeof WorkerView>[], coordinatorIDs?: string[]) {
-      applyWorkerSnapshot(workers, coordinatorIDs ?? [], values);
-      changed();
-    },
-    dispose() {
-      stopped = true;
-      abort.abort();
-      clearInterval(timer);
-      clearTimeout(refreshTimer);
-      stopEvents();
-      removeSlot();
-      removeFooter();
-      removeHomeFooter();
-    },
+  return () => {
+    stopped = true;
+    abort.abort();
+    clearInterval(timer);
+    clearTimeout(retry);
+    stopEvents();
+    removeSlot();
+    removeFooter();
+    removeHomeFooter();
   };
 }

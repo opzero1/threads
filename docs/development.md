@@ -22,7 +22,7 @@ Editing a loaded local plugin can unload and reload it without restarting the se
 | `src/permissions.ts`, `src/external-access.ts` | Worker permission rules and `paths` grants. |
 | `src/rpc.ts` | `ThreadsRpc`, `WorkerView`, and the report schema. |
 | `src/activity.ts`, `src/activity-model.ts` | Threads list and footer state. |
-| `src/activity-picker.tsx`, `src/activity-footer.tsx`, `src/activity-theme.ts` | Threads list, footer indicator, and theme colors. |
+| `src/activity-footer.tsx`, `src/activity-theme.ts` | Footer indicator and theme colors. |
 | `src/idle.ts` | Keeps idle terminals from sending requests. |
 | `src/workflows.ts`, `src/workflow-*.ts` | Workflow tools, runner, journal, confined runtime, and saved scripts. |
 | `src/workflow-ui.tsx` | Workflow navigator and run panel. |
@@ -42,7 +42,7 @@ The native suites start an isolated OpenCode server with a deterministic local m
 | Command | What it checks |
 | --- | --- |
 | `bun run verify:live` | Worker tools, durable messages, permissions, limits, deleted workers, restarts, the footer indicator, and which tools are native or reached through Code Mode `search` and `execute`. |
-| `bun run verify:footer` | The footer indicator, the Threads list, its keys, tab closing, `/threads`, and restart. |
+| `bun run verify:footer` | The footer indicator, the Threads list, its row menu, tab closing, `/threads`, and restart. |
 | `bun run verify:roles` | Agent profiles: system prompts, models, delegation, read-only work, reports, and retries. |
 | `bun run verify:workflows` | Workflow pipelines, retries, roles, checkpoints, saved scripts, worktrees, restarts, the navigator, the footer's workflow count, and the sidebar section. |
 | `bun run verify:workflow-regressions` | Known workflow engine defects stay fixed. |
@@ -84,10 +84,10 @@ Set `OPENCODE_SOURCE` to an OpenCode V2 source checkout to run the permission-or
    - `ctrl+x j` opens the Threads list with only the current conversation. Search reacts to typing, and **Esc** closes the list.
    - `/activities` opens the same list.
    - A running worker shows the footer indicator without opening a tab.
-   - **Ctrl+D** dismisses and restores a finished worker without closing the list.
-   - With that worker focused, the list shows its coordinator's thread, and **Enter** returns to the main conversation.
+   - A finished worker's row menu dismisses and restores it.
+   - With that worker focused, the list shows its coordinator's thread, and **Open** returns to the main conversation.
    - `/workflows` opens the navigator.
-   - On the home screen, the list shows its open-a-conversation message.
+   - On the home screen, the list shortcut shows its open-a-conversation notice.
    - A completed workflow's result panel opens and closes.
    - Options left over from earlier versions add no sidebar and no automatic worker tab.
 4. Commit the source you packed and tag it `v<version>`. Pack from a clean working tree, so that the tag matches the package.

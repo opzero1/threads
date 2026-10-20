@@ -90,8 +90,7 @@ In the Threads list:
 | --- | --- | --- |
 | Type | Search | |
 | **Up**, **Down**, **Ctrl+P**, **Ctrl+N** | Move the highlight | |
-| **Enter** | Open the highlighted conversation | |
-| **Ctrl+D** | Dismiss the row, or bring a closed row back | `threads.activity.choose.dismiss` |
+| **Enter** | Show the row's menu: **Open**, and **Dismiss** or **Restore** for a closed row | |
 | **Esc** | Close the list | |
 
 In the workflow panel:

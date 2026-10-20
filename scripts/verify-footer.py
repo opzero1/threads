@@ -46,10 +46,6 @@ def rect(id):
     return find(state()["tree"], id)
 
 
-def text(id):
-    return (rect(id) or {}).get("text")
-
-
 def native_tabs():
     try:
         return [tab["sessionID"] for tab in json.loads((artifacts / "tabs.json").read_text())["tabs"]]
@@ -93,34 +89,83 @@ def command(name):
     os.write(terminal.master, b"\r")
 
 
+def texts(node=None):
+    node = node if node is not None else state()["tree"]
+    # Text renderables have a foreground; an input's value does not.
+    own = [node] if node.get("text") and node.get("fg") is not None else []
+    return own + [text for child in node["children"] for text in texts(child)]
+
+
+def dialog(title):
+    # A native dialog's title row ends with its "esc" label.
+    nodes = texts()
+    head = next((node for node in nodes if title(node["text"]) and any(
+        other["text"] == "esc" and other["y"] == node["y"] and other["x"] > node["x"] for other in nodes)), None)
+    if head is None:
+        return None
+    below = sorted((node for node in nodes if node["x"] == head["x"] and node["y"] > head["y"]), key=lambda node: node["y"])
+    current = next((node["y"] for node in nodes if node["text"] == "●" and node["x"] < head["x"] and node["y"] > head["y"]), None)
+    return {"title": head["text"], "options": below, "current": current}
+
+
+def listing():
+    return dialog(lambda text: text == "Threads" or text.startswith("Threads · "))
+
+
+option = re.compile(r"(.+) ((?:Needs attention|Running|Main|Finished|Closed)(?: · (?:needs input|running|starting|no report|failed|interrupted|PASS WITH NOTES|PASS|FAIL|INCONCLUSIVE))?)")
+
+
+def rows():
+    found = listing()
+    return [{"title": match[1], "description": match[2], "y": node["y"], "current": node["y"] == found["current"]}
+            for node in (found["options"] if found else []) if (match := option.fullmatch(node["text"]))]
+
+
+def titles():
+    return [item["title"] for item in rows()]
+
+
+def row(title):
+    return next((item for item in rows() if item["title"] == title), None)
+
+
+def description(title):
+    return (row(title) or {}).get("description")
+
+
+def current():
+    return next((item["title"] for item in rows() if item["current"]), None)
+
+
+def menu(title):
+    found = dialog(lambda text: text == title)
+    return [node["text"] for node in found["options"] if node["text"] in ("Open", "Dismiss", "Restore")] if found else None
+
+
 def open_list(keys=b"\x18j"):
     os.write(terminal.master, keys)
-    wait(lambda: "enter Open" in (text("activity-picker-hint") or ""), "Threads list hint")
+    wait(lambda: rows(), "Threads list rows")
 
 
 def close_list():
     os.write(terminal.master, b"\x1b")
-    wait(lambda: rect("activity-picker") is None, "Threads list closed")
+    wait(lambda: listing() is None, "Threads list closed")
 
 
-def search(query, session_id):
-    os.write(terminal.master, b"\x15" + query.encode())
-    wait(lambda: (text(f"activity-picker-title-{session_id}") or "").startswith(">"), f"{query} highlighted")
+def search(title):
+    os.write(terminal.master, b"\x15" + title.encode())
+    wait(lambda: titles()[:1] == [title], f"{title} first in the list")
 
 
-def picker_rows(node=None):
-    node = node or state()["tree"]
-    found = [node["id"]] if node.get("id", "").startswith("activity-picker-row-") else []
-    for child in node["children"]:
-        found += picker_rows(child)
-    return found
-
-
-def row(session_id):
-    tree = state()["tree"]
-    title = find(tree, f"activity-picker-title-{session_id}")
-    subtitle = find(tree, f"activity-picker-subtitle-{session_id}")
-    return None if title is None or title.get("text") is None else {"title": title["text"], "subtitle": (subtitle or {}).get("text"), "y": title["y"]}
+def choose(title, action):
+    # Selecting a row opens a native menu: Open and either Dismiss or Restore.
+    search(title)
+    os.write(terminal.master, b"\r")
+    wait(lambda: (menu(title) or [])[:1] == ["Open"] and (action == "Open" or menu(title) == ["Open", action]), f"{title} menu with {action}")
+    os.write(terminal.master, action.encode())
+    wait(lambda: menu(title) == [action], f"{action} filtered")
+    os.write(terminal.master, b"\r")
+    wait(lambda: menu(title) is None and listing() is None, f"{title} menu closed")
 
 
 def footer_texts(node=None):
@@ -146,11 +191,6 @@ def open_tab(title):
     node = eventually(lambda: tab(state()["tree"]), timeout=10)
     x, y = node["x"] + 2, node["y"] + 1
     os.write(terminal.master, f"\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m".encode())
-
-
-def category_y(name):
-    node = rect(f"activity-picker-category-{name}")
-    return node["y"] if node else None
 
 
 def by_key(key):
@@ -187,7 +227,6 @@ try:
     idle(other)
     idle(local["id"])
     assert worker_view(local["id"], other)["coordinatorID"] == local["id"]
-    unrelated = [local["id"], elsewhere["id"], other]
     cli_path = sandbox.root / "config" / "opencode" / "cli.json"
     cli = json.loads(cli_path.read_text())
     cli["plugins"][0]["options"].update({"tree": True, "openSessionIDs": [elsewhere["id"]]})
@@ -202,16 +241,15 @@ try:
     passed(f"an idle TUI renders no Threads footer indicator and no Activity sidebar on OpenCode {sandbox.api('GET', '/api/info')['version']}")
 
     open_list()
-    wait(lambda: row(coordinator_id) and category_y("Main") is not None and category_y("Main") < row(coordinator_id)["y"], "main conversation listed")
-    shown("Threads · Footer coordinator", "> [Main] Footer coordinator", "ctrl+d Dismiss · enter Open · esc Close")
+    wait(lambda: titles() == ["[Main] Footer coordinator"] and description("[Main] Footer coordinator") == "Main", "main conversation listed")
+    shown("Threads · Footer coordinator", "[Main] Footer coordinator Main")
+    assert current() == "[Main] Footer coordinator", rows()
     assert "Threads · [Main]" not in screen() and "Local history" not in screen() and "Other thread worker" not in screen(), screen()
-    assert picker_rows() == [f"activity-picker-row-{coordinator_id}"], picker_rows()
-    assert all(row(id) is None for id in unrelated), [row(id) for id in unrelated]
     save("list-idle")
     close_list()
-    passed("ctrl+x j opens the Threads list with only the current conversation, titled without its role prefix; other folder sessions, open tabs and other threads' workers stay out, and Escape closes it")
+    passed("ctrl+x j opens the native Threads list with only the current conversation, headed by its title without the role prefix; other folder sessions, open tabs and other threads' workers stay out, and Escape closes it")
     command("/activities")
-    wait(lambda: "enter Open" in (text("activity-picker-hint") or ""), "/activities list")
+    wait(lambda: rows(), "/activities list")
     close_list()
     passed("/activities opens the same list")
 
@@ -242,10 +280,8 @@ try:
     assert rect("threads-footer") is None and not indicator.search(footer()), (footer_texts(), footer())
     save("elsewhere-footer")
     open_list()
-    wait(lambda: row(elsewhere["id"]) and category_y("Main") is not None and category_y("Main") < row(elsewhere["id"])["y"], "unrelated conversation's own thread")
-    shown("Threads · Elsewhere history", "> Elsewhere history")
-    assert picker_rows() == [f"activity-picker-row-{elsewhere['id']}"], picker_rows()
-    assert all(row(id) is None for id in (coordinator_id, one, two)), [row(id) for id in (coordinator_id, one, two)]
+    wait(lambda: titles() == ["Elsewhere history"] and description("Elsewhere history") == "Main", "unrelated conversation's own thread")
+    shown("Threads · Elsewhere history", "Elsewhere history Main")
     assert "Footer worker one" not in screen() and "Footer worker two" not in screen() and "Running" not in screen(), screen()
     save("list-elsewhere")
     close_list()
@@ -257,17 +293,14 @@ try:
     passed("another open conversation without workers shows no Threads footer and lists only its own main row, while the owner still shows 1 worker and 1 needs input")
 
     open_list()
-    wait(lambda: row(one) and row(two), "worker rows")
-    wait(lambda: (row(two)["subtitle"] or "").startswith("needs input") and (row(one)["subtitle"] or "").startswith("running"), "worker states")
-    assert category_y("Needs attention") < row(two)["y"] < category_y("Running") < row(one)["y"] < category_y("Main") < row(coordinator_id)["y"], state()
-    assert all(row(id) is None for id in unrelated), [row(id) for id in unrelated]
-    wait(lambda: "Needs attention" in screen() and re.search(r"Footer worker two[ \t]+needs input\b", screen()), "grouped list on screen")
+    wait(lambda: description("Footer worker two") == "Needs attention · needs input" and description("Footer worker one") == "Running · running", "worker states")
+    assert titles() == ["Footer worker two", "Footer worker one", "Footer coordinator"] and description("Footer coordinator") == "Main", rows()
+    shown("Footer worker two Needs attention · needs input", "Footer worker one Running · running")
     save("list-running")
-    passed("the list groups needs-attention and running workers above the main conversation and leaves other threads out")
-    search("Footer worker one", one)
-    os.write(terminal.master, b"\r")
+    passed("the list orders needs-attention and running workers above the main conversation, with category and state in each description, and leaves other threads out")
+    choose("Footer worker one", "Open")
     wait(lambda: route() == one and one in native_tabs(), "selected worker tab")
-    passed("keyboard selection opens and focuses the worker's tab")
+    passed("Open from a row's menu opens and focuses the worker's tab")
     owner_counts("owner footer counts on the worker tab")
     save("worker-tab-footer")
     passed("the focused worker tab shows its owner's footer counts: 1 worker and 1 needs input")
@@ -275,16 +308,14 @@ try:
     idle(two)
     open_list()
     # The focused route is the worker, so the list must resolve its coordinator's thread.
-    wait(lambda: row(coordinator_id) and row(one) and row(two) and (row(one)["title"] or "").startswith(">") and "Threads · Footer coordinator" in screen(), "coordinator's thread while its worker is focused")
+    wait(lambda: sorted(titles()) == ["Footer coordinator", "Footer worker one", "Footer worker two"] and current() == "Footer worker one"
+         and (listing() or {}).get("title") == "Threads · Footer coordinator", "coordinator's thread while its worker is focused")
     assert route() == one and "Threads · Footer worker one" not in screen(), route()
-    assert category_y("Main") < row(coordinator_id)["y"], state()
-    assert all(row(id) is None for id in unrelated), [row(id) for id in unrelated]
-    shown("Threads · Footer coordinator", "> Footer worker one", "  Footer coordinator", "Footer worker two")
+    shown("Threads · Footer coordinator", "Footer worker one Running", "Footer coordinator Main", "Footer worker two")
     assert "Local history" not in screen() and "Other thread worker" not in screen(), screen()
     save("list-worker-focused")
-    passed("with a worker focused, the list shows its coordinator's thread: the main conversation and its workers, with the worker highlighted")
-    search("Footer coordinator", coordinator_id)
-    os.write(terminal.master, b"\r")
+    passed("with a worker focused, the list shows its coordinator's thread: the main conversation and its workers, with the worker marked current")
+    choose("Footer coordinator", "Open")
     wait(lambda: route() == coordinator_id, "coordinator route")
     assert one in native_tabs() and two not in native_tabs(), native_tabs()
     passed("the list returns to the coordinator while the running worker's opened tab stays open")
@@ -310,28 +341,25 @@ try:
     passed("a list-opened worker tab closes once its report is delivered and it is not focused; the footer clears")
 
     open_list()
-    wait(lambda: row(one) and (row(one)["subtitle"] or "").startswith("FAIL") and (row(two)["subtitle"] or "").startswith("no report"), "finished rows")
-    assert category_y("Main") < row(coordinator_id)["y"] < category_y("Finished") < min(row(one)["y"], row(two)["y"]), state()
-    wait(lambda: "Finished" in screen() and re.search(r"Footer worker one[ \t]+FAIL\b", screen()), "finished rows on screen")
+    wait(lambda: description("Footer worker one") == "Finished · FAIL" and description("Footer worker two") == "Finished · no report", "finished rows")
+    assert titles()[0] == "Footer coordinator", rows()
+    shown("Footer worker one Finished · FAIL")
     save("list-finished")
-    passed("finished workers stay in the list under Finished with their verdict or native outcome")
-    shown("> Footer coordinator", "[Main] Footer coordinator")
+    passed("finished workers stay in the list as Finished with their verdict or native outcome")
+    shown("Footer coordinator Main", "[Main] Footer coordinator")
+    assert row("[Main] Footer coordinator") is None, rows()
     assert "[Main] Footer coordinator" in "\n".join(line[:42] for line in terminal.screen.display), screen()
     assert sandbox.api("GET", f"/api/session/{coordinator_id}")["data"]["title"] == "[Main] Footer coordinator"
     passed("the saved coordinator title and its native tab keep the [Main] prefix, while the list shows the title without it")
-    search("Footer worker one", one)
-    wait(lambda: text(f"activity-picker-title-{one}") == "> Footer worker one" and text("activity-picker-hint") == "ctrl+d Dismiss · enter Open · esc Close", "highlighted title and hint without a pin")
-    os.write(terminal.master, b"\x06")
-    pause(1)
-    assert text(f"activity-picker-title-{one}") == "> Footer worker one" and "Pin" not in text("activity-picker-hint"), (text(f"activity-picker-title-{one}"), text("activity-picker-hint"))
-    assert rect("activity-picker") is not None and route() == coordinator_id
-    os.write(terminal.master, b"\x04")
-    wait(lambda: "Closed" in (row(one)["subtitle"] or "") and "Restore" in text("activity-picker-hint") and category_y("Closed") is not None, "dismiss from the list")
-    os.write(terminal.master, b"\x04")
-    wait(lambda: "Closed" not in (row(one)["subtitle"] or "") and category_y("Closed") is None, "restore from the list")
-    assert rect("activity-picker") is not None and route() == coordinator_id
+    choose("Footer worker one", "Dismiss")
+    open_list()
+    wait(lambda: description("Footer worker one") == "Closed · FAIL" and titles()[-1] == "Footer worker one", "dismissed from its menu")
+    choose("Footer worker one", "Restore")
+    open_list()
+    wait(lambda: description("Footer worker one") == "Finished · FAIL", "restored from its menu")
+    assert route() == coordinator_id, route()
     close_list()
-    passed("ctrl+d dismisses or restores the highlighted row without closing the list or changing focus; ctrl+f no longer pins and the hint omits Pin")
+    passed("a row's menu dismisses a worker to Closed and restores it without changing focus")
 
     provider.responses["FOOTER_THREE"] = {"name": "threads_report", "arguments": {"verdict": "PASS", "summary": "Footer worker three passed", "evidence": ["fixture"]}}
     three = spawn(coordinator_id, "three", "Footer worker three", "FOOTER_THREE")
@@ -339,19 +367,19 @@ try:
     idle(three)
     idle(coordinator_id)
     open_list()
-    wait(lambda: row(one) is not None and row(three) is None, "hidden PASS worker left out of the list", 30)
+    wait(lambda: row("Footer worker one") is not None and row("Footer worker three") is None, "hidden PASS worker left out of the list", 30)
     close_list()
     command("/threads")
-    wait(lambda: row(three) and (row(three)["subtitle"] or "").startswith("PASS"), "/threads restores the hidden worker into the list")
+    wait(lambda: description("Footer worker three") == "Finished · PASS", "/threads restores the hidden worker into the list")
     assert not worker_view(coordinator_id, three)["hidden"] and three not in native_tabs()
-    wait(lambda: re.search(r"Footer worker three[ \t]+PASS\b", screen()), "restored worker on screen")
+    shown("Footer worker three Finished · PASS")
     save("threads-restore")
     close_list()
     passed("/threads restores a hidden PASS worker into the list without opening its tab")
     open_list()
-    search("Footer worker two", two)
-    os.write(terminal.master, b"\x04")
-    wait(lambda: "Closed" in (row(two)["subtitle"] or "") and category_y("Closed") is not None and category_y("Closed") < row(two)["y"], "worker two dismissed before the restart")
+    choose("Footer worker two", "Dismiss")
+    open_list()
+    wait(lambda: description("Footer worker two") == "Closed · no report" and titles()[-1] == "Footer worker two", "worker two dismissed before the restart")
     close_list()
 
     provider.release.clear()
@@ -363,18 +391,12 @@ try:
     wait(lambda: state()["route"].get("type") == "home" and "1 worker" in footer(), "home footer indicator")
     save("home-footer")
     passed("the home footer shows running workers too")
-    open_list()
-    empty = "Open a conversation to see its workers"
-    wait(lambda: text("activity-picker-empty") == empty and empty in screen(), "home list empty message")
-    assert not picker_rows() and "Threads ·" not in screen(), (picker_rows(), screen())
+    os.write(terminal.master, b"\x18j")
+    shown("Open a conversation to see its workers")
+    assert listing() is None and "Threads ·" not in screen(), screen()
     save("list-home")
-    os.write(terminal.master, b"x")
-    wait(lambda: text("activity-picker-empty") == "No matching conversations", "search on the empty home list")
-    os.write(terminal.master, b"\x15")
-    wait(lambda: text("activity-picker-empty") == empty, "home message after clearing the search")
-    close_list()
     assert state()["route"].get("type") == "home"
-    passed("on the home screen the list shows its open-a-conversation message instead of other conversations or the running worker")
+    passed("on the home screen ctrl+x j shows an open-a-conversation notice instead of listing other conversations or the running worker")
     terminal.close(artifacts / "first.txt")
     terminal = None
     # Options left from earlier versions. Both are ignored, so every check below runs with them.
@@ -394,18 +416,17 @@ try:
     save("restart-legacy-options")
     passed('a fresh TUI started with leftover activity: "sidebar" and workerTabs: "auto" options shows the running worker once in the footer, adds no Activity rail, and opens no worker tab')
     open_list()
-    wait(lambda: row(two) and "Closed" in (row(two)["subtitle"] or "") and category_y("Closed") is not None and category_y("Closed") < row(two)["y"], "dismissed worker still closed after the restart")
-    shown("Closed", "· Closed")
+    wait(lambda: description("Footer worker two") == "Closed · no report" and titles()[-1] == "Footer worker two", "dismissed worker still closed after the restart")
+    shown("Footer worker two Closed · no report")
     save("list-restart")
     close_list()
     command("/threads")
-    wait(lambda: row(two) and "Closed" not in (row(two)["subtitle"] or "") and category_y("Closed") is None, "/threads restores the dismissed worker")
+    wait(lambda: description("Footer worker two") == "Finished · no report", "/threads restores the dismissed worker")
     assert two not in native_tabs(), native_tabs()
     close_list()
     passed("a dismissed worker stays under Closed after a TUI restart until /threads restores it")
     open_list()
-    search("Footer worker four", four)
-    os.write(terminal.master, b"\r")
+    choose("Footer worker four", "Open")
     wait(lambda: route() == four and four in native_tabs(), "list-opened tab of the running worker")
     provider.release.set()
     eventually(lambda: (worker_view(coordinator_id, four)["report"] or {}).get("verdict") == "FAIL", timeout=60)
@@ -417,8 +438,7 @@ try:
     save("reported-tab-focused")
     passed("a reported worker's list-opened tab stays open while it is focused")
     open_list()
-    search("Footer coordinator", coordinator_id)
-    os.write(terminal.master, b"\r")
+    choose("Footer coordinator", "Open")
     wait(lambda: route() == coordinator_id and four not in native_tabs(), "list-opened tab closed after focus moved away", 30)
     assert not worker_view(coordinator_id, four)["hidden"]
     passed("that tab closes once focus moves to another conversation")
@@ -438,10 +458,10 @@ try:
     assert five not in native_tabs() and route() == coordinator_id, (native_tabs(), route())
     assert not rails and rect("op-threads-activity") is None, rails
     open_list()
-    wait(lambda: row(five) and row(coordinator_id) and (row(five)["subtitle"] or "").startswith("running") and category_y("Running") < row(five)["y"] < category_y("Main") < row(coordinator_id)["y"] and "Threads · Footer coordinator" in screen(), "thread list with the leftover options")
-    assert all(row(id) is None for id in unrelated), [row(id) for id in unrelated]
-    shown("Threads · Footer coordinator", "> Footer coordinator", "ctrl+d Dismiss · enter Open · esc Close")
-    assert row(five)["subtitle"] == "running", row(five)
+    wait(lambda: description("Footer worker five") == "Running · running" and (listing() or {}).get("title") == "Threads · Footer coordinator", "thread list with the leftover options")
+    assert titles().index("Footer worker five") < titles().index("Footer coordinator") and current() == "Footer coordinator", rows()
+    assert not {"Local history", "Elsewhere history", "Other thread worker"} & set(titles()), rows()
+    shown("Threads · Footer coordinator", "Footer worker five Running · running")
     assert "Local history" not in screen() and "Other thread worker" not in screen(), screen()
     save("legacy-options-list")
     close_list()
@@ -452,8 +472,7 @@ try:
     wait(lambda: not indicator.search(footer()) and five not in native_tabs(), "footer cleared after the PASS worker", 30)
     # Worker one has reported, so this tab is not list-opened; only the hidden rule can close it.
     open_list()
-    search("Footer worker one", one)
-    os.write(terminal.master, b"\r")
+    choose("Footer worker one", "Open")
     wait(lambda: route() == one and one in native_tabs(), "reported worker tab opened from the list")
     provider.responses["FOOTER_HIDE_ONE"] = tool_call("threads_hide", {"workerID": one})
     sandbox.api("POST", f"/api/session/{coordinator_id}/prompt", {"text": "FOOTER_HIDE_ONE"})
@@ -462,17 +481,22 @@ try:
     pause(4)
     assert route() == one and one in native_tabs(), (route(), native_tabs())
     open_list()
-    search("Footer coordinator", coordinator_id)
-    os.write(terminal.master, b"\r")
+    choose("Footer coordinator", "Open")
     wait(lambda: route() == coordinator_id and one not in native_tabs(), "hidden worker tab closed after focus moved away", 30)
     passed("a hidden worker's tab stays open while it is focused and closes once focus moves away")
     open_list()
-    wait(lambda: row(two) is not None and row(one) is None, "worker two listed before its deletion")
+    wait(lambda: row("Footer worker two") is not None and row("Footer worker one") is None, "worker two listed before its deletion")
+    search("Footer worker two")
     sandbox.api("DELETE", f"/api/session/{two}")
-    wait(lambda: row(two) is None and row(coordinator_id) is not None, "deleted worker removed from the open list")
-    assert rect("activity-picker") is not None and "Threads:" not in screen(), screen()
+    pause(3)
+    os.write(terminal.master, b"\r")
+    wait(lambda: listing() is None, "stale list closed")
+    pause(2)
+    assert menu("Footer worker two") is None and "Threads:" not in screen(), screen()
+    open_list()
+    wait(lambda: row("Footer worker two") is None and row("Footer coordinator") is not None, "deleted worker left out of the list")
     close_list()
-    passed("deleting a worker's session removes its row from the open list without an error")
+    passed("choosing a worker whose session was deleted while the list was open does nothing and shows no error; the next list leaves it out")
 finally:
     if terminal:
         terminal.close(artifacts / "terminal.txt")
