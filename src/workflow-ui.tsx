@@ -223,7 +223,7 @@ export function workflowUI(ctx: Plugin.Context, fallbackColor: RGBA) {
             <Show when={run().steps.length > 0}><text>↑/↓ select step · Enter open worker</text></Show>
             <Show when={run().error}><text>{`Error: ${run().error}`}</text></Show>
             <For each={run().steps}>{(step, index) => <box flexDirection="column" border={true} padding={1} onMouseUp={() => { setStepIndex(index()); openStep(); }}>
-              <text>{index() === stepIndex() ? "› " : "  "}<b>{step.input.label ?? step.key}</b>{` · ${step.status}`}</text>
+              <text>{index() === stepIndex() ? "› " : "  "}<b>{step.input.label ?? step.key}</b>{` · ${step.status === "prepared" ? "queued" : step.status}`}</text>
               <text>{`${step.phase} · ${step.input.agent} · ${step.model.providerID}/${step.model.id}`}</text>
               <text>{ctx.ui.format.path(step.directory)}</text>
               <Show when={step.status === "completed" && step}>{(done: Accessor<Extract<WorkflowRun["steps"][number], { status: "completed" }>>) => <>
