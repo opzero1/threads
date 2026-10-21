@@ -5,11 +5,11 @@ import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import { parseWorkflow } from "./workflow-runtime";
 
-const Name = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/)
-  .refine((name) => name !== "run" && name !== "refresh", "This name is reserved for a workflow command");
+const Name = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/);
 export const SavedWorkflow = z.object({
   name: Name,
   description: z.string(),
+  whenToUse: z.string().optional(),
   path: z.string(),
   scope: z.enum(["project", "user"]),
 });
@@ -42,13 +42,13 @@ export function savedWorkflows(directory: string, canonical: string) {
           const info = await present(path);
           if (!info?.isFile() || info.isSymbolicLink()) continue;
           const script = await readFile(path, "utf8");
-          let description: string;
+          let meta: { description: string; whenToUse?: string };
           try {
-            description = parseWorkflow(script).meta.description;
+            meta = parseWorkflow(script).meta;
           } catch (error) {
-            description = `Invalid workflow: ${String(error)}`;
+            meta = { description: `Invalid workflow: ${String(error)}` };
           }
-          found.set(name, { name, description, path, scope: root.scope });
+          found.set(name, { name, description: meta.description, whenToUse: meta.whenToUse, path, scope: root.scope });
         }
       }
       return [...found.values()];
@@ -64,7 +64,7 @@ export function savedWorkflows(directory: string, canonical: string) {
         await file.close();
       }
     },
-    async save(name: string, script: string, scope: "project" | "user") {
+    async save(name: string, script: string, scope: "project" | "user", overwrite = false) {
       Name.parse(name);
       parseWorkflow(script);
       const root = scope === "project" ? project : user;
@@ -75,7 +75,7 @@ export function savedWorkflows(directory: string, canonical: string) {
       }
       await mkdir(root, { recursive: true, mode: 0o700 });
       const path = join(root, `${name}.js`);
-      const file = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+      const file = await open(path, constants.O_WRONLY | constants.O_CREAT | (overwrite ? constants.O_TRUNC : constants.O_EXCL) | constants.O_NOFOLLOW, 0o600);
       try {
         await file.writeFile(script, "utf8");
         await file.sync();

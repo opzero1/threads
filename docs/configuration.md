@@ -91,8 +91,6 @@ Local and published installs share the plugin ID `op-threads`, so switching betw
 | `/threads` | Bring back hidden and dismissed workers, then open the Threads list. |
 | `/workflow-run <task>` | Ask the agent to write and start a workflow. |
 | `/workflows` | Open the workflow navigator. |
-| `/workflow-<name>` | Run a saved workflow with new input. |
-| `/workflow-refresh` | Reload saved workflow commands after you edit their files. |
 
 `ctrl+x` is OpenCode's default leader key, so the list shortcut is `<leader>j`.
 

@@ -100,13 +100,13 @@ Prune covers every finished run in the current conversation's project, whichever
 3. Enter a new name.
 4. Select **Project** or **User**.
 
-The saved file contains the script. Run arguments and worker conversations stay in the original run. Existing files are not overwritten.
+The saved file contains the script. Run arguments and worker conversations stay in the original run. Existing files are not overwritten; the `workflows_save` tool replaces one only with `overwrite: true`.
 
-Invoke `/workflow-<name>` to reuse the script with new input. Project scripts live in `.opencode/workflows/`. Personal scripts live in the `workflows/` directory under your OpenCode configuration.
+To reuse a script with new input, ask the agent to run the saved workflow by name. It finds it with `workflows_saved` and starts it with `workflows_start`. Project scripts live in `.opencode/workflows/`. Personal scripts live in the `workflows/` directory under your OpenCode configuration.
 
 An edited script starts a new run. A run's script and arguments remain fixed so resuming it cannot silently reuse results from different instructions.
 
-After editing a saved file directly, run `/workflow-refresh` to reload its command. The names `run` and `refresh` are reserved.
+Add an optional `whenToUse` string to `meta` to help the agent choose between saved workflows.
 
 ## Use VERA roles
 
