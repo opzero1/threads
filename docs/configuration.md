@@ -47,11 +47,11 @@ Values passed to `workflows_start` override configured workflow values. Task bud
 
 With `workflowWorktreeCleanup` set to `false`, finished runs keep all their step worktrees until you run `workflows_prune`. The setting affects only runs that end while it applies. See [clean up worktrees](workflows.md#clean-up-worktrees).
 
-### Review workflow runs
+### Control workflow starts
 
 Agents start a workflow only when you ask for one, run `/workflow-run` or a saved workflow, or a loaded skill says to. Otherwise they propose the workflow and ask in the conversation.
 
-OpenCode 2.1.1 can't prompt you before each run. An `ask` rule for `workflows_start` has no effect, and the run starts without a prompt. To turn off workflow starts, deny the tool:
+Threads doesn't ask OpenCode for permission before a run, so an `ask` rule for `workflows_start` has no effect and the run starts without a prompt. To turn off workflow starts, deny the tool:
 
 ```jsonc
 {
