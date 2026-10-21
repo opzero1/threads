@@ -39,7 +39,7 @@ Press `x` to stop the run and interrupt its active workers. Completed results re
 
 Press `r` to resume. For a waiting checkpoint, enter a JSON response. For example, enter `true`, `42`, or a quoted string.
 
-To continue after a stop, a failure, or a script fix, ask the agent to start a new run with `resumeFrom` set to the earlier run's ID. The earlier run must be stopped, failed, or completed. The new run reuses the earlier run's completed steps whose key and input are unchanged, and runs the rest live. See [start and control](../skills/workflow-authoring/references/runtime.md#start-and-control).
+To continue after a stop, a failure, or a script fix, ask the agent to start a new run with `resumeFrom` set to the earlier run's ID. The earlier run must be stopped, failed, or completed. The new run reuses the earlier run's completed steps whose key, input, and agent profile are unchanged, and runs the rest live. See [start and control](../skills/workflow-authoring/references/runtime.md#start-and-control).
 
 Checkpoint and interruption notices reach the coordinator conversation with the run ID and the next control action. Inspect the run before responding or resuming.
 
