@@ -5,6 +5,7 @@ import { SessionMessage } from "@opencode/schema/session-message";
 import Ajv from "ajv";
 import type { z } from "zod";
 import { parseWorkflow, validateBody, executeWorkflow, type WorkflowHost } from "./workflow-runtime";
+import { bounded, LOG_LIMIT, PHASE_LIMIT } from "./workflow-runtime-protocol";
 import { withResolvedGrants } from "./external-access";
 import { requireDelegation } from "./permissions";
 import {
@@ -63,7 +64,6 @@ const terminal = new Set(["stopped", "failed", "completed"]);
 const activeStatus = new Set(["running", "pausing", "stopping", "waiting"]);
 const settlementLimit = 16 * 1024 * 1024;
 const cleanupDisposeLimit = 2_000;
-const bounded = (text: string, length = 20_000) => text.length <= length ? text : `${text.slice(0, length)}\n…[truncated]`;
 const boundedBytes = (text: string, limit: number) => {
   if (Buffer.byteLength(JSON.stringify(text), "utf8") - 2 <= limit) return text;
   const suffix = "\n…[truncated]";
@@ -534,8 +534,8 @@ export function workflowEngine(
         }
       }
     };
-    const hostFor = (prefix: string, depth: number): WorkflowHost => ({
-      agent: async (raw) => {
+    const hostFor = (prefix: string, depth: number, initialPhase: string): WorkflowHost => ({
+      agent: async (raw, _signal, phase = initialPhase) => {
         const parsed = WorkflowAgentInput.parse(raw);
         if (parsed.schema !== undefined) ajv.compile(parsed.schema);
         const key = `${prefix}${parsed.key}`;
@@ -600,7 +600,7 @@ export function workflowEngine(
               workerID: workerIdentity(current.ownerID, spawnKey),
               spawnKey,
               created: Date.now(),
-              phase: input.phase ?? current.phase,
+              phase: input.phase ?? phase,
               directory: plan.directory,
               model: sourceModel,
               profileFingerprint: `pending:${sourceProfileFingerprint}`,
@@ -924,12 +924,12 @@ export function workflowEngine(
         }
       },
       phase: async (title) => {
-        const phase = bounded(String(title), 160);
+        const phase = bounded(String(title), PHASE_LIMIT);
         await store.update(runID, (current) => { current.phase = phase; });
       },
       log: async (message) => {
         await store.update(runID, (current) => {
-          current.logs.push({ time: Date.now(), text: bounded(String(message), 2_000) });
+          current.logs.push({ time: Date.now(), text: bounded(String(message), LOG_LIMIT) });
           if (current.logs.length > 200) current.logs.splice(0, current.logs.length - 200);
         });
       },
@@ -990,7 +990,7 @@ export function workflowEngine(
           await waitForChange(runID, controller.signal);
         }
       },
-      workflow: async (input) => {
+      workflow: async (input, _signal, phase = initialPhase) => {
         if (depth >= 4) throw new Error("Nested workflow depth limit reached (4)");
         if (!options.loadSaved) throw new Error("Saved workflow loading is not configured");
         const scope = `${prefix}workflow:${input.name}`;
@@ -1024,7 +1024,7 @@ export function workflowEngine(
           script,
           args: input.args ?? null,
           signal: controller.signal,
-          host: hostFor(`${prefix}workflow:${input.name}:${index}/`, depth + 1),
+          host: hostFor(`${prefix}workflow:${input.name}:${index}/`, depth + 1, phase),
           timeoutMs: remaining,
         });
       },
@@ -1032,7 +1032,7 @@ export function workflowEngine(
     try {
       const output = await executeWorkflow({
         script: run.script, args: run.args, signal: controller.signal,
-        host: hostFor("", 0), timeoutMs: remaining,
+        host: hostFor("", 0, parseWorkflow(run.script).meta.phases?.[0]?.title ?? "Starting"), timeoutMs: remaining,
       });
       const latest = await store.get(runID);
       if (latest.status === "stopping" || latest.status === "stopped") {

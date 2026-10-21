@@ -12,7 +12,7 @@ For work across repositories, put the coordinator session in a directory that co
 When a step needs a directory outside its location, such as a reference repository, list it in the step's `paths`. The worker can then use that directory and its subdirectories without asking, within its `access`: a read step still cannot edit files or run commands there. A step's `directory` may also be inside a granted path if its whole project, meaning its git worktree or the directory itself outside a repository, is granted and no explicit `external_directory` deny matches anything in it. Explicit `external_directory` denies from the coordinator or the role still win. Without a grant, a directory that the coordinator would have to approve raises an approval request in a write worker's tab, and the step waits for the answer. Read steps follow their role's `external_directory` rules.
 
 1. Define the result, named slices, and verification predicate. For VERA tasks, retain the selected protocol and role profiles.
-2. Read [the runtime contract](references/runtime.md). Write a script with a literal `export const meta` first, named agent steps, and a final JSON result.
+2. Read [the runtime contract](references/runtime.md). Write a script with a literal `export const meta` first, agent steps, and a final JSON result.
 3. Call `workflows_start` with a unique task key, `script` or saved `name`, JSON `args`, and suitable concurrency. Omit task budgets unless the user requested them. It returns immediately.
 4. Continue independent work. The runner delivers a final notification. Use `tools.workflows.inspect` for evidence and `tools.workflows.control` for pause, stop, resume, and checkpoint responses. Never infer success from an idle worker. After a stop, a failure, or a script fix, start a new run with a new key and `resumeFrom: <runID>` to reuse that run's completed steps whose key and input are unchanged.
 5. Inspect the result and the affected artifacts before giving the final verdict. Save a useful script with `tools.workflows.save`; its arguments and transcripts are not saved with it.
@@ -39,11 +39,10 @@ export const meta = {
   description: "Audit named modules and return source-backed findings",
 };
 
-await phase("Audit");
+phase("Audit");
 const findings = await pipeline(args.modules, module => agent(
   `Audit ${module} for ${args.check}. Read the actual source. Return concrete findings with paths and line numbers.`,
   {
-    key: `audit:${module}`,
     agent: "vera-engineer-readonly",
     access: "read",
     schema: {

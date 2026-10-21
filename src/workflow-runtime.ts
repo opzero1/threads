@@ -6,15 +6,20 @@ import {
   boundedDiagnostic,
   type HostMethod,
   type ParentToWorker,
+  type ScriptState,
   type WorkerToParent,
 } from "./workflow-runtime-protocol";
 
+/**
+ * `phase` and `log` record display state. The script's current phase, if it set one,
+ * arrives as the third argument of `agent` and `workflow`.
+ */
 export type WorkflowHost = {
-  agent(input: unknown, signal?: AbortSignal): Promise<unknown>;
+  agent(input: unknown, signal?: AbortSignal, phase?: string): Promise<unknown>;
   phase(title: string, signal?: AbortSignal): Promise<void>;
   log(message: string, signal?: AbortSignal): Promise<void>;
   checkpoint(input: unknown, signal?: AbortSignal): Promise<unknown>;
-  workflow(input: { name: string; args?: unknown }, signal?: AbortSignal): Promise<unknown>;
+  workflow(input: { name: string; args?: unknown }, signal?: AbortSignal, phase?: string): Promise<unknown>;
 };
 
 type ExecuteInput = {
@@ -82,21 +87,33 @@ export async function executeWorkflow(input: ExecuteInput): Promise<unknown> {
     timer = setTimeout(() => stop(new Error(`Workflow execution timed out after ${timeoutMs}ms`)), timeoutMs);
   }
 
-  const invokeHost = (method: HostMethod, value: unknown): Promise<unknown> => {
+  const invokeHost = (method: HostMethod, value: unknown, phase: string | undefined): Promise<unknown> => {
     switch (method) {
-      case "agent": return input.host.agent(value, hostController.signal);
-      case "phase": return input.host.phase(value as string, hostController.signal);
-      case "log": return input.host.log(value as string, hostController.signal);
+      case "agent": return input.host.agent(value, hostController.signal, phase);
       case "checkpoint": return input.host.checkpoint(value, hostController.signal);
-      case "workflow": return input.host.workflow(value as { name: string; args?: unknown }, hostController.signal);
+      case "workflow": return input.host.workflow(value as { name: string; args?: unknown }, hostController.signal, phase);
     }
+  };
+  let delivered: Promise<void> = Promise.resolve();
+  const deliver = (state: ScriptState): Promise<void> => {
+    delivered = delivered.then(async () => {
+      if (!settled && state.newPhase && state.phase !== undefined) await input.host.phase(state.phase, hostController.signal);
+      for (const message of state.logs) {
+        if (settled) return;
+        await input.host.log(message, hostController.signal);
+      }
+    });
+    return delivered;
   };
 
   worker.onmessage = (event: MessageEvent<WorkerToParent>) => {
     const message = event.data;
     if (message.type === "hostCall") {
       if (!acceptingCalls) return;
-      const operation = Promise.resolve().then(() => invokeHost(message.method, message.input)).then(
+      const operation = deliver(message).then(() => {
+        if (settled) throw abortError(hostController.signal);
+        return invokeHost(message.method, message.input, message.phase);
+      }).then(
         (value) => {
           if (!acceptingCalls) return;
           try {
@@ -116,13 +133,14 @@ export async function executeWorkflow(input: ExecuteInput): Promise<unknown> {
       void tracked.finally(() => operations.delete(tracked));
       return;
     }
-    if (message.type !== "result" || settled) return;
-    settled = true;
+    // Stay unsettled while trailing state is delivered, so abort and timeout still apply.
+    if (message.type !== "result" || !acceptingCalls) return;
     acceptingCalls = false;
-    if (message.ok) resolveResult(message.value);
+    if (message.ok) void deliver(message).then(() => resolveResult(message.value), rejectResult);
     else {
       hostController.abort(new Error(message.error));
-      rejectResult(new Error(message.error));
+      const fail = () => rejectResult(new Error(message.error));
+      void deliver(message).then(fail, fail);
     }
   };
   worker.onerror = (event: ErrorEvent) => stop(new Error(boundedDiagnostic(event.error ?? event.message)));

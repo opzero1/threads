@@ -1606,6 +1606,82 @@ return await parallel(Array.from({ length: 8 }, (_, index) => () => agent("Read"
     }
   });
 
+  test("keeps each nested workflow's phase local and still displays the latest phase", async () => {
+    const fixture = await harness("valid");
+    fixture.setSaved("phased", `export const meta = { name: "phased", description: "sets a phase" };
+phase("Child");
+await agent("child", { key: "c", agent: "analyst" });
+return true;`);
+    fixture.setSaved("plain", `export const meta = { name: "plain", description: "inherits a phase" };
+await agent("plain", { key: "c", agent: "analyst" });
+return true;`);
+    try {
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "nested-phase", script: `
+export const meta = { name: "parent", description: "nested phases", phases: [{ title: "Prepare" }] };
+await agent("before", { key: "p0", agent: "analyst" });
+phase("Parent");
+await workflow("phased");
+await parallel([() => workflow("plain"), () => agent("sibling", { key: "p1", agent: "analyst" })]);
+phase("Report");
+log("done");
+return true;` }), { agent: "caller", model: { providerID: "test", id: "model" } });
+      const run = await settled(fixture.api, fixture.ownerID, started.id);
+      expect(run.status).toBe("completed");
+      expect(Object.fromEntries(run.steps.map((step) => [step.key, step.phase]))).toEqual({
+        p0: "Prepare", "workflow:phased:0/c": "Child", "workflow:plain:0/c": "Parent", p1: "Parent",
+      });
+      expect(run.phase).toBe("Report");
+      expect(run.logs.map((entry) => entry.text)).toEqual(["done"]);
+    } finally { await fixture.api.dispose(); }
+  });
+
+  test("a repeated parent phase replaces a child's displayed phase", async () => {
+    const fixture = await harness("valid");
+    fixture.setSaved("phased", `export const meta = { name: "phased", description: "sets a phase" };
+phase("Child");
+await agent("child", { key: "c", agent: "analyst" });
+return true;`);
+    try {
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "repeat-phase", script: `
+export const meta = { name: "parent", description: "repeats a phase" };
+phase("Parent");
+await workflow("phased");
+phase("Parent");
+return true;` }), { agent: "caller", model: { providerID: "test", id: "model" } });
+      const run = await settled(fixture.api, fixture.ownerID, started.id);
+      expect(run.status).toBe("completed");
+      expect(run.phase).toBe("Parent");
+    } finally { await fixture.api.dispose(); }
+  });
+
+  test("keyless agents in a parallel fan-out get distinct keys that replay after restart", async () => {
+    const fixture = await harness("manual", 4);
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "keyless", concurrency: 3, script: `
+export const meta = { name: "keyless", description: "derived keys" };
+return await parallel([
+  () => agent("same", { agent: "analyst" }),
+  () => agent("same", { agent: "analyst" }),
+  () => agent("other", { agent: "analyst" }),
+]);` }), { agent: "caller", model: { providerID: "test", id: "model" } });
+    while (fixture.spawnedStepKeys.length < 3) await Bun.sleep(2);
+    const keys = [...fixture.spawnedStepKeys];
+    expect(new Set(keys).size).toBe(3);
+    for (const key of keys) expect(key).toMatch(/^auto~[0-9a-f]{16}~[01]$/);
+    await fixture.complete(keys[0]!);
+    await fixture.api.dispose();
+    const reopened = fixture.reopen();
+    try {
+      await reopened.control(fixture.ownerID, { runID: started.id, action: "resume" });
+      while (fixture.spawnedStepKeys.length < 5) await Bun.sleep(2);
+      expect(new Set(fixture.spawnedStepKeys)).toEqual(new Set(keys));
+      for (const key of keys.slice(1)) await fixture.complete(key);
+      const run = await settled(reopened, fixture.ownerID, started.id);
+      expect(run.status).toBe("completed");
+      expect(run.steps.map((step) => step.key).sort()).toEqual([...keys].sort());
+      expect((run.result as string[]).slice().sort()).toEqual([...keys].sort());
+    } finally { await reopened.dispose(); }
+  });
+
   test("pins nested workflow source across restart", async () => {
     const fixture = await harness("valid");
     fixture.setSaved("child", `export const meta = { name: "child", description: "v1" }; return "v1";`);
