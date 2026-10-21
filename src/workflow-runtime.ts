@@ -6,7 +6,6 @@ import {
   boundedDiagnostic,
   type HostMethod,
   type ParentToWorker,
-  type ScriptState,
   type WorkerToParent,
 } from "./workflow-runtime-protocol";
 
@@ -94,23 +93,30 @@ export async function executeWorkflow(input: ExecuteInput): Promise<unknown> {
       case "workflow": return input.host.workflow(value as { name: string; args?: unknown }, hostController.signal, phase);
     }
   };
+  // Progress reaches the host in the order the script sent it, and a host call or the result
+  // waits for the progress sent before it. A delivery failure reaches the script through its
+  // next host call or its result.
+  const outstanding = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+  const settleProgress = () => { Atomics.sub(outstanding, 0, 1); };
   let delivered: Promise<void> = Promise.resolve();
-  const deliver = (state: ScriptState): Promise<void> => {
-    delivered = delivered.then(async () => {
-      if (!settled && state.newPhase && state.phase !== undefined) await input.host.phase(state.phase, hostController.signal);
-      for (const message of state.logs) {
-        if (settled) return;
-        await input.host.log(message, hostController.signal);
-      }
-    });
-    return delivered;
-  };
 
   worker.onmessage = (event: MessageEvent<WorkerToParent>) => {
     const message = event.data;
+    if (message.type === "progress") {
+      if (!acceptingCalls) return;
+      delivered = delivered.then(async () => {
+        if (!settled && message.phase !== undefined) await input.host.phase(message.phase, hostController.signal);
+        for (const line of message.logs) {
+          if (settled) return;
+          await input.host.log(line, hostController.signal);
+        }
+      });
+      void delivered.then(settleProgress, settleProgress);
+      return;
+    }
     if (message.type === "hostCall") {
       if (!acceptingCalls) return;
-      const operation = deliver(message).then(() => {
+      const operation = delivered.then(() => {
         if (settled) throw abortError(hostController.signal);
         return invokeHost(message.method, message.input, message.phase);
       }).then(
@@ -136,17 +142,17 @@ export async function executeWorkflow(input: ExecuteInput): Promise<unknown> {
     // Stay unsettled while trailing state is delivered, so abort and timeout still apply.
     if (message.type !== "result" || !acceptingCalls) return;
     acceptingCalls = false;
-    if (message.ok) void deliver(message).then(() => resolveResult(message.value), rejectResult);
+    if (message.ok) void delivered.then(() => resolveResult(message.value), rejectResult);
     else {
       hostController.abort(new Error(message.error));
       const fail = () => rejectResult(new Error(message.error));
-      void deliver(message).then(fail, fail);
+      void delivered.then(fail, fail);
     }
   };
   worker.onerror = (event: ErrorEvent) => stop(new Error(boundedDiagnostic(event.error ?? event.message)));
 
   try {
-    worker.postMessage({ type: "start", script: input.script, args: input.args, timeoutMs } satisfies ParentToWorker);
+    worker.postMessage({ type: "start", script: input.script, args: input.args, timeoutMs, outstanding } satisfies ParentToWorker);
     return await result;
   } finally {
     acceptingCalls = false;

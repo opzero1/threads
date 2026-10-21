@@ -51,10 +51,10 @@ The runner resolves symlinks, removes duplicates, sorts the list, and records it
 - `pipeline(items, ...stages)` runs each item through its stages independently. A fast item does not wait for slower items between stages. Each stage is called as `stage(value, item, index)`: the previous stage's result (the item for the first stage), the original item, and its index. Failures settle and rethrow as in `parallel`.
 - `phase(title)` sets the phase of later `agent()` calls in the current workflow and the run's displayed phase. A nested workflow starts in its caller's current phase, and its `phase()` calls don't change the caller's phase.
 - `log(message)` records a bounded progress message. The run keeps its latest 200 lines.
-
-`phase()` and `log()` return immediately without a host call, so `await` is optional. Their state reaches the run with the script's next `agent()`, `checkpoint()`, or `workflow()` call, or when the script returns.
 - `workflow(name, args)` invokes a saved workflow within the parent's limits.
 - `checkpoint(prompt, { key, reviewer? })` records a question and waits for an explicit response through the run controls. `reviewer` is `"human"` by default; `"coordinator"` allows heartbeat reminders for an authorized coordinator review. Neither value supplies a response or changes the control permissions. The response becomes recorded input on resume. Responses are limited to 1 MiB and must fit in the aggregate journal. Rejected responses leave the checkpoint unanswered so a smaller response can be submitted.
+
+`phase()` and `log()` return immediately without waiting for the host, so `await` is optional. Their updates reach the run in order while the script keeps running, even during a long computation or a wait on another call. If the run falls behind, the script holds the latest phase and up to 200 unsent lines. It sends them when a later `phase()` or `log()` call finds the run caught up or while the script waits on a pending call, and always before its next `agent()`, `checkpoint()`, or `workflow()` call or its result. Updates still held when the run stops during a long computation are lost.
 
 Errors remain errors unless the script explicitly handles them. Do not discard failed items or substitute a passing result for missing evidence.
 

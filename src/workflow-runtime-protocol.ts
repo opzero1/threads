@@ -6,19 +6,20 @@ export type HostMethod = "agent" | "checkpoint" | "workflow";
 export const PHASE_LIMIT = 160;
 export const LOG_LIMIT = 2_000;
 
-// phase() and log() make no host call; their state travels with the next message.
-// newPhase is true when phase() was called since the previous message.
-export type ScriptState = { phase?: string; newPhase: boolean; logs: string[] };
-
+// `outstanding` counts the progress messages the worker has sent whose delivery to the host has
+// not settled. It is shared memory, so the worker can read it while the script runs synchronously.
 export type ParentToWorker =
-  | { type: "start"; script: string; args: unknown; timeoutMs?: number }
+  | { type: "start"; script: string; args: unknown; timeoutMs?: number; outstanding: Int32Array }
   | { type: "hostResult"; id: number; ok: true; value: unknown }
   | { type: "hostResult"; id: number; ok: false; error: string };
 
+// phase() and log() send progress without waiting for the host. hostCall carries the
+// script's current phase, which labels the agent or workflow it starts.
 export type WorkerToParent =
-  | ({ type: "hostCall"; id: number; method: HostMethod; input: unknown } & ScriptState)
-  | ({ type: "result"; ok: true; value: unknown } & ScriptState)
-  | ({ type: "result"; ok: false; error: string } & ScriptState);
+  | { type: "progress"; phase?: string; logs: string[] }
+  | { type: "hostCall"; id: number; method: HostMethod; input: unknown; phase?: string }
+  | { type: "result"; ok: true; value: unknown }
+  | { type: "result"; ok: false; error: string };
 
 export const bounded = (text: string, length = 20_000) => text.length <= length ? text : `${text.slice(0, length)}\n…[truncated]`;
 

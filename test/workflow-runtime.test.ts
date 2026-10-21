@@ -127,6 +127,63 @@ describe("real CodeMode workflow execution", () => {
     expect((await failure(run(`phase(1);`))).message).toContain("phase title must be a string");
   });
 
+  test("phase() and log() reach the host while the script computes or waits on another call", async () => {
+    const seen: string[] = [];
+    let reached!: () => void;
+    let logged = new Promise<void>((resolve) => { reached = resolve; });
+    const arrives = (promise: Promise<void>) => Promise.race([
+      promise,
+      Bun.sleep(5_000).then(() => { throw new Error("log() did not reach the host"); }),
+    ]);
+    const record = host({
+      phase: async (title) => { seen.push(`phase:${title}`); },
+      log: async (message) => { seen.push(`log:${message}`); reached(); },
+    });
+    const controller = new AbortController();
+    const busy = failure(run(`phase("Busy"); log("cpu-started"); while (true) {}`, { host: record, signal: controller.signal }));
+    try {
+      await arrives(logged);
+    } finally {
+      controller.abort(new Error("stop computing"));
+      await busy;
+    }
+    expect(seen).toEqual(["phase:Busy", "log:cpu-started"]);
+    expect((await busy).message).toContain("stop computing");
+
+    seen.length = 0;
+    logged = new Promise<void>((resolve) => { reached = resolve; });
+    let releaseA!: () => void;
+    const heldA = new Promise<void>((resolve) => { releaseA = resolve; });
+    const waiting = run(`await parallel([
+      async () => { await checkpoint("A", { key: "a" }); },
+      async () => { await checkpoint("B", { key: "b" }); log("b-observed"); },
+    ]); return 1;`, { host: { ...record, checkpoint: async (input) => {
+      if ((input as { prompt: string }).prompt === "A") await heldA;
+    } } }).then((value) => ({ value }), (error: unknown) => ({ error }));
+    try {
+      await arrives(logged);
+    } finally {
+      releaseA();
+      await waiting;
+    }
+    expect(seen).toEqual(["log:b-observed"]);
+    expect(await waiting).toEqual({ value: 1 });
+  }, 15_000);
+
+  test("a script that logs faster than the host keeps the latest lines in order", async () => {
+    const lines: number[] = [];
+    const value = await run(`for (let i = 0; i < 2000; i++) log(String(i)); return 1;`, {
+      host: host({ log: async (message) => {
+        lines.push(Number(message));
+        if (message === "0") await Bun.sleep(500);
+      } }),
+    });
+    expect(value).toBe(1);
+    expect(lines.at(-1)).toBe(1_999);
+    expect(lines.length).toBeLessThan(2_000);
+    expect(lines.every((line, index) => index === 0 || line > lines[index - 1]!)).toBe(true);
+  });
+
   test("announces every phase() call, including a repeat of the current phase", async () => {
     const phases: string[] = [];
     await run(`phase("Parent"); await workflow("child"); phase("Parent"); return 1;`, {
