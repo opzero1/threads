@@ -39,6 +39,8 @@ Press `x` to stop the run and interrupt its active workers. Completed results re
 
 Press `r` to resume. For a waiting checkpoint, enter a JSON response. For example, enter `true`, `42`, or a quoted string.
 
+To continue after a stop, a failure, or a script fix, ask the agent to start a new run with `resumeFrom` set to the earlier run's ID. The earlier run must be stopped, failed, or completed. The new run reuses the earlier run's completed steps whose key and input are unchanged, and runs the rest live. See [start and control](../skills/workflow-authoring/references/runtime.md#start-and-control).
+
 Checkpoint and interruption notices reach the coordinator conversation with the run ID and the next control action. Inspect the run before responding or resuming.
 
 After a service restart, reopen the original conversation and select the run with `/workflows`. Resume reconciles its existing sessions before scheduling more work. It does not assume that an interrupted write left the directory unchanged.
@@ -118,4 +120,4 @@ Keep an implementation and its runtime verification on the same retained worktre
 
 - For script syntax, limits, tools, and recovery rules, read the [runtime contract](../skills/workflow-authoring/references/runtime.md).
 - To change default limits, see [server options](configuration.md#server-options).
-- For measured throughput and safe operating limits, see [capacity findings](workflow-capacity-findings.md).
+- For measured throughput and safe operating limits, see [verification history](verification-history.md#measured-capacity).
