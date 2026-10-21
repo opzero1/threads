@@ -28,6 +28,7 @@ export const WorkflowStart = WorkflowLimits.extend({
   script: z.string().min(1).max(200000).optional(),
   name: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/).optional(),
   args: Json.default(null),
+  resumeFrom: z.string().min(1).optional(),
 }).strict().refine((value) => Boolean(value.script) !== Boolean(value.name), {
   message: "Supply exactly one of script or saved workflow name",
 });
@@ -79,6 +80,8 @@ export const WorkflowStep = z.discriminatedUnion("status", [
     completed: z.number(),
     report: WorkflowResult,
     usage: WorkflowUsage,
+    // The run whose worker produced this report; such a step spent nothing in this run.
+    reusedFrom: z.string().optional(),
   }),
   StepBase.extend({
     status: z.literal("failed"),
@@ -125,6 +128,7 @@ export const WorkflowRun = z.object({
   script: z.string(),
   args: Json,
   fingerprint: z.string(),
+  resumeFrom: z.string().optional(),
   limits: WorkflowLimits,
   status: z.enum(["running", "pausing", "paused", "stopping", "stopped", "waiting", "interrupted", "failed", "completed"]),
   interruption: z.object({

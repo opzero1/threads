@@ -14,7 +14,7 @@ When a step needs a directory outside its location, such as a reference reposito
 1. Define the result, named slices, and verification predicate. For VERA tasks, retain the selected protocol and role profiles.
 2. Read [the runtime contract](references/runtime.md). Write a script with a literal `export const meta` first, named agent steps, and a final JSON result.
 3. Call `workflows_start` with a unique task key, `script` or saved `name`, JSON `args`, and suitable concurrency. Omit task budgets unless the user requested them. It returns immediately.
-4. Continue independent work. The runner delivers a final notification. Use `workflows_inspect` for evidence and `workflows_control` for pause, stop, resume, and checkpoint responses. Never infer success from an idle worker.
+4. Continue independent work. The runner delivers a final notification. Use `workflows_inspect` for evidence and `workflows_control` for pause, stop, resume, and checkpoint responses. Never infer success from an idle worker. After a stop, a failure, or a script fix, start a new run with a new key and `resumeFrom: <runID>` to reuse that run's completed steps whose key and input are unchanged.
 5. Inspect the result and the affected artifacts before giving the final verdict. Save a useful script with `workflows_save`; its arguments and transcripts are not saved with it.
 
 Every step selects an actual configured `agent`. Use `vera-operator-readonly` for discovery, `vera-engineer` for implementation, and `vera-auditor-readonly` for independent review. Model choices remain in the profiles. Workflow workers are leaves. Any user-supplied run budgets also cover nested workflows.

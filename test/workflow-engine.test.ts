@@ -2127,6 +2127,103 @@ async function until(api: ReturnType<typeof workflowEngine>, ownerID: string, ru
   throw new Error(`workflow condition not reached: ${JSON.stringify({ status: latest?.status, delivered: latest?.delivered, worktreeCleanup: latest?.worktreeCleanup })}`);
 }
 
+describe("resumeFrom", () => {
+  const steps = (prompts: Record<string, string>, tail = `return "done";`) => `
+export const meta = { name: "resumable", description: "resumeFrom harness" };
+${Object.entries(prompts).map(([key, prompt]) => `await agent(${JSON.stringify(prompt)}, { key: ${JSON.stringify(key)}, agent: "analyst" });`).join("\n")}
+${tail}`;
+
+  test("an edited saved script reuses unchanged steps outside the agent and token budgets and runs changed ones live", async () => {
+    const fixture = await harness("valid");
+    fixture.setSaved("flow", steps({ a: "A", b: "B" }));
+    const prior = await settled(fixture.api, fixture.ownerID, (await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "first", name: "flow" }), runtime)).id);
+    expect(fixture.deliveryTexts.at(-1)).toContain(`pass resumeFrom ${prior.id} to workflows_start`);
+    const record = await fixture.getStorage(`workflows/runs/${prior.id}`);
+    fixture.setSaved("flow", steps({ a: "A", b: "B, edited" }));
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "second", name: "flow", resumeFrom: prior.id, maxAgents: 1, tokenBudget: 1 }), runtime);
+    const run = await settled(fixture.api, fixture.ownerID, started.id);
+    expect(run.status).toBe("completed");
+    expect(run.id).not.toBe(prior.id);
+    expect(run.resumeFrom).toBe(prior.id);
+    expect(fixture.spawnedStepKeys).toEqual(["a", "b", "b"]);
+    const [a, b] = run.steps;
+    expect(a.status === "completed" && a.reusedFrom).toBe(prior.id);
+    expect(a.workerID).toBe(prior.steps[0].workerID);
+    expect(a.status === "completed" && a.report).toEqual(prior.steps[0].status === "completed" && prior.steps[0].report);
+    expect(b.status === "completed" && b.reusedFrom).toBeUndefined();
+    expect(b.workerID).not.toBe(prior.steps[1].workerID);
+    expect(await fixture.getStorage(`workflows/runs/${prior.id}`)).toEqual(record);
+    await fixture.api.dispose();
+  });
+
+  test("a failed prior step runs live", async () => {
+    const fixture = await harness("missing");
+    const failing = steps({ a: "A" });
+    const prior = await settled(fixture.api, fixture.ownerID, (await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "first", script: failing, args: null }), runtime)).id);
+    expect(prior.status).toBe("failed");
+    expect(fixture.deliveryTexts.at(-1)).toContain(`pass resumeFrom ${prior.id}`);
+    const run = await settled(fixture.api, fixture.ownerID, (await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "second", script: failing, args: null, resumeFrom: prior.id }), runtime)).id);
+    expect(fixture.spawnedStepKeys).toEqual(["a", "a"]);
+    expect(run.steps[0].status).toBe("failed");
+    expect(run.steps[0].workerID).not.toBe(prior.steps[0].workerID);
+    await fixture.api.dispose();
+  });
+
+  test("rejects a running or leased paused run and another owner's run, without creating the new run", async () => {
+    const fixture = await harness("manual");
+    const prior = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "first", script: steps({ a: "A", b: "B" }), args: null }), runtime);
+    await fixture.waitForSpawn("a");
+    const resume = () => fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "second", script: steps({ a: "A" }), args: null, resumeFrom: prior.id }), runtime);
+    await expect(resume()).rejects.toThrow(`Cannot resume from workflow ${prior.id} in running`);
+    await fixture.api.control(fixture.ownerID, { runID: prior.id, action: "pause" });
+    await fixture.complete("a");
+    await reaches(fixture.api, fixture.ownerID, prior.id, "paused");
+    await expect(resume()).rejects.toThrow(`Cannot resume from workflow ${prior.id} in paused`);
+    await fixture.api.control(fixture.ownerID, { runID: prior.id, action: "stop" });
+    await fixture.mutateRun(prior.id, (run) => { run.ownerID = Session.ID.create(); });
+    await expect(resume()).rejects.toThrow("Only the owning session may access this workflow");
+    expect((await fixture.api.list(fixture.ownerID)).map((run) => run.key)).toEqual([]);
+    await fixture.api.dispose();
+  });
+
+  test("an exact retry returns the same run, and resumeFrom is part of the start input", async () => {
+    const fixture = await harness("valid");
+    const prior = await settled(fixture.api, fixture.ownerID, (await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "first", script: steps({ a: "A" }), args: null }), runtime)).id);
+    const input = WorkflowStart.parse({ key: "second", script: steps({ a: "A" }), args: null, resumeFrom: prior.id });
+    const run = await settled(fixture.api, fixture.ownerID, (await fixture.api.start(fixture.ownerID, input, runtime)).id);
+    const retried = await fixture.api.start(fixture.ownerID, input, runtime);
+    expect(retried.id).toBe(run.id);
+    expect(retried.status).toBe("completed");
+    expect(fixture.spawns()).toBe(1);
+    await expect(fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "second", script: steps({ a: "A" }), args: null }), runtime))
+      .rejects.toThrow("This workflow key belongs to a different request");
+    await expect(fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "first", script: steps({ a: "A" }), args: null, resumeFrom: prior.id }), runtime))
+      .rejects.toThrow("resumeFrom needs a new key");
+    await fixture.api.dispose();
+  });
+
+  test("a resumed run replays its reused steps after an engine restart without carrying over checkpoint answers", async () => {
+    const fixture = await harness("valid");
+    const gated = steps({ a: "A" }, `return await checkpoint("Continue?", { key: "continue" });`);
+    const prior = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "first", script: gated, args: null }), runtime);
+    await reaches(fixture.api, fixture.ownerID, prior.id, "waiting");
+    await fixture.api.control(fixture.ownerID, { runID: prior.id, action: "resume", checkpointKey: "continue", response: "first" });
+    await settled(fixture.api, fixture.ownerID, prior.id);
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "second", script: gated, args: null, resumeFrom: prior.id }), runtime);
+    await reaches(fixture.api, fixture.ownerID, started.id, "waiting");
+    await fixture.api.dispose();
+    const reopened = fixture.reopen();
+    try {
+      await reopened.control(fixture.ownerID, { runID: started.id, action: "resume", checkpointKey: "continue", response: "second" });
+      const run = await settled(reopened, fixture.ownerID, started.id);
+      expect(run.status).toBe("completed");
+      expect(run.result).toBe("second");
+      expect(run.steps[0].status === "completed" && run.steps[0].reusedFrom).toBe(prior.id);
+      expect(fixture.spawns()).toBe(1);
+    } finally { await reopened.dispose(); }
+  });
+});
+
 const cleaned = (api: ReturnType<typeof workflowEngine>, ownerID: string, runID: string) =>
   until(api, ownerID, runID, (run) => run.worktreeCleanup?.complete === true);
 const outcomes = (run: WorkflowRun) => Object.fromEntries((run.worktreeCleanup?.worktrees ?? []).map(({ key, outcome, reason }) => [key, reason ? `${outcome}:${reason}` : outcome]));

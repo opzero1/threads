@@ -89,7 +89,7 @@ for (let round = 1; ; round++) {
 
 ## Start and control
 
-`workflows_start` accepts exactly one of `script` or saved `name`, plus a unique task `key`, optional JSON `args`, and limits:
+`workflows_start` accepts exactly one of `script` or saved `name`, plus a unique task `key`, optional JSON `args`, an optional `resumeFrom` run ID, and limits:
 
 | Limit | Default | Range |
 | --- | --- | --- |
@@ -114,6 +114,8 @@ A run recorded with the original helper defaults (`helperPolicy: "legacy-bounded
 The configured Threads worker limit also applies across simultaneous runs owned by one coordinator. Its default is four workers. A token budget checks recorded usage at dispatch, including failed and interrupted attempts. Already-running agents can exceed the remaining budget. Unreported usage is marked unmeasured and blocks further budgeted dispatch.
 
 The same start key and identical input identify the same run. Start retries do not restart completed or stopped runs. Pause stops new scheduling and drains active steps. Stop interrupts active work. Resume uses the same recorded script and arguments, reconciles existing sessions, and reuses completed results. A changed step request under an existing key fails rather than returning a stale result. Save edits as a new workflow run.
+
+To continue after a stop, a failure, or a script fix, start a new run with a new `key` and `resumeFrom` set to the earlier run's ID. That run must belong to you and be stopped, failed, completed, or paused with no active execution. The new run has its own ID and record, and the earlier record is not changed. `resumeFrom` works with an inline `script` or a saved `name`, including an edited script, and it is part of the start input for exact retries. A step whose key and input match a step the earlier run completed with an accepted report reuses that report and worker without starting a worker; it doesn't count toward `maxAgents` or `tokenBudget`. Every other step runs live, including steps that failed. Checkpoint answers are not carried over. Agent profile changes are not checked for reused steps. The stop, failure, and completion notices name the run ID to pass.
 
 After upgrading from finite defaults, an old start request that omitted its budgets no longer has the same input fingerprint. Resume the existing run through `workflows_control`, or supply its original recorded limits for an exact start retry.
 
