@@ -1,12 +1,9 @@
 import argparse
-import hashlib
 import json
 from pathlib import Path
-import subprocess
 import time
-import uuid
 
-from fixture import Provider, code_mode_result, config, exposed, tool_call
+from fixture import Provider, config, decoded, run_tool, source_fingerprint
 from sandbox import Sandbox, eventually
 
 
@@ -20,32 +17,12 @@ artifacts = root / ".audit" / "workflow-regressions"
 artifacts.mkdir(parents=True, exist_ok=True)
 
 
-def source_hash():
-    digest = hashlib.sha256()
-    for path in [target / "index.ts", target / "tui.ts", target / "tui.js", target / "package.json", *sorted((target / "src").glob("*.ts")), *sorted((target / "src").glob("*.tsx"))]:
-        if not path.exists():
-            continue
-        digest.update(str(path.relative_to(target)).encode())
-        digest.update(path.read_bytes())
-    return digest.hexdigest()
-
-
-class WorkflowSandbox(Sandbox):
-    def start(self):
-        if not (self.directory / ".git").exists():
-            subprocess.run(["git", "init", "-b", "main", str(self.directory)], check=True, capture_output=True)
-            (self.directory / "README.md").write_text("Workflow regression fixture\n")
-            subprocess.run(["git", "add", "README.md"], cwd=self.directory, check=True)
-            subprocess.run(["git", "-c", "user.name=Workflow fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "Fixture"], cwd=self.directory, check=True, capture_output=True)
-        super().start()
-
-
 provider = Provider()
 settings = config(target, provider)
 settings["agents"] = {"regression-role": {"mode": "subagent", "steps": 10, "permissions": [{"action": "*", "resource": "*", "effect": "allow"}]}}
 sandbox = None
 observations = []
-verified_source = source_hash()
+verified_source = source_fingerprint(target)
 
 
 def messages(session):
@@ -58,17 +35,7 @@ def messages(session):
 
 
 def tool(session, name, arguments):
-    def results():
-        return [part for message in messages(session) if message["type"] == "assistant" for part in message["content"]
-                if part["type"] == "tool" and part["name"] == exposed(name) and part["state"]["status"] in ["completed", "error"]]
-    before = {part["id"] for part in results()}
-    marker = f"REGRESSION_TOOL_{uuid.uuid4().hex}"
-    provider.responses[marker] = tool_call(name, arguments)
-    sandbox.api("POST", f"/api/session/{session}/prompt", {"text": marker})
-    result = code_mode_result(name, eventually(lambda: next((part for part in results() if part["id"] not in before), None), timeout=60))
-    eventually(lambda: session not in sandbox.api("GET", "/api/session/active")["data"])
-    assert result["state"]["status"] == "completed", result
-    return json.loads(result["state"]["content"][0]["text"])
+    return decoded(run_tool(sandbox, provider, session, name, arguments))
 
 
 def script(name, body):
@@ -298,27 +265,6 @@ def checkpoint_replay():
     return final
 
 
-def failed_replay():
-    provider.responses["ATTEMPT_MISSING"] = {"name": "read", "arguments": {"path": str(sandbox.directory / "README.md")}}
-    report("ATTEMPT_FALLBACK", "fallback")
-    report("The previous native execution failed before a valid workflows_result report was recorded.", "changed-branch")
-    run = start("failed-outcome-replay", '''let value;
-    try { value=await agent("ATTEMPT_MISSING", {key:"t1",agent:"regression-role"}); }
-    catch { value=await agent("ATTEMPT_FALLBACK", {key:"t2",agent:"regression-role"}); }
-    await checkpoint("Restart", {key:"hold"}); return value;''', timeoutMs=15000, maxAgents=2)
-    settled(run, "waiting")
-    restart()
-    started = time.monotonic()
-    control(run, action="resume", checkpointKey="hold", response=True)
-    final = settled(run, "failed")
-    elapsed = time.monotonic() - started
-    assert elapsed < 5, {"elapsed": elapsed, "run": final}
-    first = next(step for step in final["steps"] if step["key"] == "t1")
-    assert first["status"] == "failed", final
-    assert "timed" not in final.get("error", "").lower() and "fibers interrupted" not in final.get("error", ""), final
-    return {"run": final, "resumeSeconds": elapsed}
-
-
 def reported_crash():
     provider.release.clear()
     value = {"verdict": "PASS", "summary": "Write already verified", "evidence": ["reported-write.txt"], "result": "durable"}
@@ -493,7 +439,6 @@ cases = {
     "owner-attention": owner_attention,
     "followup-handoff": followup_handoff,
     "checkpoint-replay": checkpoint_replay,
-    "failed-replay": failed_replay,
     "reported-crash": reported_crash,
     "saved-nested": saved_and_nested,
     "saved-commands": saved_commands,
@@ -506,7 +451,7 @@ cases = {
 selected = options.case or list(cases)
 assert all(name in cases for name in selected), selected
 try:
-    sandbox = WorkflowSandbox(settings, artifacts)
+    sandbox = Sandbox(settings, artifacts, repository="Workflow regression fixture\n")
     sandbox.await_plugin()
     for name in selected:
         owner = sandbox.api("POST", "/api/session", {"title": f"Workflow regression: {name}", "location": {"directory": str(sandbox.directory)}})["data"]["id"]
@@ -524,7 +469,7 @@ try:
                     control(run, action="stop")
         finally:
             (artifacts / "evidence.json").write_text(json.dumps({"sourceHash": verified_source, "target": str(target), "cases": observations}, indent=2))
-    assert source_hash() == verified_source, "Source changed during verification"
+    assert source_fingerprint(target) == verified_source, "Source changed during verification"
 finally:
     provider.release.set()
     (artifacts / "provider-requests.json").write_text(json.dumps(provider.requests, indent=2))

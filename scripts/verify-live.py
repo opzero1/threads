@@ -2,9 +2,9 @@ import json
 from pathlib import Path
 import sys
 import time
-import uuid
 
-from fixture import CODE_MODE_TOOLS, NATIVE_TOOLS, Provider, code_mode_namespace, code_mode_result, config, exposed, native_tools, tool_call
+import fixture
+from fixture import CODE_MODE_TOOLS, NATIVE_TOOLS, Provider, code_mode_namespace, config, native_tools
 from sandbox import Sandbox, Terminal, eventually
 
 
@@ -39,15 +39,7 @@ def tool_results(session_id, name):
 
 
 def run_tool(session_id, name, arguments):
-    marker = f"FIXTURE_{uuid.uuid4().hex}"
-    provider.responses[marker] = tool_call(name, arguments)
-    before = {part["id"] for part in tool_results(session_id, exposed(name))}
-    sandbox.api("POST", f"/api/session/{session_id}/prompt", {"text": marker})
-    result = eventually(lambda: next((
-        part for part in tool_results(session_id, exposed(name)) if part["id"] not in before
-    ), None), timeout=60)
-    eventually(lambda: session_id not in sandbox.api("GET", "/api/session/active")["data"])
-    return code_mode_result(name, result)
+    return fixture.run_tool(sandbox, provider, session_id, name, arguments)
 
 
 def roots():

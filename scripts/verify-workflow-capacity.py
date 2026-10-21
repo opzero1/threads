@@ -5,7 +5,6 @@ used. Artifacts are written under .audit/workflow-capacity (gitignored).
 """
 
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,21 +12,13 @@ import subprocess
 import sys
 import threading
 import time
-import uuid
 
-from fixture import Provider, code_mode_result, config, exposed, tool_call
+import fixture
+from fixture import Provider, config, decoded, source_fingerprint
 from sandbox import Sandbox, eventually
 
 
 ROOT = Path(__file__).resolve().parent.parent
-
-
-def source_hash(target):
-    digest = hashlib.sha256()
-    for path in [target / "index.ts", target / "tui.ts", target / "package.json", *sorted((target / "src").glob("*.ts")), *sorted((target / "src").glob("*.tsx"))]:
-        digest.update(str(path.relative_to(target)).encode())
-        digest.update(path.read_bytes())
-    return digest.hexdigest()
 
 
 class CountingGate:
@@ -63,19 +54,6 @@ class CountingGate:
             return {"active": self.active, "peak": self.peak}
 
 
-class WorkflowSandbox(Sandbox):
-    def start(self):
-        if not (self.directory / ".git").exists():
-            subprocess.run(["git", "init", "-b", "main", str(self.directory)], check=True, capture_output=True)
-            (self.directory / "README.md").write_text("Capacity fixture\n")
-            subprocess.run(["git", "add", "README.md"], cwd=self.directory, check=True)
-            subprocess.run(
-                ["git", "-c", "user.name=Capacity fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "Fixture"],
-                cwd=self.directory, check=True, capture_output=True,
-            )
-        super().start()
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("target", nargs="?", default=str(ROOT))
@@ -86,7 +64,7 @@ def main():
         parser.error("--steps must be between 8 and 1000")
 
     target = Path(args.target).resolve()
-    verified_source = source_hash(target)
+    verified_source = source_fingerprint(target)
     artifacts = ROOT / ".audit" / "workflow-capacity"
     artifacts.mkdir(parents=True, exist_ok=True)
     provider = Provider()
@@ -100,28 +78,8 @@ def main():
         checks.append(label)
         print(f"PASS: {label}", flush=True)
 
-    def messages(session_id):
-        return sandbox.api("GET", f"/api/session/{session_id}/message?limit=100")["data"]
-
     def run_tool(session_id, name, arguments):
-        def results():
-            return [
-                part for message in messages(session_id) if message["type"] == "assistant"
-                for part in message["content"] if part["type"] == "tool" and part["name"] == exposed(name)
-                and part["state"]["status"] in ["completed", "error"]
-            ]
-
-        before = {part["id"] for part in results()}
-        marker = f"FIXTURE_{uuid.uuid4().hex}"
-        provider.responses[marker] = tool_call(name, arguments)
-        sandbox.api("POST", f"/api/session/{session_id}/prompt", {"text": marker})
-        output = eventually(lambda: next((part for part in results() if part["id"] not in before), None), timeout=60)
-        eventually(lambda: session_id not in sandbox.api("GET", "/api/session/active")["data"], timeout=60)
-        return code_mode_result(name, output)
-
-    def decoded(part):
-        assert part["state"]["status"] == "completed", part
-        return json.loads(part["state"]["content"][0]["text"])
+        return fixture.run_tool(sandbox, provider, session_id, name, arguments)
 
     def inspect(owner, run_id):
         return sandbox.api("POST", "/api/rpc/workflows/inspect", {
@@ -173,7 +131,7 @@ def main():
                 "permissions": [{"action": "*", "resource": "*", "effect": "deny"}],
             },
         }
-        sandbox = WorkflowSandbox(settings, artifacts)
+        sandbox = Sandbox(settings, artifacts, repository="Capacity fixture\n")
         sandbox.await_plugin()
         owner = sandbox.api("POST", "/api/session", {
             "title": "Workflow capacity verification", "location": {"directory": str(sandbox.directory)},
@@ -337,7 +295,7 @@ def main():
             assert sandbox.api("GET", f"/api/session/{worker_id}")["data"]["id"] == worker_id
         metrics["cleanup"] = {"activeSessions": 0, "verifiedNativeSessions": len(all_worker_ids)}
         metrics["provider"] = {"requests": len(provider.requests), "cancelledWrites": provider.cancelled}
-        assert source_hash(target) == verified_source, "Source changed during capacity verification"
+        assert source_fingerprint(target) == verified_source, "Source changed during capacity verification"
         metrics["sourceHash"] = verified_source
         (artifacts / "evidence.json").write_text(json.dumps({"checks": checks, "metrics": metrics}, indent=2) + "\n")
     finally:

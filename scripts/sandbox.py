@@ -28,19 +28,33 @@ def eventually(check, timeout=30):
     raise TimeoutError("Expected live state was not observed")
 
 
+def git_repository(directory, name="README.md", text="Native fixture\n"):
+    """Make `directory` a Git repository on `main` whose one commit adds `name`."""
+    subprocess.run(["git", "init", "-b", "main", str(directory)], check=True, capture_output=True)
+    (directory / name).write_text(text)
+    subprocess.run(["git", "add", name], cwd=directory, check=True)
+    subprocess.run(["git", "-c", "user.name=Workflow fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "Fixture"],
+                   cwd=directory, check=True, capture_output=True)
+
+
 class Sandbox:
     hostname = "127.0.0.1"
 
-    def __init__(self, configuration, artifact_dir):
+    def __init__(self, configuration, artifact_dir, temp_parent=None, repository=None):
+        """`temp_parent` holds the sandbox root, by default OpenCode's temporary directory. With `repository`,
+        the coordinator directory starts as a Git repository whose README.md contains that text."""
         self.binary = shutil.which("opencode")
-        tmp = subprocess.check_output([self.binary, "debug", "paths", "tmp"], text=True).strip()
-        self.root = Path(tempfile.mkdtemp(prefix="op-threads-verify-", dir=tmp))
+        if temp_parent is None:
+            temp_parent = subprocess.check_output([self.binary, "debug", "paths", "tmp"], text=True).strip()
+        self.root = Path(tempfile.mkdtemp(prefix="op-threads-verify-", dir=temp_parent))
         self.artifacts = artifact_dir
         artifact_dir.mkdir(parents=True, exist_ok=True)
         self.directory = self.root / "coordinator"
         self.worker = self.root / "worker"
         self.directory.mkdir()
         self.worker.mkdir()
+        if repository is not None:
+            git_repository(self.directory, text=repository)
         configuration_dir = self.root / "config" / "opencode"
         configuration_dir.mkdir(parents=True)
         (configuration_dir / "opencode.json").write_text(json.dumps(configuration))
@@ -145,6 +159,50 @@ class Sandbox:
             if method == "GET" and path == "/api/info" and error.code == 503:
                 return {}
             raise RuntimeError(f"{method} {path}: {error.code} {error.read().decode()}") from error
+
+
+class IsolatedSandbox(Sandbox):
+    """A sandbox for the heartbeat runner: project configuration is off and the coordinator is a Git repository."""
+
+    def __init__(self, configuration, artifact_dir, temp_parent=None):
+        super().__init__(configuration, artifact_dir, temp_parent, repository="heartbeat fixture\n")
+
+    def start(self):
+        self.env["OPENCODE_DISABLE_PROJECT_CONFIG"] = "true"
+        super().start()
+
+
+class Heartbeat:
+    """Runs a package's heartbeat CLI and records each command in `commands.json`."""
+
+    def __init__(self, target, artifacts):
+        self.runner = target / "bin/op-threads-heartbeat.mjs"
+        self.artifacts = artifacts
+        self.commands = []
+        self.config_file = None
+
+    def configure(self, sandbox, host, label):
+        """Write the runner configuration that `install` would write, without installing a LaunchAgent."""
+        self.config_file = sandbox.root / "runner.json"
+        self.config_file.write_text(json.dumps({
+            "protocol": 1, "serviceFile": str(sandbox.root / "state/opencode/service.json"), "hostDirectory": str(host),
+            "node": shutil.which("node"), "runner": str(self.runner), "intervalMs": 60_000, "label": label,
+            "launchAgentsDirectory": str(sandbox.root / "launchagents"),
+        }))
+
+    def command(self, args):
+        result = subprocess.run(args, cwd=Path(__file__).resolve().parent.parent, text=True, capture_output=True, timeout=90)
+        self.commands.append({"command": args, "exit": result.returncode, "stdout": result.stdout, "stderr": result.stderr})
+        (self.artifacts / "commands.json").write_text(json.dumps(self.commands, indent=2))
+        return result
+
+    def cli(self, *args, success=True):
+        result = self.command(["node", str(self.runner), *args, "--config", str(self.config_file)])
+        if success:
+            assert result.returncode == 0, self.commands[-1]
+            return json.loads(result.stdout)
+        assert result.returncode != 0, self.commands[-1]
+        return result
 
 
 class Terminal:

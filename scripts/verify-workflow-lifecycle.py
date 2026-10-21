@@ -1,35 +1,45 @@
 """Exact task unload/restart regression against a private loopback server only.
 
-Run from the repository root. LIFECYCLE_RECEIPT selects a new evidence directory;
+LIFECYCLE_RECEIPT selects a new evidence directory;
 LIFECYCLE_STOP_ONLY limits a retry to the stop/projection regression.
 LIFECYCLE_BOUNDARY selects one teardown boundary for a focused follow-up.
 """
-import sys, json, time, subprocess, hashlib, os
+import json, time, hashlib, os, uuid
 from pathlib import Path
 
-root = Path.cwd()
-sys.path.insert(0, str(root / 'scripts'))
-source = (root / 'scripts/verify-heartbeat.py').read_text().split('\ntry:\n    # Keep')[0]
-source = source.replace('root = Path(__file__).resolve().parent.parent', 'root = Path(' + repr(str(root)) + ')')
-destination = '.audit/recovery/lifecycle-fix/' + os.environ.get('LIFECYCLE_RECEIPT', 'native')
-sys.argv[1:] = ['--artifacts', str(root / destination)]
-exec(compile(source, str(root / 'scripts/verify-heartbeat.py'), 'exec'))
-paths = [root / p for p in ['src/workflow-engine.ts', 'src/workflow-types.ts', 'src/heartbeat-policy.ts', 'src/heartbeat-rpc.ts', 'src/heartbeat.ts', 'bin/op-threads-heartbeat.mjs', 'scripts/verify-workflow-lifecycle.py', 'scripts/verify-heartbeat.py', 'scripts/sandbox.py', 'scripts/fixture.py']]
-receipt = {'probe': 'explicit native task invalidation and graceful isolated restart; NOT automatic TTL proof', 'hashes': {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}}
+from fixture import Provider, config, decoded, run_tool, source_fingerprint
+from sandbox import Heartbeat, IsolatedSandbox, eventually
+
+root = Path(__file__).resolve().parent.parent
+artifacts = root / '.audit/recovery/lifecycle-fix' / os.environ.get('LIFECYCLE_RECEIPT', 'native')
+artifacts.mkdir(parents=True, exist_ok=True)
+heartbeat = Heartbeat(root, artifacts)
+cli = heartbeat.cli
+provider = Provider()
+sandbox = None
+checks = []
+label = 'com.opthreads.heartbeat.test-' + uuid.uuid4().hex
+receipt = {'probe': 'explicit native task invalidation and graceful isolated restart; NOT automatic TTL proof', 'sourceHash': source_fingerprint(root)}
 (artifacts / 'source-before.json').write_text(json.dumps(receipt, indent=2))
+
+
+def check(label, value=True):
+    assert value, label
+    checks.append(label)
+    print('PASS:', label, flush=True)
+
+
+def tool(session, name, arguments):
+    return decoded(run_tool(sandbox, provider, session, name, arguments))
+
+
 started = time.time()
 try:
-    original = sandbox_module.tempfile.mkdtemp
-    sandbox_module.tempfile.mkdtemp = lambda prefix, dir: original(prefix=prefix, dir=artifacts)
-    try:
-        sandbox = IsolatedSandbox(config(root, provider), artifacts)
-    finally:
-        sandbox_module.tempfile.mkdtemp = original
+    sandbox = IsolatedSandbox(config(root, provider), artifacts, temp_parent=artifacts)
     sandbox.await_plugin()
     owner = sandbox.api('POST', '/api/session', {}, location=sandbox.directory)['data']['id']
     host = sandbox.root / 'external-host'; host.mkdir()
-    config_file = sandbox.root / 'runner.json'
-    config_file.write_text(json.dumps({'protocol': 1, 'serviceFile': str(sandbox.root / 'state/opencode/service.json'), 'hostDirectory': str(host), 'node': subprocess.check_output(['which', 'node'], text=True).strip(), 'runner': str(runner), 'intervalMs': 60000, 'label': label, 'launchAgentsDirectory': str(sandbox.root / 'launchagents')}))
+    heartbeat.configure(sandbox, host, label)
 
     def snapshot():
         return sandbox.api('POST', '/api/rpc/workflows-heartbeat/snapshot', {'input': {}}, location=host)['output']
@@ -122,6 +132,6 @@ finally:
     provider.close()
     receipt['checks'] = checks
     receipt['durationSeconds'] = time.time() - started
-    receipt['sourceUnchanged'] = all(hashlib.sha256(p.read_bytes()).hexdigest() == receipt['hashes'][str(p.relative_to(root))] for p in paths)
+    receipt['sourceUnchanged'] = source_fingerprint(root) == receipt['sourceHash']
     (artifacts / 'receipt.json').write_text(json.dumps(receipt, indent=2))
     print(json.dumps(receipt, indent=2))
