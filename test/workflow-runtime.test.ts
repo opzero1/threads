@@ -102,6 +102,51 @@ describe("real CodeMode workflow execution", () => {
     expect(value).toMatchObject({ w: { name: "child" }, empty: { name: "empty" }, args: { text: expect.any(String) } });
   });
 
+  test("unawaited phase() and log() reach the host in order with the next call or the result", async () => {
+    const events: unknown[] = [];
+    const value = await run(`
+      phase("Plan"); log("one");
+      await agent("a", { key: "a" });
+      phase("Build");
+      const pending = agent("b", { key: "b" });
+      phase("Report");
+      await pending;
+      log("two"); log("three");
+      return 1;
+    `, { host: host({
+      agent: async (input, _signal, phase) => { events.push(["agent", (input as { prompt: string }).prompt, phase]); },
+      phase: async (title) => { events.push(["phase", title]); },
+      log: async (message) => { events.push(["log", message]); },
+    }) });
+    expect(value).toBe(1);
+    expect(events).toEqual([
+      ["phase", "Plan"], ["log", "one"], ["agent", "a", "Plan"],
+      ["phase", "Build"], ["agent", "b", "Build"],
+      ["phase", "Report"], ["log", "two"], ["log", "three"],
+    ]);
+    expect((await failure(run(`phase(1);`))).message).toContain("phase title must be a string");
+  });
+
+  test("derives distinct, deterministic keys for keyless agents and keeps explicit keys", async () => {
+    const body = `return await parallel([
+      () => agent("same", { agent: "x", label: "l" }),
+      () => agent("same", { label: "l", agent: "x" }),
+      () => agent("same", { agent: "x", key: "mine" }),
+      () => agent("other", { agent: "x" }),
+      () => agent("same", { agent: "x", label: "l" }),
+    ]);`;
+    const keys = host({ agent: async (input) => (input as { key: string }).key });
+    const first = await run(body, { host: keys }) as string[];
+    expect(await run(body, { host: keys })).toEqual(first);
+    expect(first[2]).toBe("mine");
+    expect(new Set(first).size).toBe(5);
+    const hash = first[0]!.split("~")[1];
+    expect(first[0]).toMatch(/^auto~[0-9a-f]{16}~0$/);
+    expect([first[1], first[4]]).toEqual([`auto~${hash}~1`, `auto~${hash}~2`]);
+    expect(first[3]).toMatch(/^auto~[0-9a-f]{16}~0$/);
+    expect(first[3]).not.toContain(hash!);
+  });
+
   test("parallel starts work concurrently and preserves input order", async () => {
     const started: string[] = [];
     let release!: () => void;

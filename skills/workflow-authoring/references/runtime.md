@@ -8,7 +8,7 @@ Keep each result below 1 MiB and the combined run journal below 16 MiB. Payload 
 
 The first statement is `export const meta = { name: "name", description: "description" }`. Metadata contains literal values. An optional `phases` array contains objects with a `title`.
 
-The body supports top-level `await`, ordinary data transformations, branching, and bounded loops. Return a JSON value. Intermediate agent results stay in script variables and the durable journal.
+The body supports top-level `await`, ordinary data transformations, branching, and bounded loops. `args` holds the run's JSON arguments, or `null` when none were supplied, never `undefined`. Return a JSON value. Intermediate agent results stay in script variables and the durable journal.
 
 ## Agent steps
 
@@ -16,7 +16,7 @@ The body supports top-level `await`, ordinary data transformations, branching, a
 
 | Field | Meaning |
 | --- | --- |
-| `key` | Required unique, stable step name. Include the item and round when using loops. |
+| `key` | Optional unique, stable step name. When omitted, the runtime derives `auto~<hash>~<n>` from a hash of the prompt and the other options, plus a counter for identical calls, so the same script and arguments get the same keys on resume. Changing the prompt or options changes the derived key. Reusing a key in the same workflow fails the step. |
 | `agent` | Required configured OpenCode agent ID. |
 | `label` | Optional display title. |
 | `phase` | Optional phase override. |
@@ -49,8 +49,10 @@ The runner resolves symlinks, removes duplicates, sorts the list, and records it
 
 - `parallel(thunks)` runs async functions concurrently and returns results in input order. Pass functions, not promises: `() => agent(...)`. Every function settles before `parallel` returns. One failure is rethrown as is; several become an `AggregateError` whose message names the failed indexes.
 - `pipeline(items, ...stages)` runs each item through its stages independently. A fast item does not wait for slower items between stages. Each stage is called as `stage(value, item, index)`: the previous stage's result (the item for the first stage), the original item, and its index. Failures settle and rethrow as in `parallel`.
-- `await phase(title)` records a display phase.
-- `await log(message)` records a bounded progress message.
+- `phase(title)` sets the phase of later `agent()` calls in the current workflow and the run's displayed phase. A nested workflow starts in its caller's current phase, and its `phase()` calls don't change the caller's phase.
+- `log(message)` records a bounded progress message. The run keeps its latest 200 lines.
+
+`phase()` and `log()` return immediately without a host call, so `await` is optional. Their state reaches the run with the script's next `agent()`, `checkpoint()`, or `workflow()` call, or when the script returns.
 - `workflow(name, args)` invokes a saved workflow within the parent's limits.
 - `checkpoint(prompt, { key, reviewer? })` records a question and waits for an explicit response through the run controls. `reviewer` is `"human"` by default; `"coordinator"` allows heartbeat reminders for an authorized coordinator review. Neither value supplies a response or changes the control permissions. The response becomes recorded input on resume. Responses are limited to 1 MiB and must fit in the aggregate journal. Rejected responses leave the checkpoint unanswered so a smaller response can be submitted.
 
@@ -105,7 +107,7 @@ Task budgets are opt-in. Agents omit `tokenBudget`, `maxAgents`, `agentTimeoutMs
 
 `tokenBudget` measures cumulative native input and output tokens across worker turns. It is an admission threshold, not a hard generation cap: workers already running can exceed it before the next dispatch checks their usage.
 
-There is no cap on host calls: `phase`, `log`, and `checkpoint` calls do not count toward `maxAgents`. Nested saved workflows share any supplied parent budgets. Nesting is limited to four child levels.
+There is no cap on host calls: `checkpoint` calls do not count toward `maxAgents`, and `phase` and `log` make no host call. Nested saved workflows share any supplied parent budgets. Nesting is limited to four child levels.
 
 Arguments, host-call payloads, and results are each limited to 1 MiB; error diagnostics are capped at 8 KiB. The runtime module allows 64 simultaneous interpreter calls, including nested calls, and rejects excess calls immediately. This is separate from the agent concurrency limit.
 

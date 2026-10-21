@@ -1,11 +1,12 @@
+import { createHash } from "node:crypto";
 import { CodeMode, Tool, toolError } from "@opencode/codemode";
 import { parse } from "acorn";
 import { Effect } from "effect";
 
 export type WorkflowHost = {
   agent(input: unknown): Promise<unknown>;
-  phase(title: string): Promise<void>;
-  log(message: string): Promise<void>;
+  phase(title: string): void;
+  log(message: string): void;
   checkpoint(input: unknown): Promise<unknown>;
   workflow(input: { name: string; args?: unknown }): Promise<unknown>;
 };
@@ -224,8 +225,14 @@ const objectSchema = (properties: Record<string, unknown>, required: string[] = 
 const prelude = `
 const args = await tools.runtime.args({});
 const agent = async (prompt, options = {}) => tools.runtime.agent({ ...options, prompt });
-const phase = async (title) => tools.runtime.phase({ title });
-const log = async (message) => tools.runtime.log({ message });
+const phase = (title) => {
+  if (typeof title !== "string") throw new TypeError("phase title must be a string");
+  tools.runtime.phase({ title });
+};
+const log = (message) => {
+  if (typeof message !== "string") throw new TypeError("log message must be a string");
+  tools.runtime.log({ message });
+};
 const checkpoint = async (prompt, options = {}) => tools.runtime.checkpoint({ ...options, prompt });
 const workflow = async (name, workflowArgs) => workflowArgs === undefined
   ? tools.runtime.workflow({ name })
@@ -253,6 +260,12 @@ const pipeline = async (items, ...stages) => {
   }));
 };
 `;
+
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (isRecord(value)) return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
+  return JSON.stringify(value);
+}
 
 function positiveOption(value: number | undefined, name: string): number | undefined {
   if (value !== undefined && (!Number.isSafeInteger(value) || value < 1)) throw new RangeError(`${name} must be a positive integer`);
@@ -292,22 +305,30 @@ export async function executeWorkflowInterpreter(input: {
       output: anySchema,
       execute: (value) => effect(() => execute(value)),
     });
+  // Tool calls start when made, so these record state in call order without a host call.
+  const syncTool = (description: string, schema: object, execute: (value: Record<string, string>) => void) =>
+    Tool.make({
+      description,
+      input: schema,
+      output: anySchema,
+      execute: (value) => Effect.sync(() => { execute(value as Record<string, string>); return null; }),
+    });
+  const occurrences = new Map<string, number>();
   const runtime = CodeMode.make({
     limits: { timeoutMs, maxOutputBytes: 1024 * 1024 },
     tools: { runtime: {
       args: tool("Return the workflow arguments", objectSchema({}), () => Promise.resolve(input.args)),
       agent: tool("Run an agent", objectSchema({ prompt: { type: "string" } }, ["prompt"]), async (value) => {
         if (!isRecord(value) || typeof value.prompt !== "string") throw new TypeError("agent prompt must be a string");
-        return input.host.agent(value);
+        if (value.key !== undefined) return input.host.agent(value);
+        // Identical calls are interchangeable, so numbering them in call order keeps keys stable on replay.
+        const hash = createHash("sha256").update(canonical(value)).digest("hex").slice(0, 16);
+        const occurrence = occurrences.get(hash) ?? 0;
+        occurrences.set(hash, occurrence + 1);
+        return input.host.agent({ ...value, key: `auto~${hash}~${occurrence}` });
       }),
-      phase: tool("Enter a workflow phase", objectSchema({ title: { type: "string" } }, ["title"]), async (value) => {
-        if (!isRecord(value) || typeof value.title !== "string") throw new TypeError("phase title must be a string");
-        await input.host.phase(value.title); return null;
-      }),
-      log: tool("Write a workflow log message", objectSchema({ message: { type: "string" } }, ["message"]), async (value) => {
-        if (!isRecord(value) || typeof value.message !== "string") throw new TypeError("log message must be a string");
-        await input.host.log(value.message); return null;
-      }),
+      phase: syncTool("Enter a workflow phase", objectSchema({ title: { type: "string" } }, ["title"]), (value) => input.host.phase(value.title)),
+      log: syncTool("Write a workflow log message", objectSchema({ message: { type: "string" } }, ["message"]), (value) => input.host.log(value.message)),
       checkpoint: tool("Request a checkpoint", objectSchema({ prompt: { type: "string" }, key: { type: "string" } }, ["prompt", "key"]), async (value) => {
         if (!isRecord(value) || typeof value.prompt !== "string" || typeof value.key !== "string" || !value.key)
           throw new TypeError("checkpoint requires string prompt and key");

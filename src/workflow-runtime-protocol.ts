@@ -1,7 +1,10 @@
 export const WORKFLOW_MESSAGE_LIMIT_BYTES = 1024 * 1024;
 export const WORKFLOW_DIAGNOSTIC_LIMIT = 8_192;
 
-export type HostMethod = "agent" | "phase" | "log" | "checkpoint" | "workflow";
+export type HostMethod = "agent" | "checkpoint" | "workflow";
+
+// phase() and log() make no host call; their state travels with the next message.
+export type ScriptState = { phase?: string; logs: string[] };
 
 export type ParentToWorker =
   | { type: "start"; script: string; args: unknown; timeoutMs?: number }
@@ -9,9 +12,9 @@ export type ParentToWorker =
   | { type: "hostResult"; id: number; ok: false; error: string };
 
 export type WorkerToParent =
-  | { type: "hostCall"; id: number; method: HostMethod; input: unknown }
-  | { type: "result"; ok: true; value: unknown }
-  | { type: "result"; ok: false; error: string };
+  | ({ type: "hostCall"; id: number; method: HostMethod; input: unknown } & ScriptState)
+  | ({ type: "result"; ok: true; value: unknown } & ScriptState)
+  | ({ type: "result"; ok: false; error: string } & ScriptState);
 
 export function boundedDiagnostic(value: unknown): string {
   const message = value instanceof Error ? value.message : String(value);

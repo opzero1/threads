@@ -536,8 +536,8 @@ export function workflowEngine(
         }
       }
     };
-    const hostFor = (prefix: string, depth: number): WorkflowHost => ({
-      agent: async (raw) => {
+    const hostFor = (prefix: string, depth: number, initialPhase: string): WorkflowHost => ({
+      agent: async (raw, _signal, phase = initialPhase) => {
         const parsed = WorkflowAgentInput.parse(raw);
         if (parsed.schema !== undefined) ajv.compile(parsed.schema);
         const key = `${prefix}${parsed.key}`;
@@ -592,7 +592,7 @@ export function workflowEngine(
               workerID: workerIdentity(current.ownerID, spawnKey),
               spawnKey,
               created: Date.now(),
-              phase: input.phase ?? current.phase,
+              phase: input.phase ?? phase,
               directory: plan.directory,
               model: sourceModel,
               profileFingerprint: `pending:${sourceProfileFingerprint}`,
@@ -1072,7 +1072,7 @@ export function workflowEngine(
           await waitForChange(runID, controller.signal);
         }
       },
-      workflow: async (input) => {
+      workflow: async (input, _signal, phase = initialPhase) => {
         if (depth >= 4) throw new Error("Nested workflow depth limit reached (4)");
         if (!options.loadSaved) throw new Error("Saved workflow loading is not configured");
         const scope = `${prefix}workflow:${input.name}`;
@@ -1106,7 +1106,7 @@ export function workflowEngine(
           script,
           args: input.args ?? null,
           signal: controller.signal,
-          host: hostFor(`${prefix}workflow:${input.name}:${index}/`, depth + 1),
+          host: hostFor(`${prefix}workflow:${input.name}:${index}/`, depth + 1, phase),
           timeoutMs: remaining,
         });
       },
@@ -1114,7 +1114,7 @@ export function workflowEngine(
     try {
       const output = await executeWorkflow({
         script: run.script, args: run.args, signal: controller.signal,
-        host: hostFor("", 0), timeoutMs: remaining,
+        host: hostFor("", 0, parseWorkflow(run.script).meta.phases?.[0]?.title ?? "Starting"), timeoutMs: remaining,
       });
       const latest = await store.get(runID);
       if (latest.status === "stopping" || latest.status === "stopped") {
