@@ -17,6 +17,9 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+# Under `git bisect run` or a hook, GIT_DIR names the caller's repository, and a fixture's `git init` would reinitialize it.
+for name in [name for name in os.environ if name.startswith("GIT_")]:
+    del os.environ[name]
 
 def eventually(check, timeout=30):
     deadline = time.monotonic() + timeout
