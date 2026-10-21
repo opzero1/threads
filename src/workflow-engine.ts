@@ -1080,18 +1080,19 @@ export function workflowEngine(
       const parsed = parseWorkflow(script);
       validateBody(parsed.body);
       const id = runIdentity(ownerID, input.key);
-      if (input.resumeFrom !== undefined) {
+      const fingerprint = workflowHash({ script, args: input.args, ...(input.resumeFrom === undefined ? {} : { resumeFrom: input.resumeFrom }), limits: {
+        concurrency: input.concurrency, maxAgents: input.maxAgents,
+        agentTimeoutMs: input.agentTimeoutMs, timeoutMs: input.timeoutMs,
+        ...(input.tokenBudget === undefined ? {} : { tokenBudget: input.tokenBudget }),
+      }, runtime });
+      // An exact retry returns its run even if the prior run has since changed state.
+      if (input.resumeFrom !== undefined && (await store.get(id).catch(() => undefined))?.fingerprint !== fingerprint) {
         if (input.resumeFrom === id) throw new Error("resumeFrom needs a new key; the new run gets its own record");
         const prior = await owned(ownerID, input.resumeFrom);
         if (!terminal.has(prior.status) && !(prior.status === "paused" && !leases.has(prior.id))) {
           throw new Error(`Cannot resume from workflow ${prior.id} in ${prior.status}; stop it first`);
         }
       }
-      const fingerprint = workflowHash({ script, args: input.args, ...(input.resumeFrom === undefined ? {} : { resumeFrom: input.resumeFrom }), limits: {
-        concurrency: input.concurrency, maxAgents: input.maxAgents,
-        agentTimeoutMs: input.agentTimeoutMs, timeoutMs: input.timeoutMs,
-        ...(input.tokenBudget === undefined ? {} : { tokenBudget: input.tokenBudget }),
-      }, runtime });
       const now = Date.now();
       const run = WorkflowRun.parse({
         version: 1, id, key: input.key, ownerID, callerAgent: runtime.agent,

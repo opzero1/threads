@@ -2202,6 +2202,30 @@ ${tail}`;
     await fixture.api.dispose();
   });
 
+  test("an exact retry returns the same run after its paused prior run resumes", async () => {
+    const fixture = await harness("manual");
+    const prior = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "first", script: steps({ a: "A", b: "B" }), args: null }), runtime);
+    await fixture.waitForSpawn("a");
+    await fixture.api.control(fixture.ownerID, { runID: prior.id, action: "pause" });
+    await fixture.complete("a");
+    await reaches(fixture.api, fixture.ownerID, prior.id, "paused");
+    await fixture.api.dispose();
+    const reopened = fixture.reopen();
+    try {
+      const input = WorkflowStart.parse({ key: "second", script: steps({ a: "A" }), args: null, resumeFrom: prior.id });
+      const run = await settled(reopened, fixture.ownerID, (await reopened.start(fixture.ownerID, input, runtime)).id);
+      expect(run.status).toBe("completed");
+      await reopened.control(fixture.ownerID, { runID: prior.id, action: "resume" });
+      await reaches(reopened, fixture.ownerID, prior.id, "running");
+      const retried = await reopened.start(fixture.ownerID, input, runtime);
+      expect(retried.id).toBe(run.id);
+      expect(retried.status).toBe("completed");
+      await expect(reopened.start(fixture.ownerID, WorkflowStart.parse({ ...input, key: "third" }), runtime))
+        .rejects.toThrow(`Cannot resume from workflow ${prior.id} in running`);
+      await reopened.control(fixture.ownerID, { runID: prior.id, action: "stop" });
+    } finally { await reopened.dispose(); }
+  });
+
   test("a resumed run replays its reused steps after an engine restart without carrying over checkpoint answers", async () => {
     const fixture = await harness("valid");
     const gated = steps({ a: "A" }, `return await checkpoint("Continue?", { key: "continue" });`);
