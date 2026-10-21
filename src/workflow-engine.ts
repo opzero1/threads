@@ -5,6 +5,7 @@ import { SessionMessage } from "@opencode/schema/session-message";
 import Ajv from "ajv";
 import type { z } from "zod";
 import { parseWorkflow, validateBody, executeWorkflow, type WorkflowHost } from "./workflow-runtime";
+import { bounded, LOG_LIMIT, PHASE_LIMIT } from "./workflow-runtime-protocol";
 import { withResolvedGrants } from "./external-access";
 import { requireDelegation } from "./permissions";
 import {
@@ -66,7 +67,6 @@ const terminal = new Set(["stopped", "failed", "completed"]);
 const activeStatus = new Set(["running", "pausing", "stopping", "waiting"]);
 const settlementLimit = 16 * 1024 * 1024;
 const cleanupDisposeLimit = 2_000;
-const bounded = (text: string, length = 20_000) => text.length <= length ? text : `${text.slice(0, length)}\n…[truncated]`;
 const boundedBytes = (text: string, limit: number) => {
   if (Buffer.byteLength(JSON.stringify(text), "utf8") - 2 <= limit) return text;
   const suffix = "\n…[truncated]";
@@ -1002,12 +1002,12 @@ export function workflowEngine(
         }
       },
       phase: async (title) => {
-        const phase = bounded(String(title), 160);
+        const phase = bounded(String(title), PHASE_LIMIT);
         await store.update(runID, (current) => { current.phase = phase; });
       },
       log: async (message) => {
         await store.update(runID, (current) => {
-          current.logs.push({ time: Date.now(), text: bounded(String(message), 2_000) });
+          current.logs.push({ time: Date.now(), text: bounded(String(message), LOG_LIMIT) });
           if (current.logs.length > 200) current.logs.splice(0, current.logs.length - 200);
         });
       },

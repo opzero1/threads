@@ -1631,6 +1631,25 @@ return true;` }), { agent: "caller", model: { providerID: "test", id: "model" } 
     } finally { await fixture.api.dispose(); }
   });
 
+  test("a repeated parent phase replaces a child's displayed phase", async () => {
+    const fixture = await harness("valid");
+    fixture.setSaved("phased", `export const meta = { name: "phased", description: "sets a phase" };
+phase("Child");
+await agent("child", { key: "c", agent: "analyst" });
+return true;`);
+    try {
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "repeat-phase", script: `
+export const meta = { name: "parent", description: "repeats a phase" };
+phase("Parent");
+await workflow("phased");
+phase("Parent");
+return true;` }), { agent: "caller", model: { providerID: "test", id: "model" } });
+      const run = await settled(fixture.api, fixture.ownerID, started.id);
+      expect(run.status).toBe("completed");
+      expect(run.phase).toBe("Parent");
+    } finally { await fixture.api.dispose(); }
+  });
+
   test("keyless agents in a parallel fan-out get distinct keys that replay after restart", async () => {
     const fixture = await harness("manual", 4);
     const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "keyless", concurrency: 3, script: `

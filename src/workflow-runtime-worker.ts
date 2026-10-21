@@ -1,5 +1,5 @@
 import { executeWorkflowInterpreter, type WorkflowHost } from "./workflow-runtime-interpreter";
-import { assertBoundedMessage, boundedDiagnostic, type HostMethod, type ParentToWorker, type ScriptState, type WorkerToParent } from "./workflow-runtime-protocol";
+import { assertBoundedMessage, bounded, boundedDiagnostic, LOG_LIMIT, PHASE_LIMIT, type HostMethod, type ParentToWorker, type ScriptState, type WorkerToParent } from "./workflow-runtime-protocol";
 
 declare const self: {
   onmessage: ((event: MessageEvent<ParentToWorker>) => void) | null;
@@ -11,6 +11,7 @@ const pending = new Map<number, { resolve(value: unknown): void; reject(error: u
 let nextID = 1;
 let started = false;
 let phase: string | undefined;
+let newPhase = false;
 let logs: string[] = [];
 
 function send(message: WorkerToParent): void {
@@ -18,9 +19,10 @@ function send(message: WorkerToParent): void {
 }
 
 function state(): ScriptState {
-  const taken = logs;
+  const taken = { phase, newPhase, logs };
+  newPhase = false;
   logs = [];
-  return { phase, logs: taken };
+  return taken;
 }
 
 function hostCall(method: HostMethod, input: unknown): Promise<unknown> {
@@ -34,9 +36,9 @@ function hostCall(method: HostMethod, input: unknown): Promise<unknown> {
 
 const host: WorkflowHost = {
   agent: (input) => hostCall("agent", input),
-  phase: (title) => { phase = title; },
+  phase: (title) => { phase = bounded(title, PHASE_LIMIT); newPhase = true; },
   log: (message) => {
-    logs.push(message);
+    logs.push(bounded(message, LOG_LIMIT));
     // The run keeps only its latest 200 log lines.
     if (logs.length > 200) logs.splice(0, logs.length - 200);
   },

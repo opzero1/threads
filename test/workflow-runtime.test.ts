@@ -127,6 +127,40 @@ describe("real CodeMode workflow execution", () => {
     expect((await failure(run(`phase(1);`))).message).toContain("phase title must be a string");
   });
 
+  test("announces every phase() call, including a repeat of the current phase", async () => {
+    const phases: string[] = [];
+    await run(`phase("Parent"); await workflow("child"); phase("Parent"); return 1;`, {
+      host: host({ phase: async (title) => { phases.push(title); } }),
+    });
+    expect(phases).toEqual(["Parent", "Parent"]);
+  });
+
+  test("bounds oversized phase and log state before it reaches the host", async () => {
+    const seen: { agent?: string; phases: string[]; logs: string[] } = { phases: [], logs: [] };
+    await run(`phase("p".repeat(2_100_000)); log("l".repeat(2_100_000)); await agent("a"); log("m".repeat(2_100_000)); return 1;`, {
+      host: host({
+        agent: async (_input, _signal, phase) => { seen.agent = phase; },
+        phase: async (title) => { seen.phases.push(title); },
+        log: async (message) => { seen.logs.push(message); },
+      }),
+    });
+    expect(seen.agent).toBe(`${"p".repeat(160)}\n…[truncated]`);
+    expect(seen.phases).toEqual([seen.agent!]);
+    expect(seen.logs).toEqual([`${"l".repeat(2_000)}\n…[truncated]`, `${"m".repeat(2_000)}\n…[truncated]`]);
+  });
+
+  test("abort and timeout still apply while trailing state is delivered", async () => {
+    const stalled = host({ log: () => new Promise<void>(() => {}) });
+    expect((await failure(run(`log("stuck"); return 1;`, { host: stalled, timeoutMs: 50 }))).message).toContain("timed out");
+    const controller = new AbortController();
+    let delivering!: () => void;
+    const started = new Promise<void>((resolve) => { delivering = resolve; });
+    const promise = run(`log("stuck"); return 1;`, { signal: controller.signal, host: host({ log: () => { delivering(); return new Promise<void>(() => {}); } }) });
+    await started;
+    controller.abort(new Error("stop delivery"));
+    expect((await failure(promise)).message).toContain("stop delivery");
+  });
+
   test("derives distinct, deterministic keys for keyless agents and keeps explicit keys", async () => {
     const body = `return await parallel([
       () => agent("same", { agent: "x", label: "l" }),

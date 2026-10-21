@@ -94,14 +94,10 @@ export async function executeWorkflow(input: ExecuteInput): Promise<unknown> {
       case "workflow": return input.host.workflow(value as { name: string; args?: unknown }, hostController.signal, phase);
     }
   };
-  let displayedPhase: string | undefined;
   let delivered: Promise<void> = Promise.resolve();
   const deliver = (state: ScriptState): Promise<void> => {
     delivered = delivered.then(async () => {
-      if (state.phase !== undefined && state.phase !== displayedPhase) {
-        displayedPhase = state.phase;
-        await input.host.phase(state.phase, hostController.signal);
-      }
+      if (state.newPhase && state.phase !== undefined) await input.host.phase(state.phase, hostController.signal);
       for (const message of state.logs) await input.host.log(message, hostController.signal);
     });
     return delivered;
@@ -131,8 +127,8 @@ export async function executeWorkflow(input: ExecuteInput): Promise<unknown> {
       void tracked.finally(() => operations.delete(tracked));
       return;
     }
-    if (message.type !== "result" || settled) return;
-    settled = true;
+    // Stay unsettled while trailing state is delivered, so abort and timeout still apply.
+    if (message.type !== "result" || !acceptingCalls) return;
     acceptingCalls = false;
     if (message.ok) void deliver(message).then(() => resolveResult(message.value), rejectResult);
     else {
