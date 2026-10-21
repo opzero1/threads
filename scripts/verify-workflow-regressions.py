@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import time
 
-from fixture import Provider, config, decoded, run_tool, source_fingerprint
+from fixture import Provider, config, decoded, plugin_entry, run_tool, source_fingerprint
 from sandbox import Sandbox, eventually
 
 
@@ -390,7 +390,7 @@ def configured_defaults():
     original = config_path.read_text()
     configured = json.loads(original)
     configured["plugins"] = [
-        {"package": entry, "options": {"workflowConcurrency": 8, "workflowMaxAgents": 8}} if entry == str(target) else entry
+        {"package": entry, "options": {"workflowConcurrency": 8, "workflowMaxAgents": 8}} if entry == plugin_entry(target) else entry
         for entry in configured["plugins"]
     ]
     sandbox.stop()
