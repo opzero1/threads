@@ -162,6 +162,8 @@ export const WorkflowRun = z.object({
   }).optional(),
 });
 export type WorkflowRun = z.infer<typeof WorkflowRun>;
+export const workflowRunKey = (id: string) => `workflows/runs/${id}`;
+export const terminalWorkflowStatus = new Set(["stopped", "failed", "completed"]);
 export const WorkflowPrune = z.object({
   apply: z.boolean().default(false),
   olderThanDays: z.number().min(0).max(3650).optional(),

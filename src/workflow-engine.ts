@@ -35,6 +35,7 @@ import {
   type WorkflowStep,
   type WorkflowWorktreeOutcome,
   type WorkflowSettlement as Settlement,
+  terminalWorkflowStatus as terminal,
 } from "./workflow-types";
 import {
   assertGrantedProject,
@@ -62,7 +63,6 @@ const deliveryIdentity = (runID: string) => SessionMessage.ID.make(`msg_${digest
 const resultKey = (workerID: string) => `workflows/results/${workerID}`;
 const nestedKey = (runID: string, identity: string) => `workflows/nested/${runID}/${digest(identity)}`;
 const completionKey = (runID: string) => `workflows/completions/${runID}`;
-const terminal = new Set(["stopped", "failed", "completed"]);
 const activeStatus = new Set(["running", "pausing", "stopping", "waiting"]);
 const settlementLimit = 16 * 1024 * 1024;
 const boundedBytes = (text: string, limit: number) => {

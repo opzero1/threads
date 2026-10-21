@@ -185,7 +185,7 @@ const defaults: Rule[] = [
   { action: "read", resource: "*.env", effect: "ask" },
 ];
 
-async function fakeThreads(options: { coordinatorPermissions?: Rule[]; profiles?: Record<string, Rule[]>; coldLookups?: number } = {}) {
+async function fakeThreads(options: { coordinatorPermissions?: Rule[]; profiles?: Record<string, Rule[]>; coldLookups?: number; limit?: number } = {}) {
   const paths = await scratch();
   const sessions = new Map<string, Record<string, any>>();
   const storage = new Map<string, unknown>();
@@ -268,7 +268,7 @@ async function fakeThreads(options: { coordinatorPermissions?: Rule[]; profiles?
       },
     },
   } as unknown as Pick<Plugin.Context, "session" | "agent" | "storage">;
-  api = threads(ctx, 8);
+  api = threads(ctx, options.limit ?? 8);
   const runtime = { agent: "build", model: { providerID: "test", id: "model" } } as never;
   return { ...paths, api, coordinatorID, sessions, created, prompts, updates, events, agentLookups, layers, storage, runtime, profiles };
 }
@@ -430,6 +430,37 @@ describe("managed workers with grants", () => {
     expect(text.split(`</${marker}>`)).toHaveLength(3);
     expect(text).toContain(`\n\n<${marker}>\n${task}\n</${marker}>\n\nYou are a leaf workflow worker.`);
   });
+});
+
+test("a workflow step worker frees its slot when its step settles or its run ends", async () => {
+  const fixture = await fakeThreads({ limit: 1 });
+  const ownerID = Session.ID.make(fixture.coordinatorID);
+  const request = { title: "Work", directory: fixture.worker, task: "Work", agent: "reader" };
+  const workerIDs: Record<string, string> = {};
+  const step = async (stepKey: string) => {
+    workerIDs[stepKey] = (await fixture.api.spawnWorkflow(fixture.coordinatorID, { ...request, key: `workflow:wfr_limit:${stepKey}` }, fixture.runtime,
+      { ownerID, runID: "wfr_limit", stepKey, callerAgent: "build", access: "read", granted: false, isolation: "shared" })).workerID;
+  };
+  const run = (status: string, steps: Record<string, string>) => fixture.storage.set("workflows/runs/wfr_limit",
+    { status, steps: Object.entries(steps).map(([key, status]) => ({ key, workerID: workerIDs[key], status })) });
+  const managed = () => fixture.api.spawn(fixture.coordinatorID, { ...request, key: "managed" }, fixture.runtime);
+  const limited = "Coordinator worker limit reached (1)";
+
+  await step("first");
+  // A worktree step keeps its move's succeeded outcome while its task runs.
+  fixture.sessions.get(workerIDs.first)!.outcome = "succeeded";
+  await expect(step("second")).rejects.toThrow(limited);
+  fixture.storage.set("workflows/runs/wfr_limit", { status: "running", steps: "unreadable" });
+  await expect(step("second")).rejects.toThrow(limited);
+  run("running", { first: "running" });
+  await expect(step("second")).rejects.toThrow(limited);
+  run("running", { first: "failed" });
+  await step("second");
+  run("interrupted", { first: "failed", second: "running" });
+  await expect(managed()).rejects.toThrow(limited);
+  run("stopped", { first: "failed", second: "running" });
+  fixture.sessions.get((await managed()).workerID)!.outcome = "succeeded";
+  await expect(step("third")).rejects.toThrow(limited);
 });
 
 describe("workflow workers at their destination", () => {

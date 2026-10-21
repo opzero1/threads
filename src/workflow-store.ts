@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Plugin } from "@opencode/plugin";
 import { serialized } from "./threads";
-import { Json, WORKFLOW_CONTROL_HEADROOM, WORKFLOW_DIAGNOSTIC_JSON_BYTES, WORKFLOW_SETTLEMENT_DIAGNOSTIC_JSON_BYTES, WorkflowRun } from "./workflow-types";
+import { Json, WORKFLOW_CONTROL_HEADROOM, WORKFLOW_DIAGNOSTIC_JSON_BYTES, WORKFLOW_SETTLEMENT_DIAGNOSTIC_JSON_BYTES, WorkflowRun, workflowRunKey } from "./workflow-types";
 
 export function workflowHash(value: unknown): string {
   const json = Json.parse(value);
@@ -30,7 +30,7 @@ export function workflowStore(storage: Plugin.Context["storage"], options: {
     }, 0);
     return Math.max(WORKFLOW_CONTROL_HEADROOM, WORKFLOW_DIAGNOSTIC_JSON_BYTES + 256 + pending);
   };
-  const key = (id: string) => `workflows/runs/${id}`;
+  const key = workflowRunKey;
   // Each checkpoint answer is stored once, in settlement order. Readers see it on the checkpoint.
   const answered = (run: WorkflowRun) => {
     for (const entry of run.settlements ?? []) {
