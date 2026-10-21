@@ -20,6 +20,7 @@
 - The Threads list now uses OpenCode's native picker. Choose a row to open, dismiss, or restore it (Ctrl+D is gone), and one refresh loop drives the list, footer, and worker tabs.
 - Heartbeat acknowledgement checks no longer stop after `maxAckRetries`: an unresolved reminder is checked by exact ID once per cooldown until found or retired. Stored monitors drop the old cap and record a `migrate` history entry, and an identical retry of an enrollment made before the upgrade still returns the existing monitor. `scripts/verify-heartbeat.py` now covers the workflow, outage, and IPv6 scenarios from one `--target`, replacing `verify-heartbeat-ipv6.py`.
 - The workflow plan, verification record, and capacity findings are merged into one page, [Verification history](docs/verification-history.md). The repeated defaults are gone, `how-it-works.md` covers only the design, and its permission and follow-up descriptions now match the code.
+- The native verification suites share their tool-driving, Git, source-fingerprint, and heartbeat fixtures, and the lifecycle suite no longer runs part of the heartbeat script. The native load study, the click and refresh probes, and the stale failed-replay regression case are removed.
 
 ## 0.3.2
 
