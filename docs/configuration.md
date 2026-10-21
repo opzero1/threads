@@ -41,7 +41,7 @@ Keep your other plugin entries in the list.
 | `workflowMaxAgents` | Unset | 1–1,000 when supplied | Optional user-selected total-step budget for new workflows. |
 | `workflowWorktreeCleanup` | `true` | `true` or `false` | Whether a workflow removes its clean step worktrees when it ends. |
 
-A worker stops counting against `maxWorkers` when it reports, or when its run fails or is interrupted. A worker whose run ends without a report keeps its slot until you deal with it.
+A worker stops counting against `maxWorkers` when it reports, or when its run fails or is interrupted. A worker whose run ends without a report keeps its slot until you deal with it. A workflow step worker is the exception: it also frees its slot when its step fails or its workflow ends. A step whose task finishes without a `workflows_result` report fails. A follow-up to a worker that no longer counts doesn't take a slot.
 
 Values passed to `workflows_start` override configured workflow values. Task budgets have no built-in defaults; agents leave them unset unless requested. Existing runs keep the limits they started with. A run never has more active steps than `maxWorkers` allows. To run eight steps at once, set `maxWorkers` and `workflowConcurrency` to at least 8.
 

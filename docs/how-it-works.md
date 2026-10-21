@@ -30,7 +30,7 @@ Each worker also gets one explicit grant for `threads_report`. The tool's handle
 
 ## Reports and worker slots
 
-Threads treats a missing verdict as unfinished work, not as success. A worker whose run ends normally without a report therefore keeps its `maxWorkers` slot.
+Threads treats a missing verdict as unfinished work, not as success. A worker whose run ends normally without a report therefore keeps its `maxWorkers` slot. A workflow step worker is the exception: it also frees its slot when its step fails or its workflow ends. A step whose task finishes without a `workflows_result` report fails instead of being retried.
 
 `threads_report` delivers the report to the coordinator as a silent synthetic message, so the agent sees it without a notification row in your conversation.
 

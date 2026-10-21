@@ -21,7 +21,7 @@ import {
 } from "./external-access";
 import { permissionMatches, requireDelegation } from "./permissions";
 import { Report, WorkerView } from "./rpc";
-import { GrantedPaths } from "./workflow-types";
+import { GrantedPaths, terminalWorkflowStatus, workflowRunKey } from "./workflow-types";
 import { assertWorkerProject } from "./workflow-worker";
 
 const sessionID = z.string().transform((value) => Session.ID.make(value));
@@ -70,6 +70,10 @@ export const WorkflowWorker = z.object({
   stepKey: z.string().min(1),
   callerAgent: z.string().min(1),
 }).strict();
+const WorkflowProgress = z.object({
+  status: z.string(),
+  steps: z.array(z.object({ workerID: z.string(), status: z.string() })),
+});
 
 const digest = (parts: unknown[]) =>
   createHash("sha256").update(JSON.stringify(parts)).digest("hex");
@@ -447,9 +451,9 @@ export function threads(
     };
   }
 
-  async function list(coordinatorID: string, mode: "reconcile" | "snapshot" = "reconcile") {
+  async function workerSessions(coordinatorID: string, mode: "reconcile" | "snapshot") {
     if (mode === "reconcile") await reconcileFollowups(coordinatorID);
-    const workers: z.infer<typeof WorkerView>[] = [];
+    const sessions: NativeSession[] = [];
     let after: string | undefined;
     do {
       const page = await ctx.storage.scan({
@@ -474,10 +478,16 @@ export function threads(
           await ctx.storage.remove(entry.key);
           continue;
         }
-        workers.push(await view(session));
+        sessions.push(session);
       }
       after = page.next;
     } while (after);
+    return sessions;
+  }
+
+  async function list(coordinatorID: string, mode: "reconcile" | "snapshot" = "reconcile") {
+    const workers: z.infer<typeof WorkerView>[] = [];
+    for (const session of await workerSessions(coordinatorID, mode)) workers.push(await view(session));
     return workers;
   }
 
@@ -497,9 +507,28 @@ export function threads(
     });
   }
 
+  // A step worker's last outcome can't show that its task finished, so ask its run: a failed or
+  // completed step, or an ended run, frees the slot. Without a readable record the worker still counts.
+  async function settledStep(workerID: string, runID: string, runs: Map<string, Map<string, boolean>>) {
+    if (!runs.has(runID)) {
+      const run = WorkflowProgress.safeParse(await ctx.storage.get(workflowRunKey(runID)));
+      const ended = run.success && terminalWorkflowStatus.has(run.data.status);
+      runs.set(runID, new Map(run.success ? run.data.steps.map((step) =>
+        [step.workerID, ended || step.status === "failed" || step.status === "completed"]) : []));
+    }
+    return runs.get(runID)!.get(workerID) === true;
+  }
+
   async function unfinishedWorkers(coordinatorID: string) {
-    return (await list(coordinatorID)).filter((worker) =>
-      !worker.report && worker.outcome !== "failed" && worker.outcome !== "interrupted").length;
+    const runs = new Map<string, Map<string, boolean>>();
+    let count = 0;
+    for (const session of await workerSessions(coordinatorID, "reconcile")) {
+      const worker = await view(session);
+      if (worker.report || worker.outcome === "failed" || worker.outcome === "interrupted") continue;
+      const workflow = WorkflowWorker.safeParse(session.metadata?.opWorkflow);
+      if (!workflow.success || !await settledStep(session.id, workflow.data.runID, runs)) count++;
+    }
+    return count;
   }
 
   return {
