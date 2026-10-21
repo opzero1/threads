@@ -1,8 +1,11 @@
+import hashlib
 import json
 import re
 import threading
-import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from sandbox import eventually
 
 
 # Threads registers these administrative tools for Code Mode. A model reaches them only through
@@ -55,6 +58,27 @@ def code_mode_result(name, part):
     return {**part, "state": {**part["state"], "status": "error" if failed else "completed"}}
 
 
+def run_tool(sandbox, provider, session_id, name, arguments):
+    """Have the fixture model call one Threads tool in `session_id`, wait for the session to go idle, and return the finished tool part."""
+    def results():
+        messages = sandbox.api("GET", f"/api/session/{session_id}/message?limit=100")["data"]
+        return [part for message in messages if message["type"] == "assistant" for part in message["content"]
+                if part["type"] == "tool" and part["name"] == exposed(name) and part["state"]["status"] in ["completed", "error"]]
+
+    before = {part["id"] for part in results()}
+    marker = f"FIXTURE_{uuid.uuid4().hex}"
+    provider.responses[marker] = tool_call(name, arguments)
+    sandbox.api("POST", f"/api/session/{session_id}/prompt", {"text": marker})
+    output = eventually(lambda: next((part for part in results() if part["id"] not in before), None), timeout=60)
+    eventually(lambda: session_id not in sandbox.api("GET", "/api/session/active")["data"], timeout=60)
+    return code_mode_result(name, output)
+
+
+def decoded(part):
+    assert part["state"]["status"] == "completed", part
+    return json.loads(part["state"]["content"][0]["text"])
+
+
 def native_tools(request):
     return {tool["function"]["name"] for tool in request.get("tools", [])}
 
@@ -73,7 +97,6 @@ class Provider:
         self.failed_once = set()
         self.cancelled = 0
         self.release = threading.Event()
-        self.streams = []
         provider = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -93,27 +116,6 @@ class Provider:
                 ]
                 position, marker, selected = matches[-1] if matches else (-1, None, None)
                 tools = [message for message in messages[position + 1:] if message.get("role") == "tool"]
-                if selected and selected.get("stream"):
-                    schedule = selected["stream"]
-                    receipt = {"marker": marker, "started": time.monotonic(), "sent": 0, "chunks": schedule["chunks"], "interval": schedule["interval"]}
-                    provider.streams.append(receipt)
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/event-stream")
-                    self.end_headers()
-                    try:
-                        for index in range(schedule["chunks"]):
-                            chunk = {"id": "native-load", "object": "chat.completion.chunk", "model": "fixture", "choices": [{"index": 0, "delta": {"content": f"token{index} "}, "finish_reason": None}]}
-                            self.wfile.write(("data: " + json.dumps(chunk) + "\n\n").encode())
-                            self.wfile.flush()
-                            receipt["sent"] += 1
-                            time.sleep(schedule["interval"])
-                        self.wfile.write(('data: ' + json.dumps({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 20, "completion_tokens": schedule["chunks"], "total_tokens": 20 + schedule["chunks"]}}) + '\n\ndata: [DONE]\n\n').encode())
-                        self.wfile.flush()
-                    except (BrokenPipeError, ConnectionResetError):
-                        provider.cancelled += 1
-                    finally:
-                        receipt["finished"] = time.monotonic()
-                    return
                 if selected and (selected.get("error_always") or
                                  (selected.get("error_once_after_tool") and tools and marker not in provider.failed_once)):
                     provider.failed_once.add(marker)
@@ -197,3 +199,15 @@ def config(plugin, provider):
             },
         },
     }
+
+
+def source_fingerprint(target):
+    """One hash over the files OpenCode can load from the plugin package at `target`; missing files are skipped."""
+    digest = hashlib.sha256()
+    paths = [target / "index.ts", target / "tui.ts", target / "tui.js", target / "package.json", target / "bin" / "op-threads-heartbeat.mjs",
+             *sorted((target / "src").glob("*.ts")), *sorted((target / "src").glob("*.tsx"))]
+    for path in paths:
+        if path.exists():
+            digest.update(str(path.relative_to(target)).encode())
+            digest.update(path.read_bytes())
+    return digest.hexdigest()

@@ -1,9 +1,9 @@
 import json
 from pathlib import Path
 import sys
-import uuid
 
-from fixture import Provider, code_mode_namespace, code_mode_result, config, exposed, native_tools, tool_call
+import fixture
+from fixture import Provider, code_mode_namespace, config, native_tools
 from sandbox import Sandbox, eventually
 
 
@@ -25,24 +25,7 @@ def messages(session_id):
 
 
 def run_tool(session_id, name, arguments):
-    def results():
-        return [
-            part for message in messages(session_id) if message["type"] == "assistant"
-            for part in message["content"] if part["type"] == "tool" and part["name"] == exposed(name)
-            and part["state"]["status"] in ["completed", "error"]
-        ]
-
-    before = {part["id"] for part in results()}
-    marker = f"FIXTURE_{uuid.uuid4().hex}"
-    provider.responses[marker] = tool_call(name, arguments)
-    sandbox.api("POST", f"/api/session/{session_id}/prompt", {"text": marker})
-
-    def result():
-        return next((part for part in results() if part["id"] not in before), None)
-
-    output = eventually(result, timeout=60)
-    eventually(lambda: session_id not in sandbox.api("GET", "/api/session/active")["data"])
-    return code_mode_result(name, output)
+    return fixture.run_tool(sandbox, provider, session_id, name, arguments)
 
 
 try:

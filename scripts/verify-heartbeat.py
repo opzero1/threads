@@ -13,13 +13,10 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
-import subprocess
 import time
 import uuid
-import sandbox as sandbox_module
-from sandbox import Sandbox, eventually
-from fixture import Provider, code_mode_result, config, exposed, tool_call
+from sandbox import Heartbeat, IsolatedSandbox, eventually
+from fixture import Provider, config, decoded, run_tool, source_fingerprint
 
 root = Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -28,28 +25,17 @@ parser.add_argument("--artifacts", type=Path, default=root / ".audit/recovery/he
 parser.add_argument("--scenario", action="append", choices=["workflow", "outage", "ipv6"])
 options = parser.parse_args()
 target = options.target.resolve()
-runner = target / "bin/op-threads-heartbeat.mjs"
 artifacts = options.artifacts.resolve()
 artifacts.mkdir(parents=True, exist_ok=True)
 domain = "gui/" + str(os.getuid())
 checks = []
-commands = []
 labels = []
+heartbeat = Heartbeat(target, artifacts)
+command, cli = heartbeat.command, heartbeat.cli
 provider = Provider()
 sandbox = None
 installed = False
 label = "com.opthreads.heartbeat.test-" + uuid.uuid4().hex
-config_file = None
-
-class IsolatedSandbox(Sandbox):
-    def start(self):
-        self.env["OPENCODE_DISABLE_PROJECT_CONFIG"] = "true"
-        if not (self.directory / ".git").exists():
-            subprocess.run(["git", "init", "-b", "main", str(self.directory)], check=True, capture_output=True)
-            (self.directory / "fixture.txt").write_text("heartbeat fixture\n")
-            subprocess.run(["git", "add", "."], cwd=self.directory, check=True, capture_output=True)
-            subprocess.run(["git", "-c", "user.name=fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "fixture"], cwd=self.directory, check=True, capture_output=True)
-        super().start()
 
 class IPv6Sandbox(IsolatedSandbox):
     hostname = "::1"
@@ -59,43 +45,13 @@ def check(label, value=True):
     checks.append(label)
     print("PASS:", label, flush=True)
 
-def command(args):
-    result = subprocess.run(args, cwd=root, text=True, capture_output=True, timeout=90)
-    commands.append({"command": args, "exit": result.returncode, "stdout": result.stdout, "stderr": result.stderr})
-    (artifacts / "commands.json").write_text(json.dumps(commands, indent=2))
-    return result
-
-def cli(*args, success=True):
-    result = command(["node", str(runner), *args, "--config", str(config_file)])
-    if success:
-        assert result.returncode == 0, commands[-1]
-        return json.loads(result.stdout)
-    assert result.returncode != 0, commands[-1]
-    return result
-
 def tool(session, name, arguments):
-    def results():
-        messages = sandbox.api("GET", f"/api/session/{session}/message?limit=100")["data"]
-        return [part for message in messages if message["type"] == "assistant" for part in message["content"]
-                if part["type"] == "tool" and part["name"] == exposed(name) and part["state"]["status"] in ["completed", "error"]]
-    before = {part["id"] for part in results()}
-    marker = "HEARTBEAT_" + uuid.uuid4().hex
-    provider.responses[marker] = tool_call(name, arguments)
-    sandbox.api("POST", f"/api/session/{session}/prompt", {"text": marker})
-    result = code_mode_result(name, eventually(lambda: next((part for part in results() if part["id"] not in before), None), timeout=60))
-    eventually(lambda: session not in sandbox.api("GET", "/api/session/active")["data"])
-    assert result["state"]["status"] == "completed", result
-    return json.loads(result["state"]["content"][0]["text"])
+    return decoded(run_tool(sandbox, provider, session, name, arguments))
 
 def start(kind, directory):
     global sandbox
     # Keep each sandbox root, not only its evidence, under the artifacts directory.
-    original_mkdtemp = sandbox_module.tempfile.mkdtemp
-    sandbox_module.tempfile.mkdtemp = lambda prefix, dir: original_mkdtemp(prefix=prefix, dir=artifacts)
-    try:
-        sandbox = kind(config(target, provider), directory)
-    finally:
-        sandbox_module.tempfile.mkdtemp = original_mkdtemp
+    sandbox = kind(config(target, provider), directory, temp_parent=artifacts)
     sandbox.await_plugin()
     return sandbox
 
@@ -112,7 +68,6 @@ def uninstall():
     return result
 
 def workflow():
-    global config_file
     start(IsolatedSandbox, artifacts / "workflow")
     owner = sandbox.api("POST", "/api/session", {"permissions": [{"action": "heartbeat-fixture", "resource": "*", "effect": "ask"}]}, location=sandbox.directory)["data"]["id"]
     run = tool(owner, "workflows_start", {"key": "heartbeat-native", "script": 'export const meta = { name: "heartbeat", description: "fixture" }; return await checkpoint("Inspect", { key: "arbitrary", reviewer: "coordinator" });'})
@@ -124,9 +79,7 @@ def workflow():
     enrolled = patched
     host = sandbox.root / "host"
     host.mkdir()
-    config_file = sandbox.root / "runner.json"
-    config_file.write_text(json.dumps({"protocol": 1, "serviceFile": str(sandbox.root / "state/opencode/service.json"), "hostDirectory": str(host),
-                   "node": shutil.which("node"), "runner": str(runner), "intervalMs": 60_000, "label": label, "launchAgentsDirectory": str(sandbox.root / "launchagents")}))
+    heartbeat.configure(sandbox, host, label)
     snapshot = sandbox.api("POST", "/api/rpc/workflows-heartbeat/snapshot", {"input": {"limit": 100}}, location=host)["output"]
     check("cold host RPC activates plugin and reads coordinator checkpoint", snapshot["entries"][0]["run"]["checkpoints"][0]["reviewer"] == "coordinator")
     (sandbox.artifacts / "openapi.json").write_text(json.dumps(sandbox.api("GET", "/openapi.json"), indent=2))
@@ -193,14 +146,13 @@ def workflow():
     sandbox.start()
     restarted = cli("once", "--shadow")
     check("isolated server restart conserves stop/deadline/spent budget", restarted["decisions"][0]["mode"] == "stopped" and restarted["decisions"][0]["wakesReserved"] == 1)
-    config_file.unlink()
+    heartbeat.config_file.unlink()
     check("isolated LaunchAgent installer reads back task-owned label", label in install(host)["readback"]["stdout"])
     status = cli("status")
     check("actual status observes existing service and launcher", status["launcher"]["code"] == 0 and status["observation"]["available"])
-    check("uninstall removes only task-owned launcher with negative readback", uninstall()["readback"]["code"] != 0 and not config_file.exists())
+    check("uninstall removes only task-owned launcher with negative readback", uninstall()["readback"]["code"] != 0 and not heartbeat.config_file.exists())
 
 def outage(kind):
-    global config_file
     start(kind, artifacts / ("ipv6" if kind is IPv6Sandbox else "outage"))
     name = "IPv6 " if kind is IPv6Sandbox else ""
     binary = Path(sandbox.binary).resolve()
@@ -216,13 +168,13 @@ def outage(kind):
     check(f"unchanged native {before['version']} writes its expected {name}registration", before["url"].startswith(prefix))
     host = sandbox.root / "host"
     host.mkdir()
-    config_file = sandbox.root / "runner.json"
+    heartbeat.config_file = sandbox.root / "runner.json"
     def lines(file):
         path = sandbox.root / file
         return path.read_text().splitlines() if path.exists() else []
     def runner_pid():
         result = command(["/bin/launchctl", "print", domain + "/" + label])
-        assert result.returncode == 0, commands[-1]
+        assert result.returncode == 0, heartbeat.commands[-1]
         return int(re.search(r"\bpid = (\d+)", result.stdout)[1])
     install(host)
     eventually(lambda: len(lines("runner.log")) > 0)
@@ -259,8 +211,6 @@ finally:
     if sandbox:
         sandbox.stop()
     provider.close()
-    hashes = {str(path.relative_to(target)): hashlib.sha256(path.read_bytes()).hexdigest() for path in [target / "package.json", runner, *sorted((target / "src").glob("heartbeat*.ts"))]}
-    hashes["scripts/verify-heartbeat.py"] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     absent = all(command(["/bin/launchctl", "print", domain + "/" + item]).returncode != 0 for item in labels)
-    (artifacts / "receipt.json").write_text(json.dumps({"target": str(target), "checks": checks, "hashes": hashes, "commands": commands, "labels": labels,
+    (artifacts / "receipt.json").write_text(json.dumps({"target": str(target), "checks": checks, "sourceHash": source_fingerprint(target), "commands": heartbeat.commands, "labels": labels,
         "cleaned": not installed and absent and (sandbox is None or sandbox.process.poll() is not None)}, indent=2))

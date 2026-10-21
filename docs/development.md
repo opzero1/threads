@@ -57,7 +57,7 @@ Run the checks that match your change. Evidence goes to `.audit/`, which git ign
 
 The fixture model calls Code Mode tools through `execute`. `scripts/fixture.py` maps each of those tool IDs to its Code Mode path and reports an inner call's failure as a tool error, so the suites keep using tool IDs.
 
-Use `THREADS_ARTIFACT_DIR=<new-directory>` to retain separate footer and workflow attempts. To compare streaming load, run `uv run --with pyte python scripts/measure-native-load.py <baseline-package> <changed-package> <new-directory>`. The harness measures native snapshots, journal reads, and concurrent health requests with closed and open workflow panels.
+Use `THREADS_ARTIFACT_DIR=<new-directory>` to retain separate footer and workflow attempts.
 
 Set `OPENCODE_SOURCE` to an OpenCode V2 source checkout to run the permission-oracle tests against its native evaluator. Those tests skip when the variable is absent.
 
