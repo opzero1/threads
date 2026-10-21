@@ -111,6 +111,5 @@ Reopening a terminal fixes a reload problem only after the installed package has
 
 ## Design records
 
-- [Verification record](workflows-verification.md): results of the checks behind each release.
-- [Workflow capacity findings](workflow-capacity-findings.md): exact bounds and measured load.
-- [Dynamic workflows plan](dynamic-workflows-plan.md) and [decision log](dynamic-workflows-decisions.tsv): how the workflow engine was designed and verified.
+- [Verification history](verification-history.md): what the checks behind each release measured, including workflow capacity.
+- [Decision log](dynamic-workflows-decisions.tsv): how the workflow engine was designed and verified.

@@ -1,6 +1,6 @@
 # How Threads works
 
-This page explains the design behind workers: how retries stay safe, where permissions come from, and what happens after a crash. You don't need it to use Threads. For everyday use, see [Work with workers](workers.md).
+This page explains the design behind Threads and what it doesn't support. You don't need it to use Threads. The current rules are in [Work with workers](workers.md) for workers, and in the [workflow runtime contract](../skills/workflow-authoring/references/runtime.md) and [Configuration](configuration.md) for workflows. [Verification history](verification-history.md) records what earlier releases measured.
 
 ## One package, two plugins
 
@@ -8,79 +8,51 @@ OpenCode V2 runs plugins in two places, so Threads ships two entry points from o
 
 The server plugin, `index.ts`, owns the tools, the worker index, the workflow runner, and the `threads` RPC. The terminal plugin, published as `tui.js`, draws the footer indicator, the Threads list, the workflow panel, and the sidebar's Workflows section. The terminal plugin only reads state. Everything that changes a worker goes through the server.
 
-## Worker identity and retries
+## Why requests carry keys
 
-The coordinator's ID and the spawn `key` together determine the worker ID. The plugin also stores a fingerprint of the request. That makes `threads_spawn` safe to retry:
+The coordinator's ID and the spawn `key` determine the worker ID, and a `threads_send` key determines the message ID. A retried call finds what the first call created instead of starting a second worker or delivering a message twice. The plugin stores a fingerprint of each spawn request, so a key can't quietly name different work, and a retry doesn't reset the worker's agent or model even if the profile changed since.
 
-- The same key with the same request returns the original worker and its original first message. The plugin doesn't reset its agent or model, even if the profile changed since.
-- The same key with a different title, directory, task, agent, or resolved `paths` is an error.
+A report belongs to the worker's original report message ID, so a worker recreated after deletion can't inherit an old verdict.
 
-Messages work the same way. A `threads_send` key determines the message ID, so a retry can't deliver a message twice. Reports are one per worker. The saved report belongs to the original report message ID, so a worker recreated after deletion can't inherit an old verdict.
+## Why a profile is checked twice
 
-Startup never replays a first prompt. If creation was interrupted, the agent repeats the identical spawn request to finish it.
-
-## Starting a worker with a profile
-
-When `agent` is set, the plugin resolves the profile in the worker's `directory`, after OpenCode loads that folder's configuration. Just before the first prompt, it checks again that the caller may select that profile, and it selects the profile's model.
-
-If the profile isn't available, the task doesn't start. The worker stays in the index. Fix the profile configuration, then repeat the identical spawn request. Until the first prompt is admitted, the plugin rejects follow-ups and direct prompts to that worker.
-
-## Worker permissions
-
-Without `agent`, a worker inherits the coordinator's agent permissions, followed by its session permissions.
-
-With `agent`, the worker uses the selected profile's permissions. The coordinator's session rules can only narrow them:
-
-- Every `deny` and `ask` rule of the coordinator becomes a hard denial on the worker.
-- The coordinator's `allow` rules are not copied, including allow exceptions after a denial. A read-only profile can't gain access through its parent.
-- One exception keeps approvals working. A coordinator `ask` for `external_directory` stays an approval request in the worker's tab, unless the profile denies that folder.
-
-`paths` grants `external_directory` for the listed folders only. It doesn't add tools. Explicit `external_directory` denies from the coordinator or the profile still win, and a grant that such a deny blocks fails before the worker is created.
-
-Each worker gets one explicit grant for `threads_report`. The tool's handler checks that the caller is the original worker, so even a read-only worker can report.
+The plugin resolves an `agent` profile in the worker's `directory`, after OpenCode loads that folder's configuration. Just before the first prompt, it checks again that the caller may select that profile. If the profile isn't available, the task doesn't start and the worker stays in the index until the identical spawn request is repeated.
 
 OpenCode's plugin API can't ask for approval for an agent ID chosen at runtime. That is why selecting a profile needs an existing `allow` rule for `subagent` on that ID.
 
-## Worker slots
+## How worker permissions are composed
 
-`maxWorkers` counts unfinished workers per coordinator. A worker holds its slot until it reports, or until its run fails or is interrupted.
+A worker with `agent` runs under the profile's rules, followed by session rules that Threads derives from the coordinator's session rules. When the plugin has the profile's rules, it pairs every coordinator rule with every profile rule in order and keeps the stricter effect of each overlap. OpenCode's last-match order therefore still holds: a coordinator `allow` exception after a broader `deny` or `ask`, such as `read *.env.example` after `read *.env.*`, survives where the profile also allows it. A coordinator `allow` never grants what the profile doesn't, and an overlap the plugin can't represent exactly becomes a denial.
 
-A worker whose run ends normally without a report keeps its slot. Threads treats a missing verdict as unfinished work, not as success. Hiding a worker doesn't free its slot either.
+For a Threads worker, the plugin loads the profile's rules for this only when the worker has `paths` or the coordinator has an `ask` rule that covers `external_directory`. Otherwise it keeps only the coordinator's restrictions, and allow exceptions that follow them are dropped. Workflow steps follow the [runtime contract](../skills/workflow-authoring/references/runtime.md#external-directories).
 
-Workflow steps owned by the same coordinator count against the same limit. The plugin checks the limit one request at a time for each coordinator.
+Each worker also gets one explicit grant for `threads_report`. The tool's handler checks that the caller is the original worker, so even a read-only worker can report.
 
-## How reports travel
+## Reports and worker slots
 
-`threads_report` stores the report and delivers it to the coordinator as a silent synthetic message. The agent sees it, but no notification row appears in your conversation. The report also stays available through `threads_list`.
+Threads treats a missing verdict as unfinished work, not as success. A worker whose run ends normally without a report therefore keeps its `maxWorkers` slot.
 
-Workers that report `PASS` or `PASS WITH NOTES` hide once they are idle. Other outcomes stay visible, because they need a person or an agent to look at them.
+`threads_report` delivers the report to the coordinator as a silent synthetic message, so the agent sees it without a notification row in your conversation.
 
 ## Why Threads doesn't open tabs
 
-Each open tab makes OpenCode load that session's Location, including its MCP servers, every time a terminal starts. A worker tab that opened by itself would keep a finished worker's Location awake long after the work ended.
+Each open tab makes OpenCode load that session's Location, including its MCP servers, every time a terminal starts. A worker tab that opened by itself would keep a finished worker's Location awake long after the work ended. So Threads opens a worker's tab only when you choose the worker in the Threads list.
 
-So Threads opens a worker's tab only when you choose the worker in the Threads list. A tab you open for an unreported worker closes after it reports, once you leave it.
+The terminal plugin doesn't request snapshots for streamed text, reasoning, tool input, compaction deltas, step content, or tool progress. These events change conversation content, not worker reports or workflow journals. Session lifecycle and metadata events, permission requests, and forms still trigger refreshes.
 
-The terminal plugin does not request snapshots for streamed text, reasoning, tool input, compaction deltas, step content, or tool progress. These events change conversation content, not worker reports or workflow journals. Session lifecycle and metadata events, permission requests, and forms still trigger refreshes.
+Worker state polls every 3 seconds only while a tab is busy or needs input, or a known worker is running. Workflow state polls on the same interval while a run can progress or the workflow panel is open, because journal updates emit no session event.
 
-Worker state polls every 3 seconds only while a tab is busy or needs input, or a known worker is running. Workflow state polls on the same interval while a run can progress or the workflow panel is open. This polling also finds journal updates that emit no session event. A closed workflow panel does not inspect its previously selected run, and another plugin's panel does not keep finished workflow lists polling. Explicit commands and workflow RPC updates still request fresh state.
-
-OpenCode itself still refreshes catalogs for any Location that starts while a terminal is connected, including a worker's. Threads can't prevent that. The [verification record](workflows-verification.md#loaded-locations) has the measurements.
-
-Filtering stream events reduces snapshot requests, but each remaining workflow snapshot still scans saved journals. Waiting checkpoints also poll once per second. A native comparison with 120 saved runs reduced workflow snapshots from 131–135 to 7–9 per streaming window. Journal reads remained, and health latency was too noisy to establish a statistically significant improvement. These measurements do not establish the cause of earlier service timeouts.
+OpenCode itself still refreshes catalogs for any Location that starts while a terminal is connected, including a worker's. Threads can't prevent that. See the [Loaded Locations measurements](verification-history.md#version-025-loaded-locations).
 
 ## Crashes and restarts
 
-Creating a session and indexing it are two separate writes. If the server crashes between them, the worker isn't indexed. Repeat the identical spawn request to finish it.
+Creating a session and indexing it are two separate writes, and so are admitting a report and saving its view. A crash between them leaves the first write in place, so repeating the identical request finishes the second without duplicating the first.
 
-Admitting a report and saving its view are also separate. If the server crashes between them, repeat the identical report. The coordinator's message is the source of truth and isn't duplicated.
-
-There is no custom outbox and no replay at startup. After a restart, check existing workers with `threads_list` before starting new ones. An idle session isn't a reason to start the work again.
+Each `threads_send` key has a durable record that moves from prepared to accepted, completed, and notified, and a pending record until it is notified. Recovery reuses the recorded message IDs, so a retried delivery can't duplicate the message or its completion notice. Startup itself replays nothing: it never sends a first prompt or a report again. See [after a crash or restart](workers.md#after-a-crash-or-restart) for what to do.
 
 Workflows have their own journal and recovery rules. See [Start and control](../skills/workflow-authoring/references/runtime.md#start-and-control).
 
-## Limits
+## Unsupported
 
-- Threads assumes one OpenCode server process. The per-coordinator limit check isn't shared across processes.
-- Snapshots remove index entries for deleted sessions.
-- A worker that never calls `threads_report` has no verdict. Its native outcome stays visible separately.
+- More than one OpenCode server process, or duplicate loaded copies of the plugin that share storage. The per-coordinator worker limit and the workflow scheduler aren't shared across processes.
+- Deleting individual workflow journal records, or deleting a run record while keeping its legacy completion journal.

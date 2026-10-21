@@ -39,7 +39,13 @@ The worker then gets that profile's system prompt, model, and permissions. A pro
 
 To select a profile, your own permissions must allow `subagent` for that agent ID. If a rule denies or asks, Threads rejects the request before it creates the worker.
 
-A selected worker never gets more access than your conversation has. See [worker permissions](how-it-works.md#worker-permissions) for the exact rules.
+A selected worker never gets more access than your conversation has. Your conversation's session rules can only narrow the profile's permissions:
+
+- Their `deny` and `ask` rules become denials on the worker.
+- An `ask` for `external_directory` stays an approval request in the worker's tab, unless the profile denies that folder.
+- Your `allow` rules never grant the worker what its profile doesn't. See [how worker permissions are composed](how-it-works.md#how-worker-permissions-are-composed) for when your allow exceptions are kept.
+
+If the profile isn't available when the worker starts, the task doesn't start. Fix the profile configuration, then repeat the identical spawn request. Until then, the worker rejects follow-ups.
 
 ## Give access to another folder
 
@@ -49,7 +55,7 @@ A worker asks before it uses a folder outside its `directory`. To let it use a r
 threads_spawn({ ..., paths: ["/absolute/path/to/reference-repo"] })
 ```
 
-The worker can then use that folder and everything inside it without an approval prompt. Its own permissions still decide what it can do there, so a read-only worker still can't edit. Explicit `external_directory` denies in your configuration still apply.
+The worker can then use that folder and everything inside it without an approval prompt. Its own permissions still decide what it can do there, so a read-only worker still can't edit. Explicit `external_directory` denies in your configuration or the profile still apply, and a grant that such a deny blocks fails before the worker is created.
 
 Without `paths`, the worker asks for approval in its own conversation, and the footer shows it as needing input.
 
@@ -117,6 +123,12 @@ A worker ends its task by calling `threads_report` with a verdict, a summary, an
 The report goes to your conversation's agent. To see every worker's report at once, ask the agent to run `threads_list`.
 
 A report is the worker's claim. Check its evidence before you accept the work. A worker that goes idle without a report has no verdict at all.
+
+## After a crash or restart
+
+Threads doesn't start or resume work at startup. Ask the agent to check existing workers with `threads_list` before it starts new ones. An idle worker isn't a reason to start its task again.
+
+If a crash interrupted `threads_spawn`, `threads_send`, or `threads_report`, repeat the identical call. Threads finds the worker, message, or report that the first call recorded instead of creating another. Undelivered follow-ups are sent again when the agent lists workers or starts its next turn.
 
 ## Let workers use subagents
 
