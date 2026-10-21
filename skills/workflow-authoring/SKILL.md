@@ -7,6 +7,8 @@ description: Author and run durable dynamic JavaScript workflows in OpenCode wit
 
 Use a workflow for broad independent work or a pipeline whose later steps consume earlier results. Keep small, tightly coupled tasks with one owner.
 
+Start a workflow only when the user asked for one, invoked `/workflow-run` or a saved workflow by name, or a loaded skill instructs it. Otherwise propose the workflow with its rough agent count and ask before you start it.
+
 For work across repositories, put the coordinator session in a directory that contains the intended sources, then set each step's `directory` to its repository. The worker uses that repository's OpenCode project for worktree isolation. Choose the scoped common ancestor before starting the run; a prompt mentioning another absolute path does not grant directory access.
 
 When a step needs a directory outside its location, such as a reference repository, list it in the step's `paths`. The worker can then use that directory and its subdirectories without asking, within its `access`: a read step still cannot edit files or run commands there. A step's `directory` may also be inside a granted path if its whole project, meaning its git worktree or the directory itself outside a repository, is granted and no explicit `external_directory` deny matches anything in it. Explicit `external_directory` denies from the coordinator or the role still win. Without a grant, a directory that the coordinator would have to approve raises an approval request in a write worker's tab, and the step waits for the answer. Read steps follow their role's `external_directory` rules.
