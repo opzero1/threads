@@ -274,7 +274,7 @@ export function workflowEngine(
       await ctx.session.synthetic({
         sessionID: run.ownerID,
         id: SessionMessage.ID.make(run.deliveryID),
-        text: `Workflow ${run.name} (${run.id}) finished:\n${compact}\nUse tools.workflows.inspect through execute with runID ${run.id} for the full durable result and step details.`,
+        text: `Workflow ${run.name} (${run.id}) finished:\n${compact}\nUse tools.workflows.inspect through execute with runID ${run.id} for the full durable result and step details. To start a new run that reuses its completed steps, pass resumeFrom ${run.id} to workflows_start.`,
         metadata: { opWorkflowDelivery: Json.parse(report), runID: run.id },
         delivery: "queue",
         resume: true,
@@ -468,12 +468,14 @@ export function workflowEngine(
     const seen = new Set<string>();
     const pendingAgents = new Set<Promise<unknown>>();
     let completionOrder: Settlement[];
+    let reusable: Extract<WorkflowStep, { status: "completed" }>[] = [];
     try {
       const storedCompletionOrder = await ctx.storage.get(completionKey(runID));
       if (run.settlements === undefined || (run.settlements.length === 0 && storedCompletionOrder !== undefined)) {
         run = await store.update(runID, (current) => { current.settlements = readSettlements(current, storedCompletionOrder); });
       }
       completionOrder = readSettlements(run, undefined);
+      if (run.resumeFrom !== undefined) reusable = (await store.get(run.resumeFrom)).steps.filter(isCompleted);
     } catch (error) {
       try {
         await store.update(runID, (current) => { current.status = "failed"; current.error = errorText(error); }, "control")
@@ -576,14 +578,24 @@ export function workflowEngine(
               if (existing.fingerprint !== requestFingerprint) throw new Error(`Workflow key ${key} was resumed with different input; use a new run key`);
               return;
             }
-            if (current.limits.maxAgents !== null && current.steps.length >= current.limits.maxAgents) throw new Error(`Workflow agent limit reached (${current.limits.maxAgents})`);
+            const index = current.steps.reduce((maximum, step) => Math.max(maximum, step.index), -1) + 1;
+            const reused = reusable.find((step) => step.key === key && step.fingerprint === requestFingerprint);
+            if (reused) {
+              current.steps.push({
+                ...reused, index, phase: input.phase ?? current.phase,
+                usage: { tokens: 0, cost: 0, measured: true }, reusedFrom: reused.reusedFrom ?? current.resumeFrom,
+              });
+              return;
+            }
+            const live = current.steps.filter((step) => !(step.status === "completed" && step.reusedFrom !== undefined)).length;
+            if (current.limits.maxAgents !== null && live >= current.limits.maxAgents) throw new Error(`Workflow agent limit reached (${current.limits.maxAgents})`);
             const plan = workflowDirectoryPlan(current, directoryInput, key);
             const spawnKey = `workflow:${current.id}:${key}`;
             current.steps.push({
               status: "prepared",
               key,
               fingerprint: requestFingerprint,
-              index: current.steps.reduce((maximum, step) => Math.max(maximum, step.index), -1) + 1,
+              index,
               input,
               workerID: workerIdentity(current.ownerID, spawnKey),
               spawnKey,
@@ -866,7 +878,7 @@ export function workflowEngine(
               }
             }
           };
-          const pending = perform();
+          const pending = previous.status === "completed" && previous.reusedFrom !== undefined ? Promise.resolve(previous.report.result) : perform();
           pendingAgents.add(pending);
           try {
             const existing = recordedSettlement("agent", key);
@@ -1067,17 +1079,23 @@ export function workflowEngine(
       const parsed = parseWorkflow(script);
       validateBody(parsed.body);
       const id = runIdentity(ownerID, input.key);
-      const fingerprint = workflowHash({ script, args: input.args, limits: {
+      const fingerprint = workflowHash({ script, args: input.args, ...(input.resumeFrom === undefined ? {} : { resumeFrom: input.resumeFrom }), limits: {
         concurrency: input.concurrency, maxAgents: input.maxAgents,
         agentTimeoutMs: input.agentTimeoutMs, timeoutMs: input.timeoutMs,
         ...(input.tokenBudget === undefined ? {} : { tokenBudget: input.tokenBudget }),
       }, runtime });
+      // Only an ended run: it accepts no more results, so its completed steps can't change under the new run.
+      if (input.resumeFrom !== undefined) {
+        if (input.resumeFrom === id) throw new Error("resumeFrom needs a new key; the new run gets its own record");
+        const prior = await owned(ownerID, input.resumeFrom);
+        if (!terminal.has(prior.status)) throw new Error(`Cannot resume from workflow ${prior.id} in ${prior.status}; stop it first`);
+      }
       const now = Date.now();
       const run = WorkflowRun.parse({
         version: 1, id, key: input.key, ownerID, callerAgent: runtime.agent,
         model: runtime.model, projectID: owner.projectID, directory: owner.location.directory,
         name: parsed.meta.name, description: parsed.meta.description, script, args: input.args,
-        fingerprint, limits: input, status: "running", created: now, updated: now,
+        fingerprint, ...(input.resumeFrom === undefined ? {} : { resumeFrom: input.resumeFrom }), limits: input, status: "running", created: now, updated: now,
         phase: parsed.meta.phases?.[0]?.title ?? "Starting", steps: [], logs: [], checkpoints: [],
         settlements: [],
         deliveryID: deliveryIdentity(id), delivered: false,
