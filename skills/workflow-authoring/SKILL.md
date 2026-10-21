@@ -27,7 +27,7 @@ Use `access: "read"` for investigations. It denies edits and shell commands. Rea
 
 Verification evidence is part of the handoff. A completed run means the script ran to the end, not that every step passed: read each step's verdict before giving yours. When the script needs a decision, put it in the step's schema and branch on it. Do not replace execution evidence with reviewer votes. A workflow does not expand the user's authorization for external actions.
 
-Workers finish required commands and inspect their results before reporting or ending their execution. Keep dependent checks in a foreground tool call; if a tool backgrounds them, collect its completion before finishing. A missing-report reminder asks the worker to complete the handoff, not cancel unfinished checks. Native idle while a command is still running is not task completion.
+Workers finish required commands and inspect their results before reporting or ending their execution. Keep dependent checks in a foreground tool call; if a tool backgrounds them, collect its completion before finishing. A worker that ends without a report fails its step; the engine does not remind it. Native idle while a command is still running is not task completion.
 
 For requested unattended monitoring, use the packaged `tools.workflows.heartbeat_*` Code Mode tools and shared runner described in [Workflow heartbeats](../../docs/heartbeat.md). Enroll the recorded run instead of creating a project-specific monitor. Heartbeat reminders ask for inspection; they do not answer checkpoints or establish completion. Mark an authorized coordinator review with `checkpoint(prompt, { key, reviewer: "coordinator" })`; checkpoints default to human review.
 

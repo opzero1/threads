@@ -29,7 +29,7 @@ The body supports top-level `await`, ordinary data transformations, branching, a
 
 Workers submit `workflows_result({ verdict, summary, evidence, result })`. Invalid results return a validation error so the worker can repair its output. A native execution that ends without a result has no task verdict.
 
-`agent()` returns the result for every verdict. `FAIL` and `INCONCLUSIVE` stay on the step, in `workflows_inspect`, and in the completion notice, but they do not throw or fail the run. When the script must branch on a judgment, ask for it in the step's `schema`, such as `{ ok: boolean }`. A worker execution that fails or ends without an accepted report throws into the script. If the script catches that error and returns, the run completes with the returned value and the failed step stays recorded. An interrupted write still interrupts the run.
+`agent()` returns the result for every verdict. `FAIL` and `INCONCLUSIVE` stay on the step, in `workflows_inspect`, and in the completion notice, but they do not throw or fail the run. When the script must branch on a judgment, ask for it in the step's `schema`, such as `{ ok: boolean }`. A worker execution that fails or ends without an accepted report throws into the script. The engine does not prompt that worker again or start a replacement; to retry, catch the error and call `agent()` with a new key. If the script catches that error and returns, the run completes with the returned value and the failed step stays recorded. An interrupted write still interrupts the run.
 
 Profile restrictions and the coordinator's restrictions still apply. Read access blocks other plugin and MCP tools, including those with side effects, even if the selected profile permits them. Workflow workers cannot delegate. Selecting `access: "write"` does not grant permissions that the selected profile lacks.
 
@@ -131,7 +131,7 @@ Nested saved scripts are pinned to their run. Agent successes, exposed failures,
 
 Legacy journals without checkpoint settlement order cannot deterministically resume an answered checkpoint. Such runs fail with a diagnostic and require a new run key. A corrupt or already-full legacy record remains preserved and produces an owner-visible diagnostic without blocking healthy sibling runs. An exact-limit legacy record may need explicit repair before any further control metadata fits.
 
-Checkpoint responses are stored in both checkpoint state and settlement order, so their bytes count twice toward the journal limit. A run too full to accept a response remains unanswered; use a smaller response or a new run key. An inconsistent settlement order may wait until the configured run deadline.
+Each checkpoint response is stored once, in settlement order, and counts toward the journal limit. A run too full to accept a response remains unanswered; use a smaller response or a new run key. An inconsistent settlement order may wait until the configured run deadline.
 
 ## Saved workflows
 
