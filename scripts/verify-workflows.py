@@ -452,8 +452,10 @@ return await pipeline(args.items, item => agent(item.prompt, {{
     sandbox.await_plugin()
     recovered = inspect(owner, begun["id"])
     assert recovered["result"] == run["result"] and recovered["status"] == "completed", recovered
-    assert len(provider.requests) == before
-    passed("completed run results survive a hard OpenCode service restart without new provider work")
+    # Recovery tells the coordinator about each interrupted run, and that notice starts a model turn at its own pace.
+    notices = [request["messages"][-1] for request in provider.requests[before:]]
+    assert all("interrupted: OpenCode stopped while this workflow was active" in str(notice.get("content")) for notice in notices), notices
+    passed("completed run results survive a hard OpenCode service restart without replaying its workers")
 
     crashed = inspect(owner, uncertain["id"])
     assert crashed["status"] == "interrupted", crashed
