@@ -267,7 +267,7 @@ export function workflowEngine(
           failed: run.steps.filter((step) => step.status === "failed").length,
         },
         usage: workflowSummary(run).usage,
-        // Small enough that the preview and step evidence fit the 7,000-character notice together.
+        // Leaves room for step evidence in the 7,000-character notice.
         ...(run.result === undefined ? {} : { result: bounded(JSON.stringify(run.result), 2_000) }),
         evidence: completed.slice(0, 6).map((step) => ({
           key: step.key,
