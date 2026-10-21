@@ -136,7 +136,9 @@ describe("worktree sweeper", () => {
 
   test("removes clean checkouts without force, keeps changed ones, and keeps branches", async () => {
     const fixture = await repository();
-    const directories = Object.fromEntries(await Promise.all(["clean", "branched", "dirty", "detached", "racing", "unregistered"].map(async (key) => [key, await fixture.checkout(key)] as const)));
+    // One at a time: a concurrent `git worktree add` can read another's half-written entry.
+    const directories: Record<string, string> = {};
+    for (const key of ["clean", "branched", "dirty", "detached", "racing", "unregistered"]) directories[key] = await fixture.checkout(key);
     await git(directories.branched, "switch", "-q", "-c", "feature/kept");
     await git(directories.branched, "commit", "-q", "--allow-empty", "-m", "branch work");
     await writeFile(join(directories.dirty, "new.txt"), "new\n");
