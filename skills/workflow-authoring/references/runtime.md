@@ -45,8 +45,8 @@ The runner resolves symlinks, removes duplicates, sorts the list, and records it
 
 ## Composition
 
-- `parallel(thunks)` runs async functions concurrently and returns results in input order.
-- `pipeline(items, ...stages)` runs each item through its stages independently. A fast item does not wait for slower items between stages.
+- `parallel(thunks)` runs async functions concurrently and returns results in input order. Pass functions, not promises: `() => agent(...)`. Every function settles before `parallel` returns. One failure is rethrown as is; several become an `AggregateError` whose message names the failed indexes.
+- `pipeline(items, ...stages)` runs each item through its stages independently. A fast item does not wait for slower items between stages. Each stage is called as `stage(value, item, index)`: the previous stage's result (the item for the first stage), the original item, and its index. Failures settle and rethrow as in `parallel`.
 - `await phase(title)` records a display phase.
 - `await log(message)` records a bounded progress message.
 - `workflow(name, args)` invokes a saved workflow within the parent's limits.
