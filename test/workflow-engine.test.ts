@@ -1764,6 +1764,24 @@ return await agent("inspect", { key: "grant", agent: "analyst", paths: ${JSON.st
     await fixture.api.dispose();
   });
 
+  test("rejects a forbidden global before creating the run and leaves the key unused", async () => {
+    const fixture = await harness("valid");
+    const runtime = { agent: "caller", model: { providerID: "test", id: "model" } };
+    const forbidden = `export const meta = { name: "clock", description: "forbidden global" }; return Date.now();`;
+    await expect(fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "clock", script: forbidden, args: null }), runtime))
+      .rejects.toThrow("Workflow cannot access Date");
+    fixture.setSaved("clock", forbidden);
+    await expect(fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "saved-clock", name: "clock", args: null }), runtime))
+      .rejects.toThrow("Workflow cannot access Date");
+    expect(await fixture.api.list(fixture.ownerID)).toHaveLength(0);
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({
+      key: "clock", script: `export const meta = { name: "clock", description: "fixed" }; return 1;`, args: null,
+    }), runtime);
+    expect((await settled(fixture.api, fixture.ownerID, started.id)).result).toBe(1);
+    expect(fixture.spawns()).toBe(0);
+    await fixture.api.dispose();
+  });
+
   test("rejects a granted step directory whose project escapes its grants or an explicit deny, before admission", async () => {
     const fixture = await harness("valid");
     const outside = await realpath(await mkdtemp(join(tmpdir(), "workflow-grant-")));
