@@ -1,5 +1,5 @@
 import { executeWorkflowInterpreter, type WorkflowHost } from "./workflow-runtime-interpreter";
-import { assertBoundedMessage, bounded, boundedDiagnostic, LOG_LIMIT, PHASE_LIMIT, type HostMethod, type ParentToWorker, type ScriptState, type WorkerToParent } from "./workflow-runtime-protocol";
+import { assertBoundedMessage, bounded, boundedDiagnostic, LOG_LIMIT, PHASE_LIMIT, type HostMethod, type ParentToWorker, type WorkerToParent } from "./workflow-runtime-protocol";
 
 declare const self: {
   onmessage: ((event: MessageEvent<ParentToWorker>) => void) | null;
@@ -11,18 +11,30 @@ const pending = new Map<number, { resolve(value: unknown): void; reject(error: u
 let nextID = 1;
 let started = false;
 let phase: string | undefined;
-let newPhase = false;
-let logs: string[] = [];
+
+// Progress waits here while 16 progress messages are outstanding, so phase() and log() alone
+// cannot queue unbounded messages. A host call or the result sends waiting progress regardless.
+// Waiting progress keeps the latest phase and 200 lines.
+const PROGRESS_IN_FLIGHT = 16;
+let outstanding: Int32Array = new Int32Array(1);
+let progress: { phase?: string; logs: string[] } | undefined;
+let retry: ReturnType<typeof setTimeout> | undefined;
 
 function send(message: WorkerToParent): void {
   self.postMessage(message);
 }
 
-function state(): ScriptState {
-  const taken = { phase, newPhase, logs };
-  newPhase = false;
-  logs = [];
-  return taken;
+function sendProgress(): void {
+  if (!progress) return;
+  Atomics.add(outstanding, 0, 1);
+  send({ type: "progress", ...progress });
+  progress = undefined;
+}
+
+function offerProgress(): void {
+  if (!progress) return;
+  if (Atomics.load(outstanding, 0) < PROGRESS_IN_FLIGHT) sendProgress();
+  else retry ??= setTimeout(() => { retry = undefined; offerProgress(); }, 10);
 }
 
 function hostCall(method: HostMethod, input: unknown): Promise<unknown> {
@@ -30,17 +42,23 @@ function hostCall(method: HostMethod, input: unknown): Promise<unknown> {
   const id = nextID++;
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject });
-    send({ type: "hostCall", id, method, input, ...state() });
+    sendProgress();
+    send({ type: "hostCall", id, method, input, phase });
   });
 }
 
 const host: WorkflowHost = {
   agent: (input) => hostCall("agent", input),
-  phase: (title) => { phase = bounded(title, PHASE_LIMIT); newPhase = true; },
+  phase: (title) => {
+    phase = bounded(title, PHASE_LIMIT);
+    (progress ??= { logs: [] }).phase = phase;
+    offerProgress();
+  },
   log: (message) => {
+    const logs = (progress ??= { logs: [] }).logs;
     logs.push(bounded(message, LOG_LIMIT));
-    // The run keeps only its latest 200 log lines.
-    if (logs.length > 200) logs.splice(0, logs.length - 200);
+    if (logs.length > 200) logs.shift();
+    offerProgress();
   },
   checkpoint: (input) => hostCall("checkpoint", input),
   workflow: (input) => hostCall("workflow", input),
@@ -58,6 +76,7 @@ self.onmessage = (event) => {
   }
   if (message.type !== "start" || started) return;
   started = true;
+  outstanding = message.outstanding;
   void (async () => {
     try {
       assertBoundedMessage(message.args, "Workflow arguments");
@@ -69,9 +88,11 @@ self.onmessage = (event) => {
         timeoutMs: message.timeoutMs,
       });
       assertBoundedMessage(value, "Workflow result");
-      send({ type: "result", ok: true, value, ...state() });
+      sendProgress();
+      send({ type: "result", ok: true, value });
     } catch (error) {
-      send({ type: "result", ok: false, error: boundedDiagnostic(error), ...state() });
+      sendProgress();
+      send({ type: "result", ok: false, error: boundedDiagnostic(error) });
     }
   })();
 };
