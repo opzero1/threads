@@ -2,10 +2,9 @@ export const WORKFLOW_MESSAGE_LIMIT_BYTES = 1024 * 1024;
 export const WORKFLOW_DIAGNOSTIC_LIMIT = 8_192;
 
 export type HostMethod = "agent" | "phase" | "log" | "checkpoint" | "workflow";
-export type WorkflowHelperPolicy = "legacy-bounded" | "optional-counts";
 
 export type ParentToWorker =
-  | { type: "start"; script: string; args: unknown; maxCalls?: number; timeoutMs?: number; helperPolicy?: WorkflowHelperPolicy }
+  | { type: "start"; script: string; args: unknown; timeoutMs?: number }
   | { type: "hostResult"; id: number; ok: true; value: unknown }
   | { type: "hostResult"; id: number; ok: false; error: string };
 

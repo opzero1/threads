@@ -4,7 +4,7 @@ import { Session } from "@opencode/schema/session";
 import { SessionMessage } from "@opencode/schema/session-message";
 import Ajv from "ajv";
 import type { z } from "zod";
-import { parseWorkflow, executeWorkflow, type WorkflowHost } from "./workflow-runtime";
+import { parseWorkflow, validateBody, executeWorkflow, type WorkflowHost } from "./workflow-runtime";
 import { withResolvedGrants } from "./external-access";
 import { requireDelegation } from "./permissions";
 import {
@@ -470,12 +470,6 @@ export function workflowEngine(
     const timer = remaining === undefined ? undefined : setTimeout(() => controller.abort(new Error("Workflow timeout exceeded")), remaining);
     const seen = new Set<string>();
     const pendingAgents = new Set<Promise<unknown>>();
-    const maxCalls = run.limits.maxAgents === null ? undefined : run.limits.maxAgents * 8 + 100;
-    let hostCalls = 0;
-    const countCall = () => {
-      hostCalls++;
-      if (maxCalls !== undefined && hostCalls > maxCalls) throw new Error(`Workflow cumulative call limit exceeded (${maxCalls})`);
-    };
     let completionOrder: Settlement[];
     try {
       const storedCompletionOrder = await ctx.storage.get(completionKey(runID));
@@ -543,7 +537,6 @@ export function workflowEngine(
     };
     const hostFor = (prefix: string, depth: number): WorkflowHost => ({
       agent: async (raw) => {
-        countCall();
         const parsed = WorkflowAgentInput.parse(raw);
         if (parsed.schema !== undefined) ajv.compile(parsed.schema);
         const key = `${prefix}${parsed.key}`;
@@ -1008,19 +1001,16 @@ export function workflowEngine(
         }
       },
       phase: async (title) => {
-        countCall();
         const phase = bounded(String(title), 160);
         await store.update(runID, (current) => { current.phase = phase; });
       },
       log: async (message) => {
-        countCall();
         await store.update(runID, (current) => {
           current.logs.push({ time: Date.now(), text: bounded(String(message), 2_000) });
           if (current.logs.length > 200) current.logs.splice(0, current.logs.length - 200);
         });
       },
       checkpoint: async (raw) => {
-        countCall();
         const request = raw as { key?: unknown; prompt?: unknown; reviewer?: unknown };
         const reviewer = request.reviewer ?? "human";
         if (reviewer !== "human" && reviewer !== "coordinator") throw new Error("Checkpoint reviewer must be human or coordinator");
@@ -1082,7 +1072,6 @@ export function workflowEngine(
         }
       },
       workflow: async (input) => {
-        countCall();
         if (depth >= 4) throw new Error("Nested workflow depth limit reached (4)");
         if (!options.loadSaved) throw new Error("Saved workflow loading is not configured");
         const scope = `${prefix}workflow:${input.name}`;
@@ -1117,17 +1106,14 @@ export function workflowEngine(
           args: input.args ?? null,
           signal: controller.signal,
           host: hostFor(`${prefix}workflow:${input.name}:${index}/`, depth + 1),
-          maxCalls,
           timeoutMs: remaining,
-          helperPolicy: run.helperPolicy,
         });
       },
     });
     try {
       const output = await executeWorkflow({
         script: run.script, args: run.args, signal: controller.signal,
-        host: hostFor("", 0), maxCalls, timeoutMs: remaining,
-        helperPolicy: run.helperPolicy,
+        host: hostFor("", 0), timeoutMs: remaining,
       });
       const latest = await store.get(runID);
       if (latest.status === "stopping" || latest.status === "stopped") {
@@ -1174,6 +1160,7 @@ export function workflowEngine(
       const script = input.script ?? await options.loadSaved?.(input.name!);
       if (script === undefined) throw new Error("Saved workflow loading is not configured");
       const parsed = parseWorkflow(script);
+      validateBody(parsed.body);
       const id = runIdentity(ownerID, input.key);
       const fingerprint = workflowHash({ script, args: input.args, limits: {
         concurrency: input.concurrency, maxAgents: input.maxAgents,
@@ -1183,7 +1170,6 @@ export function workflowEngine(
       const now = Date.now();
       const run = WorkflowRun.parse({
         version: 1, id, key: input.key, ownerID, callerAgent: runtime.agent,
-        helperPolicy: "optional-counts",
         model: runtime.model, projectID: owner.projectID, directory: owner.location.directory,
         name: parsed.meta.name, description: parsed.meta.description, script, args: input.args,
         fingerprint, limits: input, status: "running", created: now, updated: now,
@@ -1265,6 +1251,9 @@ export function workflowEngine(
             await deliver(run.id);
           }
         } else {
+          if (run.helperPolicy === "legacy-bounded") {
+            throw new Error(`Workflow ${run.id} was created by an older Threads version whose retry, gate, and loopUntilDry helpers no longer exist. Inspect it as needed and start a new run.`);
+          }
           if (run.status === "interrupted") {
             await leases.get(run.id)?.promise.catch(() => {});
             run = await owned(ownerID, run.id);

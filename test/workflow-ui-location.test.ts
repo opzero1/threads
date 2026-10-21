@@ -10,7 +10,7 @@ test("UI reads recover from missing Location, but workflow control and save neve
   const run: WorkflowRun = {
     version: 1, id: "run", key: "run", ownerID: "owner", model: { providerID: "fixture", id: "fixture" },
     projectID: "fixture", directory: "/gone", name: "fixture", description: "", status: "running",
-    helperPolicy: "optional-counts", limits: { concurrency: 1, maxAgents: null, agentTimeoutMs: null, timeoutMs: null },
+    limits: { concurrency: 1, maxAgents: null, agentTimeoutMs: null, timeoutMs: null },
     created: 0, updated: 0, phase: "", callerAgent: "build", args: null,
     fingerprint: "fixture", deliveryID: "fixture", delivered: false,
     steps: [], checkpoints: [], logs: [], script: "return true",

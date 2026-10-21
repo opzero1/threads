@@ -50,12 +50,40 @@ The runner resolves symlinks, removes duplicates, sorts the list, and records it
 - `await phase(title)` records a display phase.
 - `await log(message)` records a bounded progress message.
 - `workflow(name, args)` invokes a saved workflow within the parent's limits.
-- `retry(thunk, { attempts }?)` retries logical or validation errors until success, cancellation, or a supplied attempt limit. New runs have no default attempt limit. Give each agent attempt a distinct step key. Return expected negative findings as validated data, then let the validator decide whether another attempt is useful. A native execution failure or an explicit `FAIL`/`INCONCLUSIVE` report remains an unresolved failure and prevents the run from passing, even when caught by the script. Inspect uncertain writes before starting a replacement run.
-- `gate(thunk, validator, { attempts }?)` repeats until the validator accepts, cancellation occurs, or a supplied attempt limit is reached. New runs have no default attempt limit. The validator returns a boolean or `{ ok: boolean, feedback?: string }`. A truthy object without `ok: true` does not pass.
-- `loopUntilDry({ round, key, consecutiveEmpty, maxRounds })` accumulates unique findings until discovery stops producing new items. `round` and `key` are required; `key` is a property name or identity function. The default termination condition is two consecutive empty rounds. New runs have no default maximum round count. Reaching a supplied maximum returns the accumulated findings.
 - `checkpoint(prompt, { key, reviewer? })` records a question and waits for an explicit response through the run controls. `reviewer` is `"human"` by default; `"coordinator"` allows heartbeat reminders for an authorized coordinator review. Neither value supplies a response or changes the control permissions. The response becomes recorded input on resume. Responses are limited to 1 MiB and must fit in the aggregate journal. Rejected responses leave the checkpoint unanswered so a smaller response can be submitted.
 
 Errors remain errors unless the script explicitly handles them. Do not discard failed items or substitute a passing result for missing evidence.
+
+There are no retry or loop helpers. Write the loop in plain JavaScript, give each attempt or round a distinct step key, and stop on a condition from the recorded results. Add a round limit only when the user supplies one. A native execution failure or an explicit `FAIL`/`INCONCLUSIVE` report remains an unresolved failure and prevents the run from passing, even when caught by the script.
+
+### Retry until accepted
+
+```js
+let draft;
+let feedback = "";
+for (let attempt = 1; ; attempt++) {
+  draft = await agent("Write the summary. " + feedback, { key: "draft:" + attempt, agent: "vera-engineer" });
+  const verdict = await agent("Check this summary: " + JSON.stringify(draft), {
+    key: "check:" + attempt, agent: "vera-auditor-readonly",
+    schema: { type: "object", properties: { ok: { type: "boolean" }, feedback: { type: "string" } }, required: ["ok"] },
+  });
+  if (verdict.ok) break;
+  feedback = verdict.feedback ?? "";
+}
+```
+
+### Loop until dry
+
+```js
+const seen = new Set();
+const findings = [];
+for (let round = 1; ; round++) {
+  const batch = await agent("List issues other than: " + JSON.stringify([...seen]), { key: "find:" + round, agent: "vera-operator-readonly" });
+  const fresh = batch.filter((item) => !seen.has(item.id));
+  if (fresh.length === 0) break;
+  for (const item of fresh) { seen.add(item.id); findings.push(item); }
+}
+```
 
 ## Start and control
 
@@ -75,11 +103,11 @@ Task budgets are opt-in. Agents omit `tokenBudget`, `maxAgents`, `agentTimeoutMs
 
 `tokenBudget` measures cumulative native input and output tokens across worker turns. It is an admission threshold, not a hard generation cap: workers already running can exceed it before the next dispatch checks their usage.
 
-When a total-step budget is supplied, the cumulative host-call cap is `maxAgents * 8 + 100`, including agent, phase, log, checkpoint, and nested-workflow calls. Without that budget, there is no derived cumulative cap. Nested saved workflows share any supplied parent budgets. Nesting is limited to four child levels.
+There is no cap on host calls: `phase`, `log`, and `checkpoint` calls do not count toward `maxAgents`. Nested saved workflows share any supplied parent budgets. Nesting is limited to four child levels.
 
-Helper bounds (`attempts`, `maxRounds`, and `consecutiveEmpty`) must be safe positive integers no greater than 1,000. Arguments, host-call payloads, and results are each limited to 1 MiB; error diagnostics are capped at 8 KiB. The runtime module allows 64 simultaneous interpreter calls, including nested calls, and rejects excess calls immediately. This is separate from the agent concurrency limit.
+Arguments, host-call payloads, and results are each limited to 1 MiB; error diagnostics are capped at 8 KiB. The runtime module allows 64 simultaneous interpreter calls, including nested calls, and rejects excess calls immediately. This is separate from the agent concurrency limit.
 
-Agents omit helper `attempts` and `maxRounds` unless the user supplies them. A recorded helper policy preserves the original three-attempt and ten-round defaults for older runs. New saved and nested executions inherit the parent run's policy.
+A run recorded with the original helper defaults (`helperPolicy: "legacy-bounded"`) can be inspected and listed but not resumed; start a new run instead. A script that calls `retry`, `gate`, or `loopUntilDry` fails validation and names the pattern above that replaces it.
 
 The configured Threads worker limit also applies across simultaneous runs owned by one coordinator. Its default is four workers. A token budget checks recorded usage at dispatch, including failed and interrupted attempts. Already-running agents can exceed the remaining budget. Unreported usage is marked unmeasured and blocks further budgeted dispatch.
 

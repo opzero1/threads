@@ -669,49 +669,55 @@ return await checkpoint("Approve the next phase?", { key: "human-approval" });`,
     await fixture.api.dispose();
   });
 
-  test("persisted helper policy survives restart and nested saved replay; omitted records stay legacy", async () => {
-    for (const legacy of [false, true]) {
-      const fixture = await harness("valid");
-      const child = `export const meta = { name: "child", description: "helper policy replay" };
-        let retries = 0;
-        let gates = 0;
-        try { await retry((index) => { retries = index; if (index < 6) throw new Error("again"); return index; }); } catch (error) {}
-        try { await gate((index) => { gates = index; return index; }, (value) => value === 6); } catch (error) {}
-        let rounds = 0;
-        const found = await loopUntilDry({key:"id", round:(index) => { rounds = index; return index <= 12 ? [{id:index}] : []; }});
-        await checkpoint("Continue?", {key:"approval"});
-        return { retries, gates, rounds, found:found.length };`;
-      fixture.setSaved("child", child);
-      fixture.setSaved("parent", `export const meta = { name: "parent", description: "saved policy" };
-        let parentRetries = 0;
-        try { await retry((index) => { parentRetries = index; if (index < 6) throw new Error("again"); return index; }); } catch (error) {}
-        return {parentRetries, child:await workflow("child")};`);
-      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({key:"helper-replay", name:"parent", args:null}), {
-        agent:"caller", model:{providerID:"test", id:"model"},
-      });
-      expect(started.helperPolicy).toBe("optional-counts");
-      await reaches(fixture.api, fixture.ownerID, started.id, "waiting");
-      await fixture.api.dispose();
-      const key = `workflows/runs/${started.id}`;
-      const persisted = JSON.parse(await Bun.file(fixture.file).text())[key];
-      expect(persisted.helperPolicy).toBe("optional-counts");
-      if (legacy) {
-        delete persisted.helperPolicy;
-        await fixture.setStorage(key, persisted);
-      }
-      fixture.setSaved("child", `export const meta = { name: "changed", description: "must stay pinned" }; throw new Error("unpinned child");`);
-      const reopened = fixture.reopen();
-      try {
-        expect((await reopened.get(fixture.ownerID, started.id)).helperPolicy).toBe(legacy ? "legacy-bounded" : "optional-counts");
-        await reopened.control(fixture.ownerID, {runID:started.id, action:"resume", checkpointKey:"workflow:child:0/approval", response:true});
-        const completed = await settled(reopened, fixture.ownerID, started.id);
-        expect(completed.status).toBe("completed");
-        expect(completed.result).toEqual(legacy
-          ? {parentRetries:3, child:{retries:3, gates:3, rounds:10, found:10}}
-          : {parentRetries:6, child:{retries:6, gates:6, rounds:14, found:12}});
-        expect(JSON.parse(await Bun.file(fixture.file).text())[key].helperPolicy).toBe(legacy ? "legacy-bounded" : "optional-counts");
-      } finally { await reopened.dispose(); }
+  test("a legacy helper-policy run stays inspectable and listable but refuses resume", async () => {
+    const fixture = await harness("valid");
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "legacy-helpers", script: `
+export const meta = { name: "legacy", description: "legacy helper policy" };
+return await checkpoint("Continue?", { key: "approval" });` }), { agent: "caller", model: { providerID: "test", id: "model" } });
+    await reaches(fixture.api, fixture.ownerID, started.id, "waiting");
+    await fixture.api.dispose();
+    const key = `workflows/runs/${started.id}`;
+    const persisted = await fixture.getStorage(key) as Record<string, unknown>;
+    expect(persisted.helperPolicy).toBeUndefined();
+    await fixture.setStorage(key, { ...persisted, helperPolicy: "legacy-bounded" });
+    const reopened = fixture.reopen();
+    try {
+      const inspected = await reopened.get(fixture.ownerID, started.id);
+      expect(inspected.status).toBe("interrupted");
+      expect(inspected.helperPolicy).toBe("legacy-bounded");
+      expect((await reopened.list(fixture.ownerID)).map((run) => run.id)).toContain(started.id);
+      for (const control of [
+        { runID: started.id, action: "resume" as const },
+        { runID: started.id, action: "resume" as const, checkpointKey: "approval", response: true },
+      ]) await expect(reopened.control(fixture.ownerID, control)).rejects.toThrow("older Threads version");
+      expect((await reopened.get(fixture.ownerID, started.id)).status).toBe("interrupted");
+      expect(fixture.spawns()).toBe(0);
+    } finally { await reopened.dispose(); }
+  });
+
+  test("rejects a removed helper before creating the run and leaves the key unused", async () => {
+    const fixture = await harness("valid");
+    const runtime = { agent: "caller", model: { providerID: "test", id: "model" } };
+    for (const [name, call, pattern] of [
+      ["retry", `retry(() => agent("draft"), { attempts: 2 })`, "Retry until accepted"],
+      ["gate", `gate(() => agent("draft"), (value) => value)`, "Retry until accepted"],
+      ["loopUntilDry", `loopUntilDry(() => agent("find"))`, "Loop until dry"],
+    ]) {
+      const script = `export const meta = { name: "${name}", description: "removed helper" }; return await ${call};`;
+      const message = `Workflow helper ${name}() was removed; write a plain JavaScript loop instead (see "${pattern}"`;
+      await expect(fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: name, script, args: null }), runtime))
+        .rejects.toThrow(message);
+      fixture.setSaved(name, script);
+      await expect(fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: `saved-${name}`, name, args: null }), runtime))
+        .rejects.toThrow(message);
     }
+    expect(await fixture.api.list(fixture.ownerID)).toHaveLength(0);
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({
+      key: "retry", script: `export const meta = { name: "retry", description: "plain loop" }; return 1;`, args: null,
+    }), runtime);
+    expect((await settled(fixture.api, fixture.ownerID, started.id)).result).toBe(1);
+    expect(fixture.spawns()).toBe(0);
+    await fixture.api.dispose();
   });
 
   test("persists a checkpoint, interrupts on engine disposal, and resumes only after an explicit response", async () => {
@@ -751,6 +757,19 @@ return true;` });
       expect(run.limits).toEqual({ concurrency: 3, maxAgents: null, agentTimeoutMs: null, timeoutMs: null });
       expect((await fixture.api.start(fixture.ownerID, input, runtime)).id).toBe(run.id);
       expect(fixture.spawns()).toBe(6);
+    } finally { await fixture.api.dispose(); }
+  });
+
+  test("a total-step budget does not cap phase, log, or checkpoint calls", async () => {
+    const fixture = await harness("valid");
+    try {
+      const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "no-call-cap", maxAgents: 1, script: `
+export const meta = { name: "calls", description: "no derived call cap" };
+for (let i = 0; i < 120; i++) await log("call-" + i);
+return await agent("check", { key: "only", agent: "analyst" });` }), { agent: "caller", model: { providerID: "test", id: "model" } });
+      const run = await settled(fixture.api, fixture.ownerID, started.id);
+      expect(run.status).toBe("completed");
+      expect(run.logs).toHaveLength(120);
     } finally { await fixture.api.dispose(); }
   });
 

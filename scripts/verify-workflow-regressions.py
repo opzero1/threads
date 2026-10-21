@@ -367,26 +367,6 @@ def saved_and_nested():
     return final
 
 
-def native_helpers():
-    for index in [1, 2]:
-        report(f"HELPER_GATE_{index}", index == 2)
-    for index in [1, 2, 3]:
-        report(f"HELPER_DRY_{index}", [{"id": "one"}] if index == 1 else [])
-    report("HELPER_RETRY", "retried")
-    run = start("native-helpers", '''const gated=await gate(
-        attempt => agent("HELPER_GATE_"+attempt, {key:"gate:"+attempt,agent:"regression-role"}), value => value);
-    const retried=await retry(async attempt => {
-        if (attempt===1) throw new Error("logical retry");
-        return agent("HELPER_RETRY", {key:"retry:"+attempt,agent:"regression-role"});
-    });
-    const found=await loopUntilDry({key:"id",round:round => agent("HELPER_DRY_"+round,{key:"dry:"+round,agent:"regression-role"})});
-    return {gated,retried,found};''', maxAgents=6)
-    final = settled(run)
-    assert final["result"] == {"gated": True, "retried": "retried", "found": [{"id": "one"}]}, final
-    assert len(final["steps"]) == 6, final
-    return final
-
-
 def saved_commands():
     directory = sandbox.directory / ".opencode/workflows"
     directory.mkdir(parents=True, exist_ok=True)
@@ -528,7 +508,6 @@ cases = {
     "failed-replay": failed_replay,
     "reported-crash": reported_crash,
     "saved-nested": saved_and_nested,
-    "native-helpers": native_helpers,
     "saved-commands": saved_commands,
     "nesting-limit": nesting_limit,
     "worktree-handoff": worktree_handoff,

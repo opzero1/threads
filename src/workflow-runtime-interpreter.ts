@@ -1,7 +1,6 @@
 import { CodeMode, Tool, toolError } from "@opencode/codemode";
 import { parse } from "acorn";
 import { Effect } from "effect";
-import type { WorkflowHelperPolicy } from "./workflow-runtime-protocol";
 
 export type WorkflowHost = {
   agent(input: unknown): Promise<unknown>;
@@ -28,10 +27,13 @@ const injected = new Set([
   "workflow",
   "parallel",
   "pipeline",
-  "retry",
-  "gate",
-  "loopUntilDry",
 ]);
+
+const removedHelpers: Record<string, string> = {
+  retry: "Retry until accepted",
+  gate: "Retry until accepted",
+  loopUntilDry: "Loop until dry",
+};
 
 const safeGlobals = new Set([
   "undefined", "NaN", "Infinity", "Object", "Array", "Math", "JSON", "Promise",
@@ -169,7 +171,7 @@ function isReference(node: Node, parent?: Node): boolean {
   return true;
 }
 
-function validateBody(body: string): void {
+export function validateBody(body: string): void {
   const program = ast(body, "script");
   const declared = new Set<string>();
   const nodes: { node: Node; parent?: Node }[] = [];
@@ -201,6 +203,8 @@ function validateBody(body: string): void {
         if (typeof propertyName !== "string" || !deterministicMathProperties.has(propertyName))
           throw new Error(`Workflow cannot access nondeterministic or unknown Math property ${String(propertyName)}`);
       }
+      if (!declared.has(name) && Object.hasOwn(removedHelpers, name))
+        throw new Error(`Workflow helper ${name}() was removed; write a plain JavaScript loop instead (see "${removedHelpers[name]}" in the workflow-authoring runtime reference)`);
       if (!declared.has(name) && !safeGlobals.has(name) && !injected.has(name)) throw new Error(`Unknown workflow global: ${name}`);
     }
     if (node.type === "MemberExpression") {
@@ -217,7 +221,7 @@ const objectSchema = (properties: Record<string, unknown>, required: string[] = 
   type: "object", properties, required, additionalProperties: true,
 });
 
-const prelude = (policy: WorkflowHelperPolicy) => `
+const prelude = `
 const args = await tools.runtime.args({});
 const agent = async (prompt, options = {}) => tools.runtime.agent({ ...options, prompt });
 const phase = async (title) => tools.runtime.phase({ title });
@@ -226,12 +230,6 @@ const checkpoint = async (prompt, options = {}) => tools.runtime.checkpoint({ ..
 const workflow = async (name, workflowArgs) => workflowArgs === undefined
   ? tools.runtime.workflow({ name })
   : tools.runtime.workflow({ name, args: workflowArgs });
-const MAX_HELPER_ITERATIONS = 1000;
-const positiveInteger = (value, name) => {
-  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_HELPER_ITERATIONS)
-    throw new RangeError(name + " must be a safe positive integer no greater than " + MAX_HELPER_ITERATIONS);
-  return value;
-};
 const settleAll = async (name, promises) => {
   const outcomes = await Promise.allSettled(promises);
   const failed = outcomes.flatMap((outcome, index) => outcome.status === "rejected" ? [index] : []);
@@ -254,54 +252,6 @@ const pipeline = async (items, ...stages) => {
     return value;
   }));
 };
-const retry = async (thunk, options = {}) => {
-  ${policy === "optional-counts" ? 'if (typeof thunk !== "function") throw new TypeError("retry thunk must be a function");' : ""}
-  const attempts = options.attempts === undefined ? ${policy === "legacy-bounded" ? "3" : "undefined"} : positiveInteger(options.attempts, "attempts");
-  let lastError;
-  for (let attempt = 1; attempts === undefined || attempt <= attempts; attempt++) {
-    try { return await thunk(attempt); } catch (error) {
-      if (error === invalidGateVerdict) throw new TypeError("Workflow gate validator must return a boolean or { ok, feedback? }");
-      lastError = error;
-    }
-  }
-  throw lastError;
-};
-const invalidGateVerdict = {};
-const gate = async (thunk, validator, options = {}) => {
-  ${policy === "optional-counts" ? 'if (typeof thunk !== "function" || typeof validator !== "function") throw new TypeError("gate thunk and validator must be functions");' : ""}
-  return retry(async (attempt) => {
-  const value = await thunk(attempt);
-  const verdict = await validator(value, attempt);
-  const accepted = verdict === true || (verdict !== null && typeof verdict === "object" && verdict.ok === true);
-  if (verdict !== true && verdict !== false && (verdict === null || typeof verdict !== "object" || typeof verdict.ok !== "boolean"))
-    ${policy === "optional-counts" ? "throw invalidGateVerdict;" : 'throw new TypeError("Workflow gate validator must return a boolean or { ok, feedback? }");'}
-  if (!accepted) {
-    const feedback = verdict !== null && typeof verdict === "object" && typeof verdict.feedback === "string" ? ": " + verdict.feedback : "";
-    throw new Error("Workflow gate rejected the result" + feedback);
-  }
-  return value;
-  }, options);
-};
-const loopUntilDry = async ({ round, key, consecutiveEmpty = 2, maxRounds = ${policy === "legacy-bounded" ? "10" : "undefined"} }) => {
-  positiveInteger(consecutiveEmpty, "consecutiveEmpty");
-  if (maxRounds !== undefined) positiveInteger(maxRounds, "maxRounds");
-  if (typeof round !== "function") throw new TypeError("loopUntilDry round must be a function");
-  if (typeof key !== "function" && typeof key !== "string") throw new TypeError("loopUntilDry key must be a function or property name");
-  const seen = new Set();
-  const values = [];
-  let empty = 0;
-  for (let index = 1; (maxRounds === undefined || index <= maxRounds) && empty < consecutiveEmpty; index++) {
-    const batch = await round(index);
-    if (!Array.isArray(batch)) throw new TypeError("loopUntilDry round must return an array");
-    let added = 0;
-    for (const item of batch) {
-      const identity = typeof key === "function" ? await key(item) : item[key];
-      if (!seen.has(identity)) { seen.add(identity); values.push(item); added++; }
-    }
-    empty = added === 0 ? empty + 1 : 0;
-  }
-  return values;
-};
 `;
 
 function positiveOption(value: number | undefined, name: string): number | undefined {
@@ -314,18 +264,12 @@ export async function executeWorkflowInterpreter(input: {
   args: unknown;
   signal: AbortSignal;
   host: WorkflowHost;
-  maxCalls?: number;
   timeoutMs?: number;
-  helperPolicy?: WorkflowHelperPolicy;
 }): Promise<unknown> {
   const { body } = parseWorkflow(input.script);
   validateBody(body);
-  const maxCalls = positiveOption(input.maxCalls, "maxCalls");
   const timeoutMs = positiveOption(input.timeoutMs, "timeoutMs");
-  const helperPolicy = input.helperPolicy ?? "legacy-bounded";
-  if (helperPolicy !== "legacy-bounded" && helperPolicy !== "optional-counts") throw new TypeError("Invalid workflow helper policy");
   if (input.signal.aborted) throw input.signal.reason ?? new DOMException("Aborted", "AbortError");
-  let calls = 0;
   const pending = new Set<Promise<void>>();
   const safeMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
   const effect = <T>(operation: () => Promise<T>) => Effect.flatMap(
@@ -341,22 +285,17 @@ export async function executeWorkflowInterpreter(input: {
     }),
     (settled) => settled.ok ? Effect.succeed(settled.value) : Effect.fail(toolError(safeMessage(settled.error))),
   );
-  const call = <T>(operation: () => Promise<T>) => effect(async () => {
-      calls++;
-      if (maxCalls !== undefined && calls > maxCalls) throw new Error(`Workflow call limit exceeded (${maxCalls})`);
-      return operation();
-  });
-  const tool = (description: string, schema: object, execute: (value: unknown) => Promise<unknown>, counted = true) =>
+  const tool = (description: string, schema: object, execute: (value: unknown) => Promise<unknown>) =>
     Tool.make({
       description,
       input: schema,
       output: anySchema,
-      execute: (value) => counted ? call(() => execute(value)) : effect(() => execute(value)),
+      execute: (value) => effect(() => execute(value)),
     });
   const runtime = CodeMode.make({
     limits: { timeoutMs, maxOutputBytes: 1024 * 1024 },
     tools: { runtime: {
-      args: tool("Return the workflow arguments", objectSchema({}), () => Promise.resolve(input.args), false),
+      args: tool("Return the workflow arguments", objectSchema({}), () => Promise.resolve(input.args)),
       agent: tool("Run an agent", objectSchema({ prompt: { type: "string" } }, ["prompt"]), async (value) => {
         if (!isRecord(value) || typeof value.prompt !== "string") throw new TypeError("agent prompt must be a string");
         return input.host.agent(value);
@@ -382,7 +321,7 @@ export async function executeWorkflowInterpreter(input: {
   });
   let result: CodeMode.Result;
   try {
-    result = await Effect.runPromise(runtime.execute(`${prelude(helperPolicy)}\n${body}`), { signal: input.signal });
+    result = await Effect.runPromise(runtime.execute(`${prelude}\n${body}`), { signal: input.signal });
   } catch (error) {
     throw error;
   }

@@ -65,12 +65,11 @@ test("run records survive reopening storage and exact admission rejects conflict
 test("compacted legacy limits stay finite while explicit null budgets survive reopen and RPC summaries", async () => {
   const fixture = await disk();
   const store = workflowStore(fixture.storage);
-  await store.create(run("legacy"));
-  const compacted = await fixture.storage.get("workflows/runs/legacy");
-  expect(compacted).toMatchObject({ version: 1, limits: {} });
-  expect((await workflowStore(fixture.storage).get("legacy")).limits).toEqual({
-    concurrency: 3, maxAgents: 4, agentTimeoutMs: 1_800_000, timeoutMs: 86_400_000,
-  });
+  await fixture.storage.set("workflows/runs/legacy", Json.parse({ ...run("legacy"), limits: {} }));
+  const defaults = { concurrency: 3, maxAgents: 4, agentTimeoutMs: 1_800_000, timeoutMs: 86_400_000 };
+  expect((await store.get("legacy")).limits).toEqual(defaults);
+  await store.update("legacy", (draft) => { draft.phase = "resumed"; });
+  expect(await fixture.storage.get("workflows/runs/legacy")).toMatchObject({ limits: defaults });
   const unbounded = run("unbounded");
   unbounded.limits = { concurrency: 3, maxAgents: null, agentTimeoutMs: null, timeoutMs: null, tokenBudget: null };
   await store.create(unbounded);

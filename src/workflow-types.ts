@@ -111,7 +111,8 @@ export const WorkflowWorktreeOutcome = z.object({
 export type WorkflowWorktreeOutcome = z.infer<typeof WorkflowWorktreeOutcome>;
 export const WorkflowRun = z.object({
   version: z.literal(1),
-  helperPolicy: z.enum(["legacy-bounded", "optional-counts"]).default("legacy-bounded"),
+  // Written only by older versions; "legacy-bounded" runs stay readable but cannot resume.
+  helperPolicy: z.enum(["legacy-bounded", "optional-counts"]).optional(),
   id: z.string(),
   key: z.string(),
   ownerID: z.string(),
