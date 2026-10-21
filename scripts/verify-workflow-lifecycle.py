@@ -7,7 +7,7 @@ LIFECYCLE_BOUNDARY selects one teardown boundary for a focused follow-up.
 import json, time, hashlib, os, uuid
 from pathlib import Path
 
-from fixture import Provider, config, decoded, run_tool, source_fingerprint
+from fixture import Provider, config, decoded, plugin_entry, run_tool, source_fingerprint
 from sandbox import Heartbeat, IsolatedSandbox, eventually
 
 root = Path(__file__).resolve().parent.parent
@@ -72,7 +72,7 @@ try:
             pid = sandbox.process.pid
             config_path = sandbox.root / 'config/opencode/opencode.json'
             configuration = json.loads(config_path.read_text())
-            configuration['plugins'] = [{'package': str(root), 'options': {'maxWorkers': 2}}]
+            configuration['plugins'] = [{'package': plugin_entry(root), 'options': {'maxWorkers': 2}}]
             (artifacts / 'isolated-config-before.json').write_text(config_path.read_text())
             config_path.write_text(json.dumps(configuration))
             (artifacts / 'isolated-config-after.json').write_text(config_path.read_text())

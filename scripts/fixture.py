@@ -1,9 +1,11 @@
 import hashlib
 import json
 import re
+import tempfile
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 from sandbox import eventually
 
@@ -178,9 +180,28 @@ class Provider:
         self.server.server_close()
 
 
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def plugin_entry(plugin):
+    # OpenCode reloads a directory plugin on any change inside it, and the suites write their
+    # evidence under this checkout's .audit/. Load the checkout through a directory outside it.
+    # Keep extensions on these absolute imports so OpenTUI installs its runtime-import rewrite loader.
+    if Path(plugin).resolve() != ROOT:
+        return str(plugin)
+    shim = Path(tempfile.gettempdir()) / f"op-threads-checkout-{hashlib.sha256(str(ROOT).encode()).hexdigest()[:12]}"
+    shim.mkdir(exist_ok=True)
+    for name in ("index.ts", "tui.ts"):
+        text = f"export {{ default }} from {json.dumps(str(ROOT / name))};\n"
+        file = shim / name
+        if not file.exists() or file.read_text() != text:
+            file.write_text(text)
+    return str(shim)
+
+
 def config(plugin, provider):
     return {
-        "plugins": [str(plugin)],
+        "plugins": [plugin_entry(plugin)],
         "model": "fixture/fixture",
         "snapshots": False,
         "permissions": [{"action": "*", "resource": "*", "effect": "allow"}],
