@@ -71,6 +71,9 @@ const StepBase = z.object({
   directory: z.string(),
   model: WorkflowModel,
   profileFingerprint: z.string(),
+  // The profile as loaded at the source when the step was admitted. profileFingerprint is loaded
+  // where the worker ran, which for a worktree differs from the source and may since be removed.
+  sourceProfileFingerprint: z.string().optional(),
 });
 export const WorkflowStep = z.discriminatedUnion("status", [
   StepBase.extend({ status: z.literal("prepared") }),

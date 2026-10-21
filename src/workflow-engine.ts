@@ -546,7 +546,8 @@ export function workflowEngine(
               return;
             }
             const index = current.steps.reduce((maximum, step) => Math.max(maximum, step.index), -1) + 1;
-            const reused = reusable.find((step) => step.key === key && step.fingerprint === requestFingerprint);
+            const reused = reusable.find((step) => step.key === key && step.fingerprint === requestFingerprint
+              && (step.sourceProfileFingerprint ?? step.profileFingerprint) === sourceProfileFingerprint);
             if (reused) {
               current.steps.push({
                 ...reused, index, phase: input.phase ?? current.phase,
@@ -571,6 +572,7 @@ export function workflowEngine(
               directory: plan.directory,
               model: sourceModel,
               profileFingerprint: `pending:${sourceProfileFingerprint}`,
+              sourceProfileFingerprint,
             });
           });
         });

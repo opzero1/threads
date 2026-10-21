@@ -56,7 +56,7 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
   const deliveries: string[] = [];
   const deliveryTexts: string[] = [];
   let deliveryFailures = 0;
-  let profileSystem = "profile-v1";
+  let profileSystem: string | ((directory: string) => string) = "profile-v1";
   let profilePermissions: unknown[] = [{ action: "read", resource: "*", effect: "allow" }];
   const saved = new Map<string, string>();
   const worktreeProjects: string[] = [];
@@ -101,7 +101,7 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
           permissions: agentID === "caller"
             ? [{ action: "subagent", resource: "analyst", effect: "allow" }]
             : profilePermissions,
-          system: agentID === "analyst" ? profileSystem : undefined,
+          system: agentID !== "analyst" ? undefined : typeof profileSystem === "string" ? profileSystem : profileSystem(location?.directory ?? ""),
         } };
       },
     },
@@ -266,7 +266,7 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
     api, ownerID, directory, deliveries, deliveryTexts, writes, validationErrors, worktreeProjects, reservations, spawnInputs, spawnScopes, spawns: () => spawns, file,
     reopen: engine,
     failDeliveries: (count: number) => { deliveryFailures = count; },
-    setProfileSystem: (value: string) => { profileSystem = value; },
+    setProfileSystem: (value: typeof profileSystem) => { profileSystem = value; },
     setProfilePermissions: (value: unknown[]) => { profilePermissions = value; },
     setOwnerPermissions: (value: unknown[]) => { sessions.get(ownerID)!.permissions = value; },
     setRestartNotice: (workerID: string) => {
@@ -2348,6 +2348,41 @@ ${tail}`;
     expect(third.steps[0].status === "completed" && third.steps[0].reusedFrom).toBe(first.id);
     expect(fixture.spawns()).toBe(1);
     await fixture.api.dispose();
+  });
+
+  test("a step whose agent profile changed runs live", async () => {
+    const fixture = await harness("valid");
+    const script = steps({ a: "A" });
+    const begin = async (key: string, resumeFrom?: string) =>
+      settled(fixture.api, fixture.ownerID, (await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key, script, args: null, resumeFrom }), runtime)).id);
+    const first = await begin("first");
+    fixture.setProfileSystem("profile-v2");
+    const second = await begin("second", first.id);
+    fixture.setProfilePermissions([{ action: "read", resource: "*", effect: "deny" }]);
+    const third = await begin("third", second.id);
+    expect(fixture.spawnedStepKeys).toEqual(["a", "a", "a"]);
+    for (const run of [second, third]) {
+      expect(run.status).toBe("completed");
+      expect(run.steps[0].status === "completed" && run.steps[0].reusedFrom).toBeUndefined();
+    }
+    await fixture.api.dispose();
+  });
+
+  test("an unchanged profile reuses a worktree step after its worktree is removed", async () => {
+    const fixture = await harness("valid", 2, {});
+    try {
+      // OpenCode resolves some profile rules against the location, so the worktree's profile differs from the source's.
+      fixture.setProfileSystem((directory) => `profile-v1 at ${directory}`);
+      const script = steps({}, `return await agent("W", { key: "w", agent: "analyst", access: "write", isolation: "worktree" });`);
+      const prior = await settled(fixture.api, fixture.ownerID, (await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "first", script, args: null }), runtime)).id);
+      await cleaned(fixture.api, fixture.ownerID, prior.id);
+      expect(await exists(stepDirectory(prior, "w"))).toBe(false);
+      expect(prior.steps[0].profileFingerprint).not.toBe(prior.steps[0].sourceProfileFingerprint);
+      const run = await settled(fixture.api, fixture.ownerID, (await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "second", script, args: null, resumeFrom: prior.id }), runtime)).id);
+      expect(run.status).toBe("completed");
+      expect(run.steps[0].status === "completed" && run.steps[0].reusedFrom).toBe(prior.id);
+      expect(fixture.spawns()).toBe(1);
+    } finally { await fixture.api.dispose(); }
   });
 
   test("a resumed run replays its reused steps after an engine restart without carrying over checkpoint answers", async () => {
