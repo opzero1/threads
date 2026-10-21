@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { refreshHarness, settle, streams } from "./support/refresh-harness";
+import { refreshHarness, settle, streams, worker } from "./support/refresh-harness";
 
 test("production terminal callbacks ignore streamed content with closed and open panels", async () => {
   const h = await refreshHarness(120);
@@ -68,3 +68,76 @@ test("open result panels poll journal-only changes; unrelated panels do not poll
     expect(h.counts.inspections).toBe(closed.inspections);
   } finally { h.dispose(); }
 }, 10000);
+
+test("one owner coalesces events during a delayed snapshot and reconciles tabs from the committed result", async () => {
+  const h = await refreshHarness();
+  try {
+    h.workers([worker("hidden", { hidden: true }), worker("visible")]);
+    h.tabs([{ sessionID: "hidden" }]);
+    const release = h.delayWorkerSnapshots();
+    const before = h.counts.workerSnapshots;
+    h.event("session.status");
+    await settle();
+    for (const type of ["session.idle", "permission.asked", "session.status"]) h.event(type);
+    await settle();
+    expect(h.counts.workerSnapshots).toBe(before + 1);
+    expect(h.closed).toEqual([]);
+    release();
+    for (let hop = 0; hop < 5; hop++) await settle();
+    expect(h.counts.workerSnapshots).toBe(before + 2);
+    expect(h.closed).toEqual(["hidden"]);
+    h.pick(() => undefined);
+    await h.command("threads.activity.choose");
+    expect(h.selections.at(-1)?.options.map((option) => [option.value, option.description])).toEqual([
+      ["A", "Main"],
+      ["visible", "Finished · starting"],
+    ]);
+    expect(h.errors).toEqual([]);
+  } finally { h.dispose(); }
+});
+
+test("with tabs disabled the list still refreshes, closes no tab, and opens a worker by route", async () => {
+  const h = await refreshHarness();
+  try {
+    h.workers([worker("hidden", { hidden: true }), worker("visible", { report: { verdict: "FAIL", summary: "failed", evidence: [] } })]);
+    h.tabs([{ sessionID: "hidden" }], false);
+    const before = h.counts.workerSnapshots;
+    h.event("session.status");
+    for (let hop = 0; hop < 3; hop++) await settle();
+    expect(h.counts.workerSnapshots).toBe(before + 1);
+    h.pick((selection) => selection.options.find((option) => option.value === "visible")?.value, () => "open");
+    await h.command("threads.activity.choose");
+    expect(h.selections.at(-1)?.options.map((option) => option.title)).toEqual(["Open", "Dismiss"]);
+    expect(h.navigated).toEqual(["visible"]);
+    expect(h.closed).toEqual([]);
+    expect(h.errors).toEqual([]);
+  } finally { h.dispose(); }
+});
+
+test("the worker menu dismisses and restores, and does nothing once the row is gone", async () => {
+  const h = await refreshHarness();
+  const descriptions = () => h.selections.at(-1)?.options.map((option) => option.description);
+  try {
+    h.workers([worker("visible")]);
+    h.event("session.status");
+    for (let hop = 0; hop < 3; hop++) await settle();
+    h.pick(() => "visible", () => "dismiss", () => undefined);
+    await h.command("threads.activity.choose");
+    await h.command("threads.activity.choose");
+    expect(descriptions()).toEqual(["Main", "Closed · starting"]);
+    h.pick(() => "visible", (menu) => menu.options[1]?.title === "Restore" && "dismiss", () => undefined);
+    await h.command("threads.activity.choose");
+    await h.command("threads.activity.choose");
+    expect(descriptions()).toEqual(["Main", "Finished · starting"]);
+    h.tabs([], false);
+    h.pick(() => "visible", async () => {
+      h.workers([]);
+      h.event("session.status");
+      for (let hop = 0; hop < 3; hop++) await settle();
+      return "open";
+    });
+    await h.command("threads.activity.choose");
+    expect(h.navigated).toEqual([]);
+    expect(h.errors).toEqual([]);
+  } finally { h.dispose(); }
+});

@@ -69,7 +69,7 @@ The footer shows nothing when nothing is running. On the home screen, it counts 
 
 Click `1 workflow` to open that workflow's panel. When several workflows run, the click opens the workflow list instead. See [Run a dynamic workflow](workflows.md#inspect-progress).
 
-Click anywhere else on the indicator, or press `ctrl+x j`, to open the Threads list. It shows your conversation and its workers, in these groups:
+Click anywhere else on the indicator, or press `ctrl+x j`, to open the Threads list. It shows your conversation and its workers in this order, with the group and status beside each title:
 
 - **Needs attention**: workers that wait for a permission or a form answer.
 - **Running**: workers, and your conversation, while they run.
@@ -80,8 +80,7 @@ Click anywhere else on the indicator, or press `ctrl+x j`, to open the Threads l
 In the list:
 
 - Type to search.
-- Press **Enter** to open the highlighted conversation in a tab.
-- Press **Ctrl+D** to dismiss the highlighted row, or to bring a closed row back.
+- Press **Enter** on a row to show its menu. Choose **Open** to open the conversation in a tab, or **Dismiss** to close the row. A closed row offers **Restore** instead.
 - Press **Esc** to close the list.
 
 If you open a worker that hasn't reported yet, its tab closes by itself after the worker reports, once you leave the tab.

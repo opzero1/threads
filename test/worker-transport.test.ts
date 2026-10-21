@@ -45,13 +45,10 @@ test("a persistent transport failure is reported once after the grace period", a
     await advance(14_000);
     expect(toasts(h.errors)).toEqual([]);
     await advance(6000);
-    const reported = [
-      "Managed worker tabs: Transport: The socket connection was closed unexpectedly.",
-      "Threads: Transport: The socket connection was closed unexpectedly.",
-    ];
-    expect(toasts(h.errors).sort()).toEqual(reported);
+    const reported = ["Threads: Transport: The socket connection was closed unexpectedly."];
+    expect(toasts(h.errors)).toEqual(reported);
     await advance(10_000);
-    expect(toasts(h.errors).sort()).toEqual(reported);
+    expect(toasts(h.errors)).toEqual(reported);
   } finally {
     h.dispose();
   }
@@ -65,7 +62,7 @@ test("disposal during a refresh leaves no retry timer behind", async () => {
   const before = h.counts.workerSnapshots;
   h.event("session.status");
   await advance(1500);
-  expect(h.counts.workerSnapshots - before).toBe(2);
+  expect(h.counts.workerSnapshots - before).toBe(1);
   h.dispose();
   for (let hop = 0; hop < 20; hop++) await Promise.resolve();
   expect(jest.getTimerCount()).toBe(0);
@@ -78,7 +75,7 @@ test("other worker snapshot failures are still reported immediately", async () =
     h.failWorkerSnapshots(new ClientError("UnexpectedStatus", { detail: "500" }));
     h.event("session.status");
     await settle();
-    expect(toasts(h.errors)).toContain("Managed worker tabs: UnexpectedStatus: 500");
+    expect(toasts(h.errors)).toContain("Threads: UnexpectedStatus: 500");
   } finally {
     h.dispose();
   }

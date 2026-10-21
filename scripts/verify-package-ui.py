@@ -55,19 +55,36 @@ def screen():
     return "\n".join(terminal.screen.display)
 
 
-hint = "ctrl+d Dismiss · enter Open · esc Close"
 header = "Threads · Published plugin UI verification"
-main_row = "> Published plugin UI verification"
+main_row = "Published plugin UI verification Main"
+worker_row = "Packaged footer worker Finished · FAIL"
 
 
 def open_list(keys=b"\x18j"):
     os.write(terminal.master, keys)
-    terminal.wait_for(hint)
+    terminal.wait_for(header)
 
 
 def close_list():
     os.write(terminal.master, b"\x1b")
-    terminal.wait_for_match(lambda text: "enter Open · esc Close" not in text, "closed Threads list", 10, False)
+    terminal.wait_for_match(lambda text: header not in text, "closed Threads list", 10, False)
+
+
+def option(name, text):
+    # A native menu option is a padded word of its own, unlike "Open" in other text.
+    return re.search(rf"(?m)(?:^|\s{{2,}}){name}(?:\s{{2,}}|$)", text)
+
+
+def choose(title, other, action):
+    # Selecting a row opens a native menu with Open and either Dismiss or Restore.
+    os.write(terminal.master, b"\x15" + title.encode())
+    terminal.wait_for_match(lambda text: other not in text, f"{title} filtered", 10, False)
+    os.write(terminal.master, b"\r")
+    terminal.wait_for_match(lambda text: header not in text and option("Open", text) and (option("Dismiss", text) or option("Restore", text)), f"{title} menu", 10, False)
+    os.write(terminal.master, action.encode())
+    terminal.wait_for_match(lambda text: all(bool(option(name, text)) == (name == action) for name in ("Open", "Dismiss", "Restore")), f"{action} filtered", 10, False)
+    os.write(terminal.master, b"\r")
+    terminal.wait_for_match(lambda text: not option(action, text), f"{title} menu closed", 10, False)
 
 
 try:
@@ -94,20 +111,18 @@ try:
     assert not indicator.search(footer()) and "Activity" not in left(), (footer(), left())
     passed("the default footer mode loads without a probe plugin or project JSX configuration and stays empty while idle")
     open_list()
-    terminal.wait_for_match(lambda text: header in text and main_row in text, "the current conversation's thread", 10, False)
+    terminal.wait_for_match(lambda text: "● " + main_row in text, "the current conversation's thread", 10, False)
     assert "Unrelated package conversation" not in screen(), screen()
-    assert not any(mark in screen() for mark in ("Pin ·", "Unpin", "◇", "◆")), screen()
     os.write(terminal.master, b"no-such-thread")
-    terminal.wait_for_match(lambda text: "No matching conversations" in text and main_row not in text, "search without a match", 10, False)
+    terminal.wait_for_match(lambda text: "No results found" in text and main_row not in text, "search without a match", 10, False)
     os.write(terminal.master, b"\x15")
-    terminal.wait_for_match(lambda text: main_row in text and "No matching conversations" not in text, "search cleared", 10, False)
+    terminal.wait_for_match(lambda text: main_row in text and "No results found" not in text, "search cleared", 10, False)
     (artifacts / "list.screen.txt").write_text(screen())
     close_list()
     passed("ctrl+x j opens the compiled Threads list with only the current conversation; its search reacts to typing and Escape closes it")
     os.write(terminal.master, b"/activities")
     terminal.wait_for("Show this conversation's workers")
     os.write(terminal.master, b"\r")
-    terminal.wait_for(hint)
     terminal.wait_for(header)
     close_list()
     passed("/activities opens the same list")
@@ -132,29 +147,26 @@ try:
     terminal.wait_for_match(lambda _: not indicator.search(footer()), "footer cleared", 30, False)
     passed("a running worker shows the compiled footer spinner and count without opening a tab, and it clears when done")
     open_list()
-    terminal.wait_for_match(lambda text: header in text and re.search(r"Packaged footer worker[ \t]+FAIL\b", text) and "Finished" in text, "finished worker in the thread list", 10, False)
-    os.write(terminal.master, b"Packaged footer worker")
-    terminal.wait_for("> Packaged footer worker")
-    os.write(terminal.master, b"\x04")
-    terminal.wait_for_match(lambda text: "ctrl+d Restore · enter Open · esc Close" in text and "· Closed" in text, "dismissed worker", 10, False)
-    os.write(terminal.master, b"\x04")
-    terminal.wait_for_match(lambda text: hint in text and "· Closed" not in text, "restored worker", 10, False)
-    passed("ctrl+d dismisses and restores the highlighted worker without closing the compiled list")
-    os.write(terminal.master, b"\r")
-    terminal.wait_for_match(lambda _: "Packaged footer worker" in left() and "enter Open · esc Close" not in screen(), "focused worker tab", 20, False)
+    terminal.wait_for(worker_row)
+    choose("Packaged footer worker", main_row, "Dismiss")
     open_list()
-    terminal.wait_for_match(lambda text: header in text and "> Packaged footer worker" in text and "Published plugin UI verification" in text, "coordinator's thread from the worker", 10, False)
+    terminal.wait_for("Packaged footer worker Closed · FAIL")
+    choose("Packaged footer worker", main_row, "Restore")
+    open_list()
+    terminal.wait_for(worker_row)
+    passed("a row's menu in the compiled list dismisses and restores the worker")
+    choose("Packaged footer worker", main_row, "Open")
+    terminal.wait_for_match(lambda _: "Packaged footer worker" in left() and header not in screen(), "focused worker tab", 20, False)
+    open_list()
+    terminal.wait_for_match(lambda text: "● " + worker_row in text and main_row in text, "coordinator's thread from the worker", 10, False)
     assert "Threads · Packaged footer worker" not in screen(), screen()
     (artifacts / "worker-focused-list.screen.txt").write_text(screen())
-    os.write(terminal.master, b"Published plugin")
-    terminal.wait_for(main_row)
-    os.write(terminal.master, b"\r")
-    terminal.wait_for_match(lambda text: "enter Open · esc Close" not in text, "list closed after Enter", 10, False)
-    # With an empty search, the list highlights the focused conversation.
+    choose("Published plugin UI verification", worker_row, "Open")
+    # The list marks the focused conversation as current.
     open_list()
-    terminal.wait_for_match(lambda text: main_row in text and "> Packaged footer worker" not in text, "main conversation focused again", 10, False)
+    terminal.wait_for("● " + main_row)
     close_list()
-    passed("with the worker focused, the compiled list shows its coordinator's thread, and Enter returns to the main conversation")
+    passed("with the worker focused, the compiled list shows its coordinator's thread, and Open returns to the main conversation")
     os.write(terminal.master, b"/workflows")
     terminal.wait_for("Open dynamic workflows")
     os.write(terminal.master, b"\r")
@@ -178,13 +190,12 @@ try:
     os.write(terminal.master, b"\x18n")
     settled = time.monotonic()
     terminal.wait_for_match(lambda _: time.monotonic() - settled >= 2, "home screen settle", 10, False)
-    # The message renders only when the route has no conversation and the list has no rows.
-    open_list()
+    # With no conversation on the route, the list has no rows and shows a notice instead.
+    os.write(terminal.master, b"\x18j")
     terminal.wait_for("Open a conversation to see its workers")
     assert "Threads ·" not in screen(), screen()
     (artifacts / "home-list.screen.txt").write_text(screen())
-    close_list()
-    passed("on the home screen the compiled list shows its open-a-conversation message")
+    passed("on the home screen the compiled list shortcut shows its open-a-conversation notice")
     terminal.close(artifacts / "picker.txt")
     # Options left from earlier versions. Both are ignored; the checks below run with them.
     cli["plugins"] = [{"package": plugin, "options": {"activity": "sidebar", "workerTabs": "auto"}}]
@@ -220,7 +231,7 @@ try:
     assert "Packaged auto worker" not in left() and "Activity" not in left() and "/activities" not in left(), left()
     assert len(indicator.findall(footer())) == 1, footer()
     open_list()
-    terminal.wait_for_match(lambda text: header in text and re.search(r"Packaged auto worker[ \t]+running\b", text), "thread list with the leftover options", 10, False)
+    terminal.wait_for_match(lambda text: header in text and "Packaged auto worker Running · running" in text, "thread list with the leftover options", 10, False)
     (artifacts / "legacy-options.screen.txt").write_text(screen())
     close_list()
     provider.release.set()
