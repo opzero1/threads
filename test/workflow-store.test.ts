@@ -224,3 +224,18 @@ test("payload admission reserves diagnostics for queued steps as well as active 
   await expect(store.update(initial.id, (current) => { current.args = "x".repeat(fill); })).rejects.toThrow("headroom");
   expect(await readFile(fixture.path("workflows/runs/workflow-a"), "utf8")).toBe(before);
 });
+
+test("stores each checkpoint answer once and derives it on every read", async () => {
+  const fixture = await disk();
+  const store = workflowStore(fixture.storage);
+  const legacy = { ...run(), checkpoints: [{ key: "a", prompt: "A", response: "old" }, { key: "b", prompt: "B" }], settlements: [{ kind: "checkpoint", key: "a", response: "old" }] };
+  await fixture.storage.set("workflows/runs/workflow-a", Json.parse(legacy));
+  expect((await store.get("workflow-a")).checkpoints.map((item) => item.response)).toEqual(["old", undefined]);
+  const updated = await store.update("workflow-a", (draft) => { draft.settlements!.push({ kind: "checkpoint", key: "b", response: true }); });
+  expect(updated.checkpoints.map((item) => item.response)).toEqual(["old", true]);
+  const stored = await fixture.storage.get("workflows/runs/workflow-a") as WorkflowRun;
+  expect(stored.checkpoints.map((item) => "response" in item)).toEqual([false, false]);
+  for (const read of [await store.get("workflow-a"), (await store.list("owner-a"))[0], (await store.all())[0]]) {
+    expect(read.checkpoints.map((item) => item.response)).toEqual(["old", true]);
+  }
+});

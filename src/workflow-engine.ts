@@ -57,9 +57,6 @@ const digest = (...parts: string[]) => createHash("sha256").update(JSON.stringif
 const runIdentity = (ownerID: string, key: string) => `wfr_${digest(ownerID, key).slice(0, 32)}`;
 const deliveryIdentity = (runID: string) => SessionMessage.ID.make(`msg_${digest(runID, "delivery").slice(0, 32)}`);
 const resultKey = (workerID: string) => `workflows/results/${workerID}`;
-const assistantPrefillError = (error: { type: string; message: string; status?: number } | undefined) =>
-  error?.type === "provider.invalid-request" && error.status === 400 &&
-  error.message.includes("This model does not support assistant message prefill. The conversation must end with a user message.");
 const nestedKey = (runID: string, identity: string) => `workflows/nested/${runID}/${digest(identity)}`;
 const completionKey = (runID: string) => `workflows/completions/${runID}`;
 const terminal = new Set(["stopped", "failed", "completed"]);
@@ -398,8 +395,7 @@ export function workflowEngine(
           current.attention.interruption ||= 1;
         }, "control");
       }
-      const unanswered = run.checkpoints.filter((checkpoint) => checkpoint.response === undefined &&
-        !run.settlements?.some((entry) => entry.kind === "checkpoint" && entry.key === checkpoint.key));
+      const unanswered = run.checkpoints.filter((checkpoint) => checkpoint.response === undefined);
       const interruption = run.attention?.interruption ?? 0;
       const interrupted = run.status === "interrupted";
       if (interrupted && run.attention?.deliveredInterruption === interruption) return;
@@ -619,32 +615,26 @@ export function workflowEngine(
           throw new Error(settlement.kind === "agent" ? settlement.error ?? `Workflow step ${key} previously failed` : `Workflow step ${key} previously failed`);
         }
         let directory = previous.directory;
+        const requireDispatchedWorker = async (step: WorkflowStep) => {
+          if (await nativeWorker(step.workerID)) return;
+          const message = input.access === "write"
+            ? "Previously dispatched write worker is missing. Its external state is ambiguous, so it will not be recreated or replayed."
+            : "Previously dispatched worker is missing and cannot be safely recreated under the same durable identity.";
+          await store.update(run.id, (value) => {
+            if (input.access === "write") {
+              value.status = "interrupted";
+              delete value.interruption;
+              value.error = message;
+              return;
+            }
+            const index = value.steps.findIndex((item) => item.key === key);
+            value.steps[index] = { ...value.steps[index], status: "failed", error: message, retryable: false } as WorkflowStep;
+          }, "control");
+          throw new Error(message);
+        };
         const prepareDirectory = async () => {
           if (!previous.profileFingerprint.startsWith("pending:")) return;
-          if (previous.status !== "prepared") {
-            try {
-              await ctx.session.get({ sessionID: previous.workerID });
-            } catch (error) {
-              const missing = typeof error === "object" && error !== null &&
-                "_tag" in error && error._tag === "Session.NotFoundError" &&
-                "sessionID" in error && error.sessionID === previous.workerID;
-              if (!missing) throw error;
-              const message = input.access === "write"
-                ? "Previously dispatched write worker is missing. Its external state is ambiguous, so it will not be recreated or replayed."
-                : "Previously dispatched worker is missing and cannot be safely recreated under the same durable identity.";
-              await store.update(run.id, (value) => {
-                if (input.access === "write") {
-                  value.status = "interrupted";
-                  delete value.interruption;
-                  value.error = message;
-                  return;
-                }
-                const index = value.steps.findIndex((step) => step.key === key);
-                value.steps[index] = { ...value.steps[index], status: "failed", error: message, retryable: false } as WorkflowStep;
-              }, "control");
-              throw new Error(message);
-            }
-          }
+          if (previous.status !== "prepared") await requireDispatchedWorker(previous);
           const sourceProjectID = input.isolation === "worktree"
             ? await workers.reserveWorkflow(run.ownerID, {
               key: spawnKey,
@@ -749,30 +739,7 @@ export function workflowEngine(
             }, "control");
             if (deferred) throw new SchedulingDeferred();
             current = run.steps.find((step) => step.key === key)!;
-          } else {
-            try {
-              await ctx.session.get({ sessionID: current.workerID });
-            } catch (error) {
-              const missing = typeof error === "object" && error !== null &&
-                "_tag" in error && error._tag === "Session.NotFoundError" &&
-                "sessionID" in error && error.sessionID === current.workerID;
-              if (!missing) throw error;
-              const message = input.access === "write"
-                ? "Previously dispatched write worker is missing. Its external state is ambiguous, so it will not be recreated or replayed."
-                : "Previously dispatched worker is missing and cannot be safely recreated under the same durable identity.";
-              await store.update(run.id, (value) => {
-                if (input.access === "write") {
-                  value.status = "interrupted";
-                  delete value.interruption;
-                  value.error = message;
-                  return;
-                }
-                const index = value.steps.findIndex((step) => step.key === key);
-                value.steps[index] = { ...value.steps[index], status: "failed", error: message, retryable: false } as WorkflowStep;
-              }, "control");
-              throw new Error(message);
-            }
-          }
+          } else await requireDispatchedWorker(current);
           await ensureWorker();
           current = await finalizeProfile();
           const finishRecorded = async (recorded: unknown) => {
@@ -798,45 +765,14 @@ export function workflowEngine(
             });
             return report.result;
           };
-          const recoverPrefill = async () => {
-            const native = await ctx.session.get({ sessionID: current.workerID });
-            if (native.outcome !== "failed") return false;
-            const context = await ctx.session.context({ sessionID: current.workerID });
-            const last = context.findLast((message) => message.type === "assistant" || message.type === "user");
-            if (last?.type !== "assistant" || !assistantPrefillError(last.error)) return false;
-            await workers.send(run.ownerID, {
-              workerID: Session.ID.make(current.workerID),
-              key: `workflow-prefill-repair:${run.id}:${key}`,
-              text: "The provider rejected the previous turn because this model requires a user message after the assistant. Continue in this same session from the existing work. Inspect what already completed; do not repeat completed edits or external effects. Finish the task and submit workflows_result with the required evidence and JSON result.",
-            });
-            return true;
-          };
           let recorded = await ctx.storage.get(resultKey(current.workerID));
           if (recorded === undefined) {
-            if (current.status === "failed") {
-              if (!current.retryable) throw new Error(current.error);
-              await workers.send(run.ownerID, {
-                workerID: Session.ID.make(current.workerID),
-                key: `workflow-retry:${run.id}:${key}`,
-                text: "The previous native execution failed before a valid workflows_result report was recorded. Inspect the existing session work. Finish and inspect already-running required commands before calling workflows_result; native idle is not task completion. Do not cancel unfinished commands or replay already-completed external effects merely to submit a report. Repair the issue and report actual evidence.",
-              });
-            } else {
-              const native = await ctx.session.get({ sessionID: current.workerID }).catch(() => undefined);
-              if (!fresh && current.status === "running" && native?.outcome !== undefined) {
-                if (input.access === "write") {
-                  if (!await recoverPrefill()) {
-                    const message = "Interrupted write has uncertain external state. Inspect the retained worker/worktree and send that same worker an explicit resolution request; after it reports, resume this run. The write will not be replayed automatically.";
-                    await store.update(run.id, (value) => { value.status = "interrupted"; delete value.interruption; value.error = message; }, "control");
-                    throw new UncertainWriteError(message);
-                  }
-                } else {
-                  await workers.send(run.ownerID, {
-                    workerID: Session.ID.make(current.workerID),
-                    key: `workflow-reconcile:${run.id}:${key}`,
-                    text: "The service resumed this read-only step after its prior execution ended without a validated report. Inspect the existing context, finish the task, and call workflows_result.",
-                  });
-                }
-              }
+            if (current.status === "failed") throw new Error(current.error);
+            const native = await ctx.session.get({ sessionID: current.workerID }).catch(() => undefined);
+            if (!fresh && current.status === "running" && native?.outcome !== undefined && input.access === "write") {
+              const message = "Interrupted write has uncertain external state. Inspect the retained worker/worktree and send that same worker an explicit resolution request; after it reports, resume this run. The write will not be replayed automatically.";
+              await store.update(run.id, (value) => { value.status = "interrupted"; delete value.interruption; value.error = message; }, "control");
+              throw new UncertainWriteError(message);
             }
           }
           await store.update(run.id, (value) => {
@@ -895,32 +831,6 @@ export function workflowEngine(
           };
           await waitWorker();
           recorded ??= await ctx.storage.get(resultKey(current.workerID));
-          if (recorded === undefined) {
-            const reason = deadlineReason();
-            if (reason === undefined && await recoverPrefill()) {
-              await waitWorker();
-              recorded = await ctx.storage.get(resultKey(current.workerID));
-            }
-          }
-          if (recorded === undefined) {
-            const native = await ctx.session.get({ sessionID: current.workerID });
-            if (native.outcome === "succeeded" || (input.access === "read" && (native.outcome === "failed" || native.outcome === "interrupted"))) {
-              const reason = deadlineReason();
-              if (reason !== undefined) {
-                await workers.interrupt(run.ownerID, { workerID: Session.ID.make(current.workerID) }).catch(() => undefined);
-                throw reason;
-              }
-              await workers.send(run.ownerID, {
-                workerID: Session.ID.make(current.workerID),
-                key: `workflow-report-repair:${run.id}:${key}`,
-                text: native.outcome === "succeeded"
-                  ? "Your native execution became idle without a validated workflows_result. Finish and inspect already-running required commands before submitting the structured report; native idle is not task completion. Do not cancel unfinished commands or replay completed effects merely to report. Review the existing work and submit actual evidence."
-                  : "The read-only execution ended before a validated report was recorded. Inspect the existing context. Finish and inspect already-running required commands before submitting workflows_result; native idle is not task completion. Do not cancel unfinished commands or replay completed effects merely to report. Repair or finish the read without creating a new worker.",
-              });
-              await waitWorker();
-              recorded = await ctx.storage.get(resultKey(current.workerID));
-            }
-          }
           if (recorded === undefined) {
             const native = await ctx.session.get({ sessionID: current.workerID });
             const message = native.outcome === "succeeded"
@@ -1034,10 +944,6 @@ export function workflowEngine(
           const reconciled = await store.update(runID, (current) => {
             const item = current.checkpoints.find((candidate) => candidate.key === key);
             if (!item) throw new Error(`Checkpoint ${key} settlement has no matching checkpoint`);
-            if (item.response !== undefined && JSON.stringify(item.response) !== JSON.stringify(settlement.response)) {
-              throw new Error(`Checkpoint ${key} response conflicts with its durable settlement`);
-            }
-            item.response = settlement.response;
             if (current.status === "running" || current.status === "waiting") {
               current.status = current.checkpoints.some((candidate) => candidate.response === undefined) ? "waiting" : "running";
             }
@@ -1274,8 +1180,7 @@ export function workflowEngine(
               }
               current.settlements = existing ? settlements : [...settlements, { kind: "checkpoint", key, response }];
               assertSettlementLimit(current.settlements);
-              checkpoint.response = response;
-              current.status = current.checkpoints.some((item) => item.response === undefined) ? "waiting" : "running";
+              current.status = current.checkpoints.some((item) => item.key !== key && item.response === undefined) ? "waiting" : "running";
               delete current.error;
             });
           } else {

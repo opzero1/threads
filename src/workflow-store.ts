@@ -31,8 +31,21 @@ export function workflowStore(storage: Plugin.Context["storage"], options: {
     return Math.max(WORKFLOW_CONTROL_HEADROOM, WORKFLOW_DIAGNOSTIC_JSON_BYTES + 256 + pending);
   };
   const key = (id: string) => `workflows/runs/${id}`;
+  // Each checkpoint answer is stored once, in settlement order. Readers see it on the checkpoint.
+  const answered = (run: WorkflowRun) => {
+    for (const entry of run.settlements ?? []) {
+      if (entry.kind !== "checkpoint") continue;
+      const checkpoint = run.checkpoints.find((item) => item.key === entry.key);
+      if (checkpoint) checkpoint.response = entry.response;
+    }
+    return run;
+  };
   async function persist(run: WorkflowRun, kind: "payload" | "control") {
-    const value = structuredClone(Json.parse(run));
+    const settled = new Set(run.settlements?.flatMap((item) => item.kind === "checkpoint" ? [item.key] : []));
+    const value = structuredClone(Json.parse({
+      ...run,
+      checkpoints: run.checkpoints.map(({ response, ...checkpoint }) => settled.has(checkpoint.key) || response === undefined ? checkpoint : { ...checkpoint, response }),
+    }));
     const limit = journalLimit - (kind === "payload" ? controlHeadroom(run) : 0);
     if (Buffer.byteLength(JSON.stringify(value), "utf8") > limit) {
       if (kind === "payload") {
@@ -49,7 +62,7 @@ export function workflowStore(storage: Plugin.Context["storage"], options: {
     if (!parsed.success) {
       throw new Error(`Workflow ${id} has a corrupt or unsupported journal record; its raw data was preserved at ${key(id)}: ${parsed.error.issues[0]?.message ?? "validation failed"}. Inspect the retained record or start a new workflow run key.`);
     }
-    return parsed.data;
+    return answered(parsed.data);
   }
   return {
     get,
@@ -69,6 +82,7 @@ export function workflowStore(storage: Plugin.Context["storage"], options: {
       return serialized(`workflow-store:${id}`, async () => {
         const run = await get(id);
         update(run);
+        answered(run);
         run.updated = Date.now();
         const next = WorkflowRun.parse(run);
         await persist(next, kind);
@@ -84,7 +98,7 @@ export function workflowStore(storage: Plugin.Context["storage"], options: {
           const raw = entry.value;
           if (typeof raw !== "object" || raw === null || !("ownerID" in raw) || raw.ownerID !== ownerID) continue;
           const parsed = WorkflowRun.safeParse(raw);
-          if (parsed.success) runs.push(parsed.data);
+          if (parsed.success) runs.push(answered(parsed.data));
           else await options.onDiagnostic?.({
             id: entry.key.slice("workflows/runs/".length), ownerID,
             message: `Corrupt or unsupported journal record: ${parsed.error.issues[0]?.message ?? "validation failed"}`,
@@ -105,7 +119,7 @@ export function workflowStore(storage: Plugin.Context["storage"], options: {
           const raw = entry.value;
           if (typeof raw !== "object" || raw === null || !include(raw as { status?: unknown; projectID?: unknown; updated?: unknown })) continue;
           const parsed = WorkflowRun.safeParse(raw);
-          if (parsed.success) runs.push(parsed.data);
+          if (parsed.success) runs.push(answered(parsed.data));
         }
         after = page.next;
       } while (after);

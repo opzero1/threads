@@ -646,6 +646,8 @@ return await checkpoint("Approve the next phase?", { key: "human-approval" });`,
     expect(run.status).toBe("failed");
     expect(run.error).toContain("without a workflows_result report");
     expect(run.steps[0].status).toBe("failed");
+    expect(fixture.workerEvents).not.toContain("send");
+    expect(fixture.spawns()).toBe(1);
     await fixture.api.dispose();
   });
 
@@ -1116,7 +1118,9 @@ return seen;`;
       if ((await fixture.api.get(fixture.ownerID, started.id)).checkpoints.some((item) => item.key === "park")) break;
       await Bun.sleep(2);
     }
-    expect((await fixture.api.get(fixture.ownerID, started.id)).checkpoints.some((item) => item.key === "park")).toBe(true);
+    expect((await fixture.api.get(fixture.ownerID, started.id)).checkpoints.map((item) => [item.key, item.response])).toEqual([["a", true], ["b", true], ["park", undefined]]);
+    const stored = await fixture.getStorage(`workflows/runs/${started.id}`) as WorkflowRun;
+    expect(stored.checkpoints.map((item) => "response" in item)).toEqual([false, false, false]);
     await fixture.api.dispose();
     const reopened = fixture.reopen();
     await reopened.control(fixture.ownerID, { runID: started.id, action: "resume", checkpointKey: "park", response: true });
@@ -1870,7 +1874,7 @@ return await agent("second", { key: "second", agent: "analyst" });`;
     await fixture.api.dispose();
   });
 
-  test("re-establishes a restarted read worker before sending its stable repair follow-up", async () => {
+  test("fails a restarted read step that previously failed without a report instead of prompting it again", async () => {
     const fixture = await harness("manual");
     const read = `
 export const meta = { name: "read-retry", description: "role initialization" };
@@ -1888,11 +1892,33 @@ return await agent("read", { key: "read", agent: "analyst" });`;
     fixture.workerEvents.length = 0;
     const reopened = fixture.reopen();
     await reopened.control(fixture.ownerID, { runID: started.id, action: "resume" });
-    while (!fixture.workerEvents.includes("send")) await Bun.sleep(2);
-    expect(fixture.workerEvents.slice(0, 2)).toEqual(["spawn", "send"]);
-    await fixture.complete("read");
-    expect((await settled(reopened, fixture.ownerID, started.id)).status).toBe("completed");
+    const run = await settled(reopened, fixture.ownerID, started.id);
+    expect(run.status).toBe("failed");
+    expect(run.error).toContain("native failure");
+    expect(fixture.workerEvents).not.toContain("send");
     await reopened.dispose();
+  });
+
+  test("lets a script retry a missing report under a new key without waiting on its own lease", async () => {
+    const fixture = await harness("manual", 1);
+    const retry = `
+export const meta = { name: "script-retry", description: "script-owned retry" };
+try { return await agent("write", { key: "write:1", agent: "analyst", access: "write" }); }
+catch (error) { return { retried: await agent("write", { key: "write:2", agent: "analyst", access: "write" }), error: error.message }; }`;
+    const started = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "script-retry", script: retry, args: null, concurrency: 1 }), {
+      agent: "caller", model: { providerID: "test", id: "model" },
+    });
+    while (!fixture.spawnedStepKeys.includes("write:1")) await Bun.sleep(2);
+    fixture.setOutcome("write:1", "succeeded");
+    while (!fixture.spawnedStepKeys.includes("write:2")) await Bun.sleep(2);
+    await fixture.complete("write:2");
+    const run = await settled(fixture.api, fixture.ownerID, started.id);
+    expect(run.status).toBe("completed");
+    expect(run.result).toEqual({ retried: "write:2", error: expect.stringContaining("without a workflows_result report") });
+    expect(run.steps.map((step) => step.status)).toEqual(["failed", "completed"]);
+    expect(fixture.workerEvents).not.toContain("send");
+    expect(fixture.spawns()).toBe(2);
+    await fixture.api.dispose();
   });
 
   test("returns a completed cached write without recreating its deleted native session", async () => {

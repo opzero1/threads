@@ -98,7 +98,7 @@ Accepted limits from review:
 - Deleting individual journal records is unsupported.
 - A replay-order mismatch waits until the run deadline.
 - Scheduling relies on a single loaded scheduler implementation.
-- Checkpoint responses are stored twice, so they count twice toward the journal limit. A nearly full run can reject even a small response, and the checkpoint stays unanswered.
+- A nearly full run can reject even a small checkpoint response, and the checkpoint stays unanswered.
 - Passing reports from implementation workers alone don't count as independent approval.
 
 ## Real-model verification
