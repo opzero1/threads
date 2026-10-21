@@ -64,7 +64,6 @@ const completionKey = (runID: string) => `workflows/completions/${runID}`;
 const terminal = new Set(["stopped", "failed", "completed"]);
 const activeStatus = new Set(["running", "pausing", "stopping", "waiting"]);
 const settlementLimit = 16 * 1024 * 1024;
-const cleanupDisposeLimit = 2_000;
 const boundedBytes = (text: string, limit: number) => {
   if (Buffer.byteLength(JSON.stringify(text), "utf8") - 2 <= limit) return text;
   const suffix = "\n…[truncated]";
@@ -192,8 +191,9 @@ export function workflowEngine(
   const journal = workflowStore(ctx.storage, { onDiagnostic: diagnose });
   const store = {
     ...journal,
-    update(id: string, update: (run: WorkflowRun) => void, kind: "payload" | "control" = "payload", lifecycle?: "engine-disposed" | "lease-lost") {
-      return journal.update(id, (run) => {
+    async update(id: string, update: (run: WorkflowRun) => void, kind: "payload" | "control" = "payload", lifecycle?: "engine-disposed" | "lease-lost") {
+      let ended = false;
+      const updated = await journal.update(id, (run) => {
         const previous = run.status;
         const previousError = run.error;
         update(run);
@@ -206,22 +206,21 @@ export function workflowEngine(
           run.attention ??= { checkpoints: [], interruption: 0, deliveredInterruption: 0 };
           run.attention.interruption++;
         }
-        // Runs that ended before cleanup existed, or while it was off, are left for workflows_prune.
         if (terminal.has(run.status) && !terminal.has(previous)) {
           run.finished ??= Date.now();
-          if (cleanupWorktrees && run.worktreeCleanup === undefined && worktreeSteps(run).length > 0) {
-            run.worktreeCleanup = { complete: false, worktrees: [] };
-          }
+          ended = true;
         }
       }, kind);
+      // A run ends once, so it is swept once, under the setting in force when it ended. A pass that
+      // doesn't start or finish before OpenCode stops leaves the rest for workflows_prune.
+      if (ended && cleanupWorktrees && !disposed && worktreeSteps(updated).length > 0) void cleanRun(updated).catch(() => {});
+      return updated;
     },
   };
   const maxWorkers = options.maxWorkers ?? 4;
   if (!Number.isSafeInteger(maxWorkers) || maxWorkers < 1) throw new Error("maxWorkers must be a positive integer");
   const ajv = new Ajv({ allErrors: true, strict: false });
   const recoveredOwners = new Set<string>();
-  const cleanupAttempts = new Set<string>();
-  const cleanups = new Map<string, Promise<void>>();
   const cleanupStop = new AbortController();
   const engineOwner = Symbol("workflow-engine");
   let disposed = false;
@@ -242,14 +241,6 @@ export function workflowEngine(
   }
 
   async function deliver(runID: string) {
-    try {
-      return await deliverOnce(runID);
-    } finally {
-      cleanupLater(runID);
-    }
-  }
-
-  async function deliverOnce(runID: string) {
     return serialized(`workflow-delivery:${runID}`, async () => {
       const run = await store.get(runID);
       if (!terminal.has(run.status) || run.delivered) return run;
@@ -317,22 +308,11 @@ export function workflowEngine(
       await attend(run.id);
       if (terminal.has(run.status) && !run.delivered) {
         await deliver(run.id).catch((error) => diagnose({ id: run.id, ownerID, message: errorText(error) }));
-      } else if (terminal.has(run.status) && run.worktreeCleanup?.complete === false) {
-        cleanupLater(run.id);
       }
     }
   }
 
-  // Runs after the final status is recorded and never changes it. Each engine tries a run once;
-  // per-worktree records let a restarted engine continue an interrupted pass.
-  function cleanupLater(runID: string) {
-    if (!cleanupWorktrees || disposed || cleanupAttempts.has(runID)) return;
-    cleanupAttempts.add(runID);
-    const task = cleanRun(runID).catch(() => {}).finally(() => cleanups.delete(runID));
-    cleanups.set(runID, task);
-  }
-
-  async function recordWorktrees(runID: string, outcomes: WorkflowWorktreeOutcome[], complete?: boolean) {
+  async function recordWorktrees(runID: string, outcomes: WorkflowWorktreeOutcome[]) {
     return store.update(runID, (current) => {
       current.finished ??= current.updated;
       const record = current.worktreeCleanup ??= { complete: true, worktrees: [] };
@@ -341,7 +321,6 @@ export function workflowEngine(
         if (index >= 0) record.worktrees[index] = outcome;
         else record.worktrees.push(outcome);
       }
-      if (complete !== undefined) record.complete = complete;
     }, "control");
   }
 
@@ -361,25 +340,19 @@ export function workflowEngine(
     };
   }
 
-  async function cleanRun(runID: string) {
-    await serialized(`workflow-cleanup:${runID}`, async () => {
-      const run = await store.get(runID);
-      if (!terminal.has(run.status) || run.worktreeCleanup?.complete !== false) return;
-      const recorded = new Set(run.worktreeCleanup.worktrees.map((entry) => entry.key));
+  async function cleanRun(run: WorkflowRun) {
+    await serialized(`workflow-cleanup:${run.id}`, async () => {
       const sweep = worktreeSweeper(ctx, options.inspectCheckout ?? inspectCheckout, relatedRuns(), { signal: cleanupStop.signal });
+      const outcomes: WorkflowWorktreeOutcome[] = [];
       for (const step of worktreeSteps(run)) {
-        if (disposed) return;
-        if (recorded.has(step.key)) continue;
-        const result = await sweep(run, step, true);
-        if (disposed && result.outcome !== "removed") return;
-        const { outcome, reason, message } = result;
+        const { outcome, reason, message } = await sweep(run, step, true);
         if (outcome === "would-remove") continue;
-        await recordWorktrees(runID, [{
+        outcomes.push({
           key: step.key, directory: step.directory, outcome,
           ...(reason === undefined ? {} : { reason }), ...(message === undefined ? {} : { message }), at: Date.now(),
-        }]);
+        });
       }
-      if (!disposed) await recordWorktrees(runID, [], true);
+      await recordWorktrees(run.id, outcomes);
     });
   }
 
@@ -1257,8 +1230,7 @@ export function workflowEngine(
     },
     async dispose() {
       disposed = true;
-      // First, so a pass holding a lock that an active run waits on lets go. An unfinished pass keeps
-      // an incomplete record, which the next engine continues.
+      // First, so a pass holding a lock that an active run waits on lets go.
       cleanupStop.abort(new Error("Workflow engine disposed"));
       const pending: Promise<void>[] = [];
       for (const [runID, lease] of leases) {
@@ -1273,7 +1245,6 @@ export function workflowEngine(
         pending.push(lease.promise.catch(() => {}));
       }
       await Promise.all(pending);
-      await Promise.race([Promise.all(cleanups.values()), Bun.sleep(cleanupDisposeLimit)]);
     },
   };
 }
