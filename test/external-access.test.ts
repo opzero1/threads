@@ -454,13 +454,19 @@ test("a workflow step worker frees its slot when its step settles or its run end
   await expect(step("second")).rejects.toThrow(limited);
   run("running", { first: "running" });
   await expect(step("second")).rejects.toThrow(limited);
-  run("running", { first: "failed" });
+  run("stopped", {});
+  await expect(step("second")).rejects.toThrow(limited);
+  run("running", { first: "unknown" });
+  await expect(step("second")).rejects.toThrow(limited);
+  run("running", { first: "completed" });
   await step("second");
-  run("interrupted", { first: "failed", second: "running" });
+  run("running", { first: "completed", second: "failed" });
+  await step("third");
+  run("interrupted", { first: "completed", second: "failed", third: "running" });
   await expect(managed()).rejects.toThrow(limited);
-  run("stopped", { first: "failed", second: "running" });
+  run("stopped", { first: "completed", second: "failed", third: "running" });
   fixture.sessions.get((await managed()).workerID)!.outcome = "succeeded";
-  await expect(step("third")).rejects.toThrow(limited);
+  await expect(step("fourth")).rejects.toThrow(limited);
 });
 
 describe("workflow workers at their destination", () => {
