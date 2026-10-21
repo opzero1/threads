@@ -161,6 +161,31 @@ describe("real CodeMode workflow execution", () => {
     expect((await failure(promise)).message).toContain("stop delivery");
   });
 
+  test("cancellation stops queued log delivery and the host call behind it", async () => {
+    const controller = new AbortController();
+    const calls: string[] = [];
+    let delivering!: () => void;
+    const started = new Promise<void>((resolve) => { delivering = resolve; });
+    let release!: () => void;
+    const stall = new Promise<void>((resolve) => { release = resolve; });
+    const promise = run(`log("one"); log("two"); return await checkpoint({ question: "go?" });`, {
+      signal: controller.signal,
+      host: host({
+        log: async (message) => {
+          calls.push(`log:${message}`);
+          if (message === "one") { delivering(); await stall; }
+        },
+        checkpoint: async (input) => { calls.push("checkpoint"); return input; },
+      }),
+    });
+    await started;
+    controller.abort(new Error("stop delivery"));
+    expect((await failure(promise)).message).toContain("stop delivery");
+    release();
+    await Bun.sleep(10);
+    expect(calls).toEqual(["log:one"]);
+  });
+
   test("derives distinct, deterministic keys for keyless agents and keeps explicit keys", async () => {
     const body = `return await parallel([
       () => agent("same", { agent: "x", label: "l" }),

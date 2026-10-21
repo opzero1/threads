@@ -97,8 +97,11 @@ export async function executeWorkflow(input: ExecuteInput): Promise<unknown> {
   let delivered: Promise<void> = Promise.resolve();
   const deliver = (state: ScriptState): Promise<void> => {
     delivered = delivered.then(async () => {
-      if (state.newPhase && state.phase !== undefined) await input.host.phase(state.phase, hostController.signal);
-      for (const message of state.logs) await input.host.log(message, hostController.signal);
+      if (!settled && state.newPhase && state.phase !== undefined) await input.host.phase(state.phase, hostController.signal);
+      for (const message of state.logs) {
+        if (settled) return;
+        await input.host.log(message, hostController.signal);
+      }
     });
     return delivered;
   };
@@ -107,7 +110,10 @@ export async function executeWorkflow(input: ExecuteInput): Promise<unknown> {
     const message = event.data;
     if (message.type === "hostCall") {
       if (!acceptingCalls) return;
-      const operation = deliver(message).then(() => invokeHost(message.method, message.input, message.phase)).then(
+      const operation = deliver(message).then(() => {
+        if (settled) throw abortError(hostController.signal);
+        return invokeHost(message.method, message.input, message.phase);
+      }).then(
         (value) => {
           if (!acceptingCalls) return;
           try {
