@@ -475,8 +475,7 @@ export function workflowEngine(
         run = await store.update(runID, (current) => { current.settlements = readSettlements(current, storedCompletionOrder); });
       }
       completionOrder = readSettlements(run, undefined);
-      // Steps the prior run completed before this run was created, so a later resume of it changes nothing here.
-      if (run.resumeFrom !== undefined) reusable = (await store.get(run.resumeFrom)).steps.filter(isCompleted).filter((step) => step.completed <= run.created);
+      if (run.resumeFrom !== undefined) reusable = (await store.get(run.resumeFrom)).steps.filter(isCompleted);
     } catch (error) {
       try {
         await store.update(runID, (current) => { current.status = "failed"; current.error = errorText(error); }, "control")
@@ -1085,13 +1084,11 @@ export function workflowEngine(
         agentTimeoutMs: input.agentTimeoutMs, timeoutMs: input.timeoutMs,
         ...(input.tokenBudget === undefined ? {} : { tokenBudget: input.tokenBudget }),
       }, runtime });
-      // An exact retry returns its run even if the prior run has since changed state.
-      if (input.resumeFrom !== undefined && (await store.get(id).catch(() => undefined))?.fingerprint !== fingerprint) {
+      // Only an ended run: it accepts no more results, so its completed steps can't change under the new run.
+      if (input.resumeFrom !== undefined) {
         if (input.resumeFrom === id) throw new Error("resumeFrom needs a new key; the new run gets its own record");
         const prior = await owned(ownerID, input.resumeFrom);
-        if (!terminal.has(prior.status) && !(prior.status === "paused" && !leases.has(prior.id))) {
-          throw new Error(`Cannot resume from workflow ${prior.id} in ${prior.status}; stop it first`);
-        }
+        if (!terminal.has(prior.status)) throw new Error(`Cannot resume from workflow ${prior.id} in ${prior.status}; stop it first`);
       }
       const now = Date.now();
       const run = WorkflowRun.parse({

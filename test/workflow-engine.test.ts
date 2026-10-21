@@ -2202,7 +2202,7 @@ ${tail}`;
     await fixture.api.dispose();
   });
 
-  test("an exact retry returns the same run after its paused prior run resumes", async () => {
+  test("rejects a paused run with no live lease until it is stopped", async () => {
     const fixture = await harness("manual");
     const prior = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key: "first", script: steps({ a: "A", b: "B" }), args: null }), runtime);
     await fixture.waitForSpawn("a");
@@ -2213,17 +2213,26 @@ ${tail}`;
     const reopened = fixture.reopen();
     try {
       const input = WorkflowStart.parse({ key: "second", script: steps({ a: "A" }), args: null, resumeFrom: prior.id });
+      await expect(reopened.start(fixture.ownerID, input, runtime)).rejects.toThrow(`Cannot resume from workflow ${prior.id} in paused; stop it first`);
+      await reopened.control(fixture.ownerID, { runID: prior.id, action: "stop" });
+      await reaches(reopened, fixture.ownerID, prior.id, "stopped");
       const run = await settled(reopened, fixture.ownerID, (await reopened.start(fixture.ownerID, input, runtime)).id);
       expect(run.status).toBe("completed");
-      await reopened.control(fixture.ownerID, { runID: prior.id, action: "resume" });
-      await reaches(reopened, fixture.ownerID, prior.id, "running");
-      const retried = await reopened.start(fixture.ownerID, input, runtime);
-      expect(retried.id).toBe(run.id);
-      expect(retried.status).toBe("completed");
-      await expect(reopened.start(fixture.ownerID, WorkflowStart.parse({ ...input, key: "third" }), runtime))
-        .rejects.toThrow(`Cannot resume from workflow ${prior.id} in running`);
-      await reopened.control(fixture.ownerID, { runID: prior.id, action: "stop" });
+      expect(run.steps[0].status === "completed" && run.steps[0].reusedFrom).toBe(prior.id);
     } finally { await reopened.dispose(); }
+  });
+
+  test("a chain of resumed runs points reused steps at the run that did the work", async () => {
+    const fixture = await harness("valid");
+    const script = steps({ a: "A" });
+    const begin = async (key: string, resumeFrom?: string) =>
+      settled(fixture.api, fixture.ownerID, (await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key, script, args: null, resumeFrom }), runtime)).id);
+    const first = await begin("first");
+    const second = await begin("second", first.id);
+    const third = await begin("third", second.id);
+    expect(third.steps[0].status === "completed" && third.steps[0].reusedFrom).toBe(first.id);
+    expect(fixture.spawns()).toBe(1);
+    await fixture.api.dispose();
   });
 
   test("a resumed run replays its reused steps after an engine restart without carrying over checkpoint answers", async () => {
