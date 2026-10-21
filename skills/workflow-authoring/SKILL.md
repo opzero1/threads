@@ -25,7 +25,7 @@ Budgets are opt-in. Do not estimate or invent `tokenBudget`, `maxAgents`, `agent
 
 Use `access: "read"` for investigations. It denies edits and shell commands. Real command-based verification needs a suitably permitted worker with `access: "write"`, even when its intended task is only running tests. Use `isolation: "worktree"` for independent implementations and return the retained directory and changed paths. Give subsequent verification the same directory. The root owns integration. When the run ends, Threads removes step worktrees that hold no uncommitted changes and no commits outside a branch, so ask writers whose work outlives the run to commit to a named branch and return its name.
 
-Verification evidence is part of the handoff. `FAIL` and `INCONCLUSIVE` cannot establish a passing step. Do not replace execution evidence with reviewer votes. A workflow does not expand the user's authorization for external actions.
+Verification evidence is part of the handoff. A completed run means the script ran to the end, not that every step passed: read each step's verdict before giving yours. When the script needs a decision, put it in the step's schema and branch on it. Do not replace execution evidence with reviewer votes. A workflow does not expand the user's authorization for external actions.
 
 Workers finish required commands and inspect their results before reporting or ending their execution. Keep dependent checks in a foreground tool call; if a tool backgrounds them, collect its completion before finishing. A missing-report reminder asks the worker to complete the handoff, not cancel unfinished checks. Native idle while a command is still running is not task completion.
 
