@@ -49,8 +49,7 @@ The native suites start an isolated OpenCode server with a deterministic local m
 | `bun run verify:workflow-runtime` | Script cancellation and thread cleanup in the confined runtime. |
 | `bun run verify:workflow-capacity` | Concurrency, total steps, controls, deadlines, and cleanup under load. |
 | `bun run verify:workflow-cleanup` | Worktree removal when runs end, kept worktrees and their reasons, a worker that is still running, `workflows_prune` dry runs and apply, and the edit permission it needs. |
-| `python3 scripts/verify-heartbeat.py` | The packaged heartbeat runner, durable reminders, input holds, and isolated LaunchAgent cleanup. |
-| `python3 scripts/verify-heartbeat-ipv6.py --package <absolute-package-directory> --artifacts <new-directory>` | The external runner survives an unchanged OpenCode IPv6 restart without rewriting native registration. |
+| `python3 scripts/verify-heartbeat.py [--target <package-directory>] [--scenario workflow\|outage\|ipv6]` | One package's plugin and heartbeat runner: workflow holds, durable reminders, and LaunchAgent cleanup; an installed runner that survives an OpenCode outage and reconnects; and the same over an unchanged IPv6 registration. Runs every scenario by default. |
 | `python3 scripts/verify-workflow-lifecycle.py` | Task Location invalidation, isolated restart, plugin reload, and inspection-only interruption reminders. |
 | `bun run verify:package-ui <package>` | A packed or published package, installed under `node_modules`, in a clean terminal. |
 

@@ -33,7 +33,7 @@ export async function heartbeatObserve(client: OpenCodeClient, snapshot: Heartbe
     }
     let admission: Extract<HeartbeatObservation, { kind: "complete" }>["admission"] = null;
     const pending = record.pendingAdmission;
-    if (pending && pending.checks < record.policy.maxAckRetries && Date.now() >= pending.nextCheckAt) {
+    if (pending && Date.now() >= pending.nextCheckAt) {
       const inbox = await client.session.inbox.list({ sessionID: record.ownerID });
       const item = inbox.find((entry) => entry.id === pending.messageID);
       if (item) {

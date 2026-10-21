@@ -30,12 +30,13 @@ test("registered policy tool patches omit defaults, conserve retry identity, and
       return HeartbeatView.parse((await tool.execute(tool.input.parse(input), { sessionID: ownerID })).output);
     }
     const defaults = await execute("enroll", { key: "default", runID: "default" });
-    expect(defaults.policy).toEqual({ idleGraceMs: 60_000, stalledMs: 300_000, cooldownMs: 300_000, maxAckRetries: 3 });
+    expect(defaults.policy).toEqual({ idleGraceMs: 60_000, stalledMs: 300_000, cooldownMs: 300_000 });
+    await expect(execute("enroll", { key: "capped", runID: "run", policy: { maxAckRetries: 3 } })).rejects.toThrow("maxAckRetries");
     expect(defaults.deadlineAt).toBeUndefined(); expect(defaults.wakesRemaining).toBeNull();
     const defaultDeadline = Date.now() + 100_000;
     const deadlineOnly = await execute("update", { key: "default", expectedRevision: defaults.revision, change: { type: "policy", patch: { deadlineAt: defaultDeadline } } });
     expect(deadlineOnly.policy).toEqual(defaults.policy); expect(deadlineOnly.wakesRemaining).toBeNull(); expect(deadlineOnly.deadlineAt).toBe(defaultDeadline);
-    let current = await execute("enroll", { key: "key", runID: "run", policy: { idleGraceMs: 1_000, stalledMs: 2_000, cooldownMs: 3_000, maxAckRetries: 1 } });
+    let current = await execute("enroll", { key: "key", runID: "run", policy: { idleGraceMs: 1_000, stalledMs: 2_000, cooldownMs: 3_000 } });
     const emptyUnbounded = await execute("update", { key: "key", expectedRevision: current.revision, change: { type: "policy", patch: {} } });
     expect(emptyUnbounded.policy).toEqual(current.policy); expect(emptyUnbounded.deadlineAt).toBeUndefined(); expect(emptyUnbounded.wakesRemaining).toBeNull();
     current = emptyUnbounded;
@@ -56,9 +57,9 @@ test("registered policy tool patches omit defaults, conserve retry identity, and
     const beforeEmpty = current;
     await update({});
     expect(current.policy).toEqual(beforeEmpty.policy); expect(current.deadlineAt).toBe(deadlineAt);
-    await update({ maxWakes: 4, deadlineAt: deadlineAt - 1_000, maxAckRetries: 0, idleGraceMs: 2_000, stalledMs: 3_000, cooldownMs: 4_000 });
-    expect(current.policy).toEqual({ maxWakes: 4, maxAckRetries: 0, idleGraceMs: 2_000, stalledMs: 3_000, cooldownMs: 4_000 });
-    for (const patch of [{ maxWakes: 5 }, { deadlineAt }, { maxAckRetries: 1 }, { idleGraceMs: 1_000 }, { stalledMs: 2_000 }, { cooldownMs: 3_000 }]) {
+    await update({ maxWakes: 4, deadlineAt: deadlineAt - 1_000, idleGraceMs: 2_000, stalledMs: 3_000, cooldownMs: 4_000 });
+    expect(current.policy).toEqual({ maxWakes: 4, idleGraceMs: 2_000, stalledMs: 3_000, cooldownMs: 4_000 });
+    for (const patch of [{ maxWakes: 5 }, { deadlineAt }, { idleGraceMs: 1_000 }, { stalledMs: 2_000 }, { cooldownMs: 3_000 }]) {
       const before = JSON.stringify([...values]);
       await expect(execute("update", { key: "key", expectedRevision: current.revision, change: { type: "policy", patch } })).rejects.toThrow("only tighten");
       expect(JSON.stringify([...values])).toBe(before);
@@ -66,7 +67,7 @@ test("registered policy tool patches omit defaults, conserve retry identity, and
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test("reservation ambiguity never reposts; reconciliation cap and rebind conserve budgets across service reconstruction", async () => {
+test("reservation ambiguity never reposts; cooldown-spaced reconciliation and rebind conserve budgets across service reconstruction", async () => {
   const directory = await mkdtemp(join(tmpdir(), "threads-heartbeat-unit-"));
   try {
     const ownerID = Session.ID.create();
@@ -79,7 +80,7 @@ test("reservation ambiguity never reposts; reconciliation cap and rebind conserv
     const rawRun = { ...base, ownerID, directory, updated: 1 };
     await storage.set("workflows/runs/run", Json.parse(rawRun));
     let api = heartbeatService(ctx);
-    const enrolled = await api.enroll(ownerID, { key: "key", runID: "run", deadlineAt: Date.now() + 1_000_000, policy: { maxWakes: 2, maxAckRetries: 1, cooldownMs: 1_000, idleGraceMs: 1_000, stalledMs: 1_000 } });
+    const enrolled = await api.enroll(ownerID, { key: "key", runID: "run", deadlineAt: Date.now() + 1_000_000, policy: { maxWakes: 2, cooldownMs: 1_000, idleGraceMs: 1_000, stalledMs: 1_000 } });
     const initialSnapshot = await api.snapshot({ limit: 100 });
     expect(Object.hasOwn(initialSnapshot.entries[0].run!, "interruption")).toBe(false);
     expect(Json.safeParse(initialSnapshot).success).toBe(true);
@@ -95,12 +96,12 @@ test("reservation ambiguity never reposts; reconciliation cap and rebind conserv
     expect(held.pendingAdmission?.messageID).toBe(reserved.pendingAdmission?.messageID); expect(admissions).toHaveLength(1);
     await Bun.sleep(1_010);
     const checked = await apply(held.revision);
-    expect(checked.pendingAdmission?.checks).toBe(1);
-    const exhausted = await apply(checked.revision);
-    expect(exhausted.pendingAdmission?.checks).toBe(1); expect(admissions).toHaveLength(1);
+    expect(checked.pendingAdmission?.nextCheckAt).toBeGreaterThan(held.pendingAdmission!.nextCheckAt);
+    const cooling = await apply(checked.revision);
+    expect(cooling.pendingAdmission).toEqual(checked.pendingAdmission!); expect(admissions).toHaveLength(1);
     await storage.set("workflows/runs/replacement", Json.parse({ ...rawRun, id: "replacement", created: 2, fingerprint: "new" }));
-    await expect(api.rebind(ownerID, { key: "key", expectedRevision: exhausted.revision, expectedRunID: "run", runID: "replacement", reason: "rename" })).rejects.toThrow("Pending admission");
-    const retired = await api.update(ownerID, { key: "key", expectedRevision: exhausted.revision, change: { type: "retireAdmission", messageID: reserved.pendingAdmission!.messageID, reason: "inspected cancellation" } });
+    await expect(api.rebind(ownerID, { key: "key", expectedRevision: cooling.revision, expectedRunID: "run", runID: "replacement", reason: "rename" })).rejects.toThrow("Pending admission");
+    const retired = await api.update(ownerID, { key: "key", expectedRevision: cooling.revision, change: { type: "retireAdmission", messageID: reserved.pendingAdmission!.messageID, reason: "inspected cancellation" } });
     const rebound = await api.rebind(ownerID, { key: "key", expectedRevision: retired.revision, expectedRunID: "run", runID: "replacement", reason: "rename" });
     for (const field of ["deadlineAt", "wakesReserved", "sequence", "lastWakeAt", "nextWakeAt"] as const) expect(rebound[field]).toBe(reserved[field]);
     const stopInput = { key: "key", expectedRevision: rebound.revision, reason: "done, not acceptance" };
@@ -111,6 +112,79 @@ test("reservation ambiguity never reposts; reconciliation cap and rebind conserv
     await api.snapshot({ limit: 100 }); await api.inspect(ownerID, {});
     expect(JSON.stringify([...values])).toBe(before);
     expect((await heartbeatStore(storage).read(ownerID)).monitors[0].admissions[0].state).toBe("retired");
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("a stored acknowledgement cap is dropped in history; checks continue until a late exact-ID acknowledgement", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "threads-heartbeat-late-"));
+  let now = Date.now();
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  try {
+    const ownerID = Session.ID.create();
+    const values = new Map<string, Schema.Json>();
+    const admitted: string[] = [];
+    const storage: Plugin.Context["storage"] = { get: async (key) => structuredClone(values.get(key)), set: async (key, value) => { values.set(key, structuredClone(value)); }, remove: async () => {}, scan: async () => ({ entries: [] }) };
+    const session = { get: async () => ({ id: ownerID, projectID: "project", metadata: {}, location: { directory } }), synthetic: async (input: { id: string }) => { admitted.push(input.id); throw new Error("lost response"); } } as unknown as Plugin.Context["session"];
+    const ctx = { storage, session };
+    await storage.set("workflows/runs/run", Json.parse({ ...base, ownerID, directory, updated: 1 }));
+    const policy = { cooldownMs: 1_000, idleGraceMs: 1_000, stalledMs: 1_000 };
+    const enrolled = await heartbeatService(ctx).enroll(ownerID, { key: "late", runID: "run", policy });
+    const apply = (current: HeartbeatView, admission: { messageID: string; found: boolean; evidence: string } | null) => heartbeatService(ctx).apply({ ownerID, monitorID: current.monitorID, expectedRevision: current.revision, bindingEpoch: 0,
+      observation: { kind: "complete", at: now, ownerID, runID: "run", directory, sessions: [{ id: ownerID, projectID: "project", busy: false, queued: false, permission: false, form: false, revert: false, interrupted: false, idleAt: 1 }], admission } });
+    now += 1_000;
+    let current = await apply(enrolled, null);
+    const messageID = current.pendingAdmission!.messageID;
+    const key = `heartbeat/v1/owners/${ownerID}`;
+    const legacy = structuredClone(values.get(key)) as { monitors: { policy: object; pendingAdmission: object }[] };
+    legacy.monitors[0].policy = { ...legacy.monitors[0].policy, maxAckRetries: 3 };
+    legacy.monitors[0].pendingAdmission = { ...legacy.monitors[0].pendingAdmission, checks: 3 };
+    await storage.set(key, Json.parse(legacy));
+    for (let check = 0; check < 12; check++) {
+      now += 1_000;
+      current = await apply(current, { messageID, found: false, evidence: "exact ID not observable; absence does not prove non-admission or authorize repost" });
+      expect(current.decision.reason).toBe("unresolved admission; read-only reconciliation only");
+      expect(current.pendingAdmission?.nextCheckAt).toBe(now + 1_000);
+    }
+    expect(current.policy).toEqual(policy);
+    expect(current.history.filter((item) => item.event === "migrate").map((item) => item.detail)).toEqual(["removed maxAckRetries 3; unresolved admissions are checked every cooldown until found or retired"]);
+    expect(current.pendingAdmission!.evidence).toHaveLength(10);
+    expect(current.pendingAdmission!.evidence.slice(0, 2)).toEqual(["durable reservation; never automatically repost", "ambiguous admission: Error: lost response"]);
+    now += 1_000;
+    const acknowledged = await apply(current, { messageID, found: true, evidence: "exact synthetic message ID and monitor metadata" });
+    expect(acknowledged.pendingAdmission).toBeNull();
+    expect(acknowledged.admissions.at(-1)).toMatchObject({ messageID, state: "acknowledged" });
+    expect(acknowledged.admissions.at(-1)!.evidence.at(-1)).toBe("exact synthetic message ID and monitor metadata");
+    expect(admitted).toEqual([messageID]);
+  } finally { clock.mockRestore(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("an identical enrollment retry matches a fingerprint stored before the acknowledgement cap was removed", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "threads-heartbeat-legacy-"));
+  try {
+    const ownerID = Session.ID.create();
+    const values = new Map<string, Schema.Json>();
+    const storage: Plugin.Context["storage"] = { get: async (key) => structuredClone(values.get(key)), set: async (key, value) => { values.set(key, structuredClone(value)); }, remove: async () => {}, scan: async () => ({ entries: [] }) };
+    const api = heartbeatService({ storage, session: { get: async () => ({ id: ownerID, projectID: "project", metadata: {}, location: { directory } }) } as unknown as Plugin.Context["session"] });
+    await storage.set("workflows/runs/run", Json.parse({ ...base, ownerID, directory, updated: 1 }));
+    const enrolled = await api.enroll(ownerID, { key: "legacy", runID: "run" });
+    // Fingerprints produced by 4cbd6d0 for { key: "legacy", runID: "run" } without a policy, and with { maxAckRetries: 1 }.
+    async function storeLegacy(enrollmentFingerprint: string, maxAckRetries: number) {
+      const key = `heartbeat/v1/owners/${ownerID}`;
+      const state = structuredClone(values.get(key)) as { monitors: { policy: object; enrollmentFingerprint: string }[] };
+      state.monitors[0] = { ...state.monitors[0], enrollmentFingerprint, policy: { ...state.monitors[0].policy, maxAckRetries } };
+      await storage.set(key, Json.parse(state));
+      await storage.set(`heartbeat/v1/run-index/${ownerID}/run`, { monitorID: enrolled.monitorID, enrollmentFingerprint });
+    }
+    await storeLegacy("c0b4b97818abe4139526176b8b81e145e4588c70658cae6f322a0d1f21379b11", 3);
+    const before = JSON.stringify([...values]);
+    const retried = await api.enroll(ownerID, { key: "legacy", runID: "run" });
+    expect(retried.enrollmentFingerprint).toBe("c0b4b97818abe4139526176b8b81e145e4588c70658cae6f322a0d1f21379b11");
+    expect(retried.policy).toEqual(enrolled.policy);
+    expect((await api.enroll(ownerID, { key: "legacy", runID: "run", policy: { cooldownMs: 300_000 } })).monitorID).toBe(enrolled.monitorID);
+    await expect(api.enroll(ownerID, { key: "legacy", runID: "run", policy: { cooldownMs: 1_000 } })).rejects.toThrow("conflicts with retained request");
+    expect(JSON.stringify([...values])).toBe(before);
+    await storeLegacy("c80d89896bfed89f54d1086c709e45954cf20c7281f8daef613cf3d86068dfbf", 1);
+    await expect(api.enroll(ownerID, { key: "legacy", runID: "run" })).rejects.toThrow("conflicts with retained request");
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

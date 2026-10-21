@@ -15,7 +15,7 @@ Only a root, non-managed owning session can use these tools. They are [Code Mode
 
 Inspection reads the current raw run but takes no new native observation. When native state is needed, its decision says so explicitly rather than diagnosing a missing run. The last-observation timestamp is unchanged.
 
-The default idle grace is 60 seconds. Progress grace and cooldown are five minutes. Acknowledgement checks have a separate default cap of three checks. Opt-in wake caps and deadlines can be tightened but not removed or extended. Progress, restarts, and replacement runs do not reset usage, sequence, or cooldown.
+The default idle grace is 60 seconds. Progress grace and cooldown are five minutes. Opt-in wake caps and deadlines can be tightened but not removed or extended. Progress, restarts, and replacement runs do not reset usage, sequence, or cooldown.
 
 Hot admission, binding, history, and mutation-receipt projections retain the latest 16 entries. Durable archives and run-identity indexes retain older evidence separately. Projection trimming does not change accounting or retry identity. Archives are not acceptance records. Owner records retain monitor keys and terminal tombstones.
 
@@ -54,7 +54,9 @@ Snapshot RPC reads raw workflow storage. Apply RPC rechecks owner, revision, bin
 
 An interrupted run is eligible only when it records `engine-disposed` or `lease-lost` provenance, has an unanswered coordinator checkpoint, and has no worker steps. Human checkpoints still hold. An eligible reminder asks the owner to inspect the run; it does not resume execution or answer the checkpoint. Explicit resume and stop clear the provenance.
 
-Each wake has one durably reserved native message ID. A lost admission response leaves that ID uncertain. Later cycles inspect the exact inbox or message ID, with persisted acknowledgement counters and cooldown. Absence does not prove that admission never occurred, so the monitor does not repost. Explicit retirement retains evidence and spent usage, including after stop or expiry.
+Each wake has one durably reserved native message ID. A lost admission response leaves that ID uncertain. Later cycles inspect the exact inbox or message ID once per cooldown until it is found or explicitly retired. An unresolved admission keeps its reservation evidence and its eight latest check results. Absence does not prove that admission never occurred, so the monitor does not repost. Explicit retirement retains evidence and spent usage, including after stop or expiry.
+
+Earlier versions capped these checks with `maxAckRetries`, and an exhausted admission held the monitor for good. Policies no longer accept it. A stored monitor that has the option loses it, and its acknowledgement counter, the next time it is read. Its history gains a `migrate` entry that names the old cap. An unresolved admission then resumes checks at the cooldown. Its enrollment fingerprint is kept, so an identical retry of an enrollment that left `maxAckRetries` at its default of 3 still returns the monitor. Any other retry conflicts as before. A runner process started before this change cannot read the new records; run `uninstall` and `install` to restart it.
 
 The observation-to-admission window is not atomic. New input or a permission request can appear after the final observation. Any raced reminder is queued, not steering, and grants no recovery authority. Stop and apply share a process-global owner lock: a stop waits for an in-flight admission; no later apply can wake a committed stopped monitor. Multiple server processes sharing the same KV store are unsupported because KV exposes no cross-process compare-and-swap.
 
