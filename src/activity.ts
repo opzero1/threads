@@ -13,7 +13,7 @@ import {
 import { ThreadsIndicator } from "./activity-footer";
 import { workInProgress } from "./idle";
 import { ThreadsRpc, WorkerView } from "./rpc";
-import { applyWorkerSnapshot, transportGrace, uiState } from "./ui-location";
+import { applyWorkerSnapshot, transportGrace, uiErrorMessage, uiState } from "./ui-location";
 import { snapshotEvent } from "./snapshot-events";
 
 type Session = NonNullable<
@@ -66,8 +66,7 @@ export function activity(
     if (!stopped) setRevision((value) => value + 1);
   };
   const error = (value: unknown) => {
-    const detail = z.object({ message: z.string() }).safeParse(value);
-    const message = `Threads: ${detail.success ? detail.data.message : String(value)}`;
+    const message = `Threads: ${uiErrorMessage(value)}`;
     if (!stopped && message !== lastError)
       ctx.ui.toast.show({ message, variant: "error" });
     lastError = message;
