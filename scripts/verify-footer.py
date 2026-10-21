@@ -147,6 +147,20 @@ def open_list(keys=b"\x18j"):
     wait(lambda: rows(), "Threads list rows")
 
 
+def listed(check, description, timeout=20):
+    # The native list shows the workers as they were when it opened, so reopen it until the
+    # expected state arrives.
+    deadline = time.monotonic() + timeout
+    while True:
+        open_list()
+        try:
+            return wait(check, description, max(1, min(3, deadline - time.monotonic())))
+        except TimeoutError:
+            if time.monotonic() >= deadline:
+                raise
+            close_list()
+
+
 def close_list():
     os.write(terminal.master, b"\x1b")
     wait(lambda: listing() is None, "Threads list closed")
@@ -240,8 +254,7 @@ try:
     save("idle-footer")
     passed(f"an idle TUI renders no Threads footer indicator and no Activity sidebar on OpenCode {sandbox.api('GET', '/api/info')['version']}")
 
-    open_list()
-    wait(lambda: titles() == ["[Main] Footer coordinator"] and description("[Main] Footer coordinator") == "Main", "main conversation listed")
+    listed(lambda: titles() == ["[Main] Footer coordinator"] and description("[Main] Footer coordinator") == "Main", "main conversation listed")
     shown("Threads · Footer coordinator", "[Main] Footer coordinator Main")
     assert current() == "[Main] Footer coordinator", rows()
     assert "Threads · [Main]" not in screen() and "Local history" not in screen() and "Other thread worker" not in screen(), screen()
@@ -279,8 +292,7 @@ try:
     pause(3)
     assert rect("threads-footer") is None and not indicator.search(footer()), (footer_texts(), footer())
     save("elsewhere-footer")
-    open_list()
-    wait(lambda: titles() == ["Elsewhere history"] and description("Elsewhere history") == "Main", "unrelated conversation's own thread")
+    listed(lambda: titles() == ["Elsewhere history"] and description("Elsewhere history") == "Main", "unrelated conversation's own thread")
     shown("Threads · Elsewhere history", "Elsewhere history Main")
     assert "Footer worker one" not in screen() and "Footer worker two" not in screen() and "Running" not in screen(), screen()
     save("list-elsewhere")
@@ -292,8 +304,7 @@ try:
     save("owner-footer-returned")
     passed("another open conversation without workers shows no Threads footer and lists only its own main row, while the owner still shows 1 worker and 1 needs input")
 
-    open_list()
-    wait(lambda: description("Footer worker two") == "Needs attention · needs input" and description("Footer worker one") == "Running · running", "worker states")
+    listed(lambda: description("Footer worker two") == "Needs attention · needs input" and description("Footer worker one") == "Running · running", "worker states")
     assert titles() == ["Footer worker two", "Footer worker one", "Footer coordinator"] and description("Footer coordinator") == "Main", rows()
     shown("Footer worker two Needs attention · needs input", "Footer worker one Running · running")
     save("list-running")
@@ -306,9 +317,8 @@ try:
     passed("the focused worker tab shows its owner's footer counts: 1 worker and 1 needs input")
     sandbox.api("POST", f"/api/session/{two}/permission/{request['id']}/reply", {"decision": "once"})
     idle(two)
-    open_list()
     # The focused route is the worker, so the list must resolve its coordinator's thread.
-    wait(lambda: sorted(titles()) == ["Footer coordinator", "Footer worker one", "Footer worker two"] and current() == "Footer worker one"
+    listed(lambda: sorted(titles()) == ["Footer coordinator", "Footer worker one", "Footer worker two"] and current() == "Footer worker one"
          and (listing() or {}).get("title") == "Threads · Footer coordinator", "coordinator's thread while its worker is focused")
     assert route() == one and "Threads · Footer worker one" not in screen(), route()
     shown("Threads · Footer coordinator", "Footer worker one Running", "Footer coordinator Main", "Footer worker two")
@@ -340,8 +350,7 @@ try:
     wait(lambda: not indicator.search(footer()), "footer cleared")
     passed("a list-opened worker tab closes once its report is delivered and it is not focused; the footer clears")
 
-    open_list()
-    wait(lambda: description("Footer worker one") == "Finished · FAIL" and description("Footer worker two") == "Finished · no report", "finished rows")
+    listed(lambda: description("Footer worker one") == "Finished · FAIL" and description("Footer worker two") == "Finished · no report", "finished rows")
     assert titles()[0] == "Footer coordinator", rows()
     shown("Footer worker one Finished · FAIL")
     save("list-finished")
@@ -352,11 +361,9 @@ try:
     assert sandbox.api("GET", f"/api/session/{coordinator_id}")["data"]["title"] == "[Main] Footer coordinator"
     passed("the saved coordinator title and its native tab keep the [Main] prefix, while the list shows the title without it")
     choose("Footer worker one", "Dismiss")
-    open_list()
-    wait(lambda: description("Footer worker one") == "Closed · FAIL" and titles()[-1] == "Footer worker one", "dismissed from its menu")
+    listed(lambda: description("Footer worker one") == "Closed · FAIL" and titles()[-1] == "Footer worker one", "dismissed from its menu")
     choose("Footer worker one", "Restore")
-    open_list()
-    wait(lambda: description("Footer worker one") == "Finished · FAIL", "restored from its menu")
+    listed(lambda: description("Footer worker one") == "Finished · FAIL", "restored from its menu")
     assert route() == coordinator_id, route()
     close_list()
     passed("a row's menu dismisses a worker to Closed and restores it without changing focus")
@@ -366,8 +373,7 @@ try:
     eventually(lambda: worker_view(coordinator_id, three)["hidden"], timeout=60)
     idle(three)
     idle(coordinator_id)
-    open_list()
-    wait(lambda: row("Footer worker one") is not None and row("Footer worker three") is None, "hidden PASS worker left out of the list", 30)
+    listed(lambda: row("Footer worker one") is not None and row("Footer worker three") is None, "hidden PASS worker left out of the list", 30)
     close_list()
     command("/threads")
     wait(lambda: description("Footer worker three") == "Finished · PASS", "/threads restores the hidden worker into the list")
@@ -378,8 +384,7 @@ try:
     passed("/threads restores a hidden PASS worker into the list without opening its tab")
     open_list()
     choose("Footer worker two", "Dismiss")
-    open_list()
-    wait(lambda: description("Footer worker two") == "Closed · no report" and titles()[-1] == "Footer worker two", "worker two dismissed before the restart")
+    listed(lambda: description("Footer worker two") == "Closed · no report" and titles()[-1] == "Footer worker two", "worker two dismissed before the restart")
     close_list()
 
     provider.release.clear()
@@ -415,8 +420,7 @@ try:
     assert rect("op-threads-activity") is None and "Activity" not in left and "Elsewhere history" in left, left
     save("restart-legacy-options")
     passed('a fresh TUI started with leftover activity: "sidebar" and workerTabs: "auto" options shows the running worker once in the footer, adds no Activity rail, and opens no worker tab')
-    open_list()
-    wait(lambda: description("Footer worker two") == "Closed · no report" and titles()[-1] == "Footer worker two", "dismissed worker still closed after the restart")
+    listed(lambda: description("Footer worker two") == "Closed · no report" and titles()[-1] == "Footer worker two", "dismissed worker still closed after the restart")
     shown("Footer worker two Closed · no report")
     save("list-restart")
     close_list()
@@ -457,8 +461,7 @@ try:
     wait(lambda: no_tab_settled() or time.monotonic() - settled >= 7, "two refresh intervals while the new worker runs", 15)
     assert five not in native_tabs() and route() == coordinator_id, (native_tabs(), route())
     assert not rails and rect("op-threads-activity") is None, rails
-    open_list()
-    wait(lambda: description("Footer worker five") == "Running · running" and (listing() or {}).get("title") == "Threads · Footer coordinator", "thread list with the leftover options")
+    listed(lambda: description("Footer worker five") == "Running · running" and (listing() or {}).get("title") == "Threads · Footer coordinator", "thread list with the leftover options")
     assert titles().index("Footer worker five") < titles().index("Footer coordinator") and current() == "Footer coordinator", rows()
     assert not {"Local history", "Elsewhere history", "Other thread worker"} & set(titles()), rows()
     shown("Threads · Footer coordinator", "Footer worker five Running · running")
@@ -484,8 +487,7 @@ try:
     choose("Footer coordinator", "Open")
     wait(lambda: route() == coordinator_id and one not in native_tabs(), "hidden worker tab closed after focus moved away", 30)
     passed("a hidden worker's tab stays open while it is focused and closes once focus moves away")
-    open_list()
-    wait(lambda: row("Footer worker two") is not None and row("Footer worker one") is None, "worker two listed before its deletion")
+    listed(lambda: row("Footer worker two") is not None and row("Footer worker one") is None, "worker two listed before its deletion")
     search("Footer worker two")
     sandbox.api("DELETE", f"/api/session/{two}")
     pause(3)
@@ -493,8 +495,7 @@ try:
     wait(lambda: listing() is None, "stale list closed")
     pause(2)
     assert menu("Footer worker two") is None and "Threads:" not in screen(), screen()
-    open_list()
-    wait(lambda: row("Footer worker two") is None and row("Footer coordinator") is not None, "deleted worker left out of the list")
+    listed(lambda: row("Footer worker two") is None and row("Footer coordinator") is not None, "deleted worker left out of the list")
     close_list()
     passed("choosing a worker whose session was deleted while the list was open does nothing and shows no error; the next list leaves it out")
 finally:
