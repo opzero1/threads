@@ -51,15 +51,21 @@ With `workflowWorktreeCleanup` set to `false`, finished runs keep all their step
 
 Agents start a workflow only when you ask for one, run `/workflow-run` or a saved workflow, or a loaded skill says to. Otherwise they propose the workflow and ask in the conversation.
 
-Threads doesn't ask OpenCode for permission before a run, so an `ask` rule for `workflows_start` has no effect and the run starts without a prompt. To turn off workflow starts, deny the tool:
+Before it creates a run, `workflows_start` asks OpenCode to check the `workflows_start` permission for the calling agent and conversation. The resource is the saved workflow's name, or `*` for an inline script. To approve each start yourself, add an `ask` rule:
 
 ```jsonc
 {
-  "permissions": [{ "action": "workflows_start", "resource": "*", "effect": "deny" }]
+  "permissions": [{ "action": "workflows_start", "resource": "*", "effect": "ask" }]
 }
 ```
 
-Agents then don't see `workflows_start`. Remove the rule to allow workflows again.
+OpenCode then shows a permission prompt for `workflows_start`, and the run starts only after you allow it once. If you reject it, no run is created. Threads saves no approval: the terminal prompt has no **Always** choice, and an **Always** reply from another client approves only that start. This is because a saved workflow can be rewritten under the same name and an inline script has no stable name. To stop being asked for one saved workflow, add an `allow` rule for its name after the `ask` rule, for example `{ "action": "workflows_start", "resource": "audit", "effect": "allow" }`.
+
+Every call is checked, so an `ask` rule prompts again for an exact retry with the same key. A retry still returns the existing run and never starts a second one.
+
+To turn off workflow starts, use `"effect": "deny"` instead. Agents then don't see `workflows_start`. Remove the rule to allow workflows again.
+
+An agent with no matching rule gets OpenCode's default, `ask`. OpenCode's default agents allow everything, so they see no prompt unless you add a rule.
 
 ## Terminal plugin
 

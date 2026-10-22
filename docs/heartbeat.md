@@ -42,9 +42,9 @@ The LaunchAgent runs `run` in a separate Node process, which polls every 60 seco
 
 A failed observation or apply is recorded for that monitor. The ticker continues with later monitors and pages; it does not retry an uncertain admission after a revision conflict.
 
-The pinned Promise client is `@opencode/client@2.0.28`. This implementation admits only an existing OpenCode `2.0.26` or `2.0.28` local service. Each cycle reads the native registration and performs an authenticated health probe. The registered and live PID and version must match, and the health response must succeed. Discovery requests have a two-second transport timeout; RPC requests have a 25-second timeout and preserve caller cancellation. Both reject redirects.
+The pinned Promise client is `@opencode/client@2.1.2`. This implementation admits only an existing OpenCode `2.1.0`, `2.1.1`, or `2.1.2` local service. Each cycle reads the native registration and performs an authenticated health probe. The registered and live PID and version must match, and the health response must succeed. Discovery requests have a two-second transport timeout; RPC requests have a 25-second timeout and preserve caller cancellation. Both reject redirects.
 
-Native wildcard bind addresses `0.0.0.0` and `[::]` map to loopback for heartbeat requests. OpenCode `2.0.26` can write unbracketed URLs such as `http://::1:<port>` or `http://:::<port>`. The runner brackets only these known local forms in memory. OpenCode `2.0.28` writes bracketed IPv6 URLs. The runner leaves the registration file untouched and rejects remote, ambiguous, credential-bearing, and unsupported URLs.
+Native wildcard bind addresses `0.0.0.0` and `[::]` map to loopback for heartbeat requests. OpenCode `2.0.26` wrote unbracketed URLs such as `http://::1:<port>` or `http://:::<port>`, and the runner still brackets only these known local forms in memory. Later versions write bracketed IPv6 URLs. The runner leaves the registration file untouched and rejects remote, ambiguous, credential-bearing, and unsupported URLs.
 
 The runner uses `Service.headers` and a local connect-only probe because the pinned SDK's `Service.discover` cannot accept an in-memory normalized endpoint. It never calls `Service.ensure`, the `opencode api` command, or a service restart.
 

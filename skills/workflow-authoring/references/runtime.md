@@ -103,6 +103,8 @@ for (let round = 1; ; round++) {
 
 The plugin option `workflowConcurrency` sets concurrency for new runs. An explicitly configured `workflowMaxAgents` supplies a user-selected total-step limit. The registered `workflows_start` schema advertises configured values. Existing runs retain their original limits, including historical defaults omitted from compacted records. If a total-step limit is supplied, it must be at least as large as the requested concurrency to use that concurrency fully.
 
+Before it creates a run, `workflows_start` checks the `workflows_start` permission, with the saved `name` or `*` as the resource. An `ask` rule waits for the user's answer, and every call asks again, including an exact retry. A rejection or `deny` creates no run; don't retry a rejected start unless the user asks.
+
 Task budgets are opt-in. Agents omit `tokenBudget`, `maxAgents`, `agentTimeoutMs`, and `timeoutMs` unless the user supplies a limit. If the user requests a budget without a value, the agent asks for that value. Agents do not estimate replacement values or insert hidden defaults. With no supplied budget, that dimension is unbounded. Concurrency, worker capacity, payload bounds, and cancellation still apply.
 
 `tokenBudget` measures cumulative native input and output tokens across worker turns. It is an admission threshold, not a hard generation cap: workers already running can exceed it before the next dispatch checks their usage.

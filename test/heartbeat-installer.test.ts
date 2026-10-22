@@ -30,7 +30,7 @@ async function fixture() {
   const commands: Awaited<ReturnType<typeof command>>[] = [];
   let snapshotHook = async () => {};
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
-    if (new URL(request.url).pathname === "/api/info") return Response.json({ version: "2.0.26", pid: process.pid });
+    if (new URL(request.url).pathname === "/api/info") return Response.json({ version: "2.1.1", pid: process.pid });
     if (new URL(request.url).pathname.endsWith("/snapshot")) {
       await snapshotHook(); snapshotHook = async () => {};
       return Response.json({ output: { protocol: 1, entries: [] } });
@@ -38,7 +38,7 @@ async function fixture() {
     return new Response("Unexpected fixture request", { status: 500 });
   } });
   const service = join(dir, "service.json");
-  await writeFile(service, JSON.stringify({ url: server.url.toString(), pid: process.pid, version: "2.0.26" }));
+  await writeFile(service, JSON.stringify({ url: server.url.toString(), pid: process.pid, version: "2.1.1" }));
   async function run(args: string[]) { const result = await command(args); commands.push(result); await writeFile(join(dir, "commands.json"), JSON.stringify(commands, null, 2)); return result; }
   const ctl = (...args: string[]) => run(["/bin/launchctl", ...args]);
   const cli = (...args: string[]) => run(["node", runner, ...args, "--config", config]);

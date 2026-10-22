@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { z } from "zod";
 
 const unavailable = "Existing compatible service unavailable; connect-only runner will not start it";
-const Version = z.enum(["2.0.26", "2.0.28"]);
+const Version = z.enum(["2.1.0", "2.1.1", "2.1.2"]);
 const Registration = z.object({
   url: z.string().transform((value, context) => {
     const native = /^(https?:\/\/)(::1|::):([0-9]+)\/?$/.exec(value);

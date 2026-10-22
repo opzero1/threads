@@ -359,7 +359,8 @@ return await agent("Inspect the durable state", {
 
 async function settled(api: ReturnType<typeof workflowEngine>, ownerID: string, runID: string) {
   let latest: WorkflowRun | undefined;
-  for (let count = 0; count < 200; count++) {
+  const deadline = performance.now() + 4_000;
+  while (performance.now() < deadline) {
     const run = await api.get(ownerID, runID);
     latest = run;
     if (["completed", "failed", "stopped"].includes(run.status)) return run;

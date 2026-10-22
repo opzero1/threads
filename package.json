@@ -59,26 +59,25 @@
     "verify:workflow-runtime": "bun scripts/verify-workflow-runtime.ts"
   },
   "dependencies": {
-    "@opencode/client": "2.0.28",
-    "@opencode/codemode": "2.0.28",
-    "@opencode/plugin": "2.0.28",
-    "@opencode/schema": "2.0.28",
+    "@opencode/client": "2.1.2",
+    "@opencode/codemode": "2.1.2",
+    "@opencode/plugin": "2.1.2",
+    "@opencode/schema": "2.1.2",
     "acorn": "8.15.0",
     "ajv": "8.17.1",
     "effect": "4.0.1",
     "zod": "4.1.8"
   },
   "peerDependencies": {
-    "@opentui/core": "0.5.17",
-    "@opentui/solid": "0.5.17",
+    "@opentui/core": "0.6.6",
+    "@opentui/solid": "0.6.6",
     "solid-js": ">=1.9.0"
   },
   "devDependencies": {
-    "@opencode/theme": "2.0.28",
-    "@opentui/core": "0.5.17",
-    "@opentui/solid": "0.5.17",
+    "@opencode/theme": "2.1.2",
+    "@opentui/core": "0.6.6",
+    "@opentui/solid": "0.6.6",
     "@types/bun": "1.4.0",
-    "opentui-spinner": "0.0.7",
     "solid-js": "1.9.12",
     "typescript": "5.9.3"
   }

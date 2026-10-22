@@ -1,6 +1,7 @@
 import { Plugin } from "@opencode/plugin";
 import type { SessionContext } from "@opencode/plugin/promise/session";
 import { z } from "zod";
+import { requireOpenCode21 } from "./src/opencode-compat";
 import { Report, ThreadsRpc, WorkerView } from "./src/rpc";
 import { Send, Spawn, WorkerTarget, threads } from "./src/threads";
 import { workflows } from "./src/workflows";
@@ -8,6 +9,7 @@ import { workflows } from "./src/workflows";
 export default Plugin.define({
   id: "op-threads",
   async setup(ctx) {
+    requireOpenCode21(ctx.app?.version);
     const limit = z
       .number()
       .int()

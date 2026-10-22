@@ -164,7 +164,8 @@ var WorkflowStart = WorkflowLimits.extend({
   key: z3.string().min(1).max(120),
   script: z3.string().min(1).max(200000).optional(),
   name: z3.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/).optional(),
-  args: Json.default(null)
+  args: Json.default(null),
+  resumeFrom: z3.string().min(1).optional()
 }).strict().refine((value) => Boolean(value.script) !== Boolean(value.name), {
   message: "Supply exactly one of script or saved workflow name"
 });
@@ -200,7 +201,8 @@ var StepBase = z3.object({
   phase: z3.string(),
   directory: z3.string(),
   model: WorkflowModel,
-  profileFingerprint: z3.string()
+  profileFingerprint: z3.string(),
+  sourceProfileFingerprint: z3.string().optional()
 });
 var WorkflowStep = z3.discriminatedUnion("status", [
   StepBase.extend({ status: z3.literal("prepared") }),
@@ -209,7 +211,8 @@ var WorkflowStep = z3.discriminatedUnion("status", [
     status: z3.literal("completed"),
     completed: z3.number(),
     report: WorkflowResult,
-    usage: WorkflowUsage
+    usage: WorkflowUsage,
+    reusedFrom: z3.string().optional()
   }),
   StepBase.extend({
     status: z3.literal("failed"),
@@ -239,7 +242,7 @@ var WorkflowWorktreeOutcome = z3.object({
 });
 var WorkflowRun = z3.object({
   version: z3.literal(1),
-  helperPolicy: z3.enum(["legacy-bounded", "optional-counts"]).default("legacy-bounded"),
+  helperPolicy: z3.enum(["legacy-bounded", "optional-counts"]).optional(),
   id: z3.string(),
   key: z3.string(),
   ownerID: z3.string(),
@@ -252,6 +255,7 @@ var WorkflowRun = z3.object({
   script: z3.string(),
   args: Json,
   fingerprint: z3.string(),
+  resumeFrom: z3.string().optional(),
   limits: WorkflowLimits,
   status: z3.enum(["running", "pausing", "paused", "stopping", "stopped", "waiting", "interrupted", "failed", "completed"]),
   interruption: z3.object({
@@ -281,6 +285,7 @@ var WorkflowRun = z3.object({
     worktrees: z3.array(WorkflowWorktreeOutcome)
   }).optional()
 });
+var terminalWorkflowStatus = new Set(["stopped", "failed", "completed"]);
 var WorkflowPrune = z3.object({
   apply: z3.boolean().default(false),
   olderThanDays: z3.number().min(0).max(3650).optional()
@@ -300,7 +305,7 @@ var WorkflowPruneResult = z3.object({
   counts: z3.object({ removed: z3.number(), wouldRemove: z3.number(), kept: z3.number() })
 });
 var WorkflowSummary = WorkflowRun.omit({ script: true, args: true, result: true, steps: true, logs: true, checkpoints: true, settlements: true, attention: true, fingerprint: true, callerAgent: true, deliveryID: true, delivered: true, worktreeCleanup: true }).extend({
-  counts: z3.object({ completed: z3.number(), running: z3.number(), failed: z3.number(), total: z3.number() }),
+  counts: z3.object({ completed: z3.number(), running: z3.number(), queued: z3.number(), failed: z3.number(), total: z3.number() }),
   usage: WorkflowUsage
 });
 
@@ -441,7 +446,7 @@ import { Service } from "@opencode/client/service";
 import { readFile } from "node:fs/promises";
 import { z as z5 } from "zod";
 var unavailable = "Existing compatible service unavailable; connect-only runner will not start it";
-var Version = z5.enum(["2.0.26", "2.0.28"]);
+var Version = z5.enum(["2.1.0", "2.1.1", "2.1.2"]);
 var Registration = z5.object({
   url: z5.string().transform((value, context) => {
     const native = /^(https?:\/\/)(::1|::):([0-9]+)\/?$/.exec(value);

@@ -46,6 +46,15 @@ def settled(owner, run_id, status="completed"):
         if run["status"] in ["completed", "failed", "stopped"] and run["status"] != status:
             raise AssertionError(run)
         return run if run["status"] == status else None
+    if terminal:
+        # Keep the PTY flowing while waiting for controls sent through the TUI. Otherwise
+        # pending output can block the terminal before it handles the submitted response.
+        observed = {}
+        def rendered(_):
+            observed["run"] = result()
+            return observed["run"] is not None
+        terminal.wait_for_match(rendered, f"workflow {run_id} {status}", 60, False)
+        return observed["run"]
     return eventually(result, timeout=60)
 
 
