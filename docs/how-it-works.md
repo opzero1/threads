@@ -32,6 +32,8 @@ Each worker also gets one explicit grant for `threads_report`. The tool's handle
 
 Threads treats a missing verdict as unfinished work, not as success. A worker whose run ends normally without a report therefore keeps its `maxWorkers` slot. A workflow step worker is the exception: it also frees its slot when its step fails or its workflow ends. A step whose task finishes without a `workflows_result` report fails instead of being retried.
 
+A workflow step accepts at most 5 rejected `workflows_result` submissions. Threads counts both kinds: arguments that OpenCode rejects against the tool's schema before the handler runs, which it observes through the `execute.after` tool hook, and results its handler rejects for the step's JSON schema or size limits. Each tool call counts once, identified by its session, message, and call IDs, and the record survives restarts. Unrelated failures, such as storage errors or a run that no longer accepts results, don't count. At the limit, the step fails with the last validation error and can't be retried, and Threads interrupts the worker whether or not the workflow is waiting on it. The worker can't generate again, even after an owner follow-up, and a valid result it submits later is refused. A result accepted before the limit stays accepted. This is a fixed liveness guard, not a budget, so it has no option.
+
 `threads_report` delivers the report to the coordinator as a silent synthetic message, so the agent sees it without a notification row in your conversation.
 
 ## Why Threads doesn't open tabs

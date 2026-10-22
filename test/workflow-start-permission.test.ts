@@ -69,6 +69,7 @@ async function harness(assert: (input: WorkflowStartPermission) => Promise<void>
         namespace: () => {},
         add: (definition: { name: string; execute: (input: unknown, context: unknown) => Promise<unknown> }) => { tools.set(definition.name, definition); },
       }),
+      hook: async () => ({ dispose: async () => {} }),
     },
     skill: { transform: async () => {} },
     command: { transform: async () => {}, reload: async () => {} },

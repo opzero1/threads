@@ -23,6 +23,8 @@ import { inspectCheckout, isDirectory, withCheckouts, worktreeSteps, worktreeSwe
 import {
   Json,
   WORKFLOW_DIAGNOSTIC_JSON_BYTES,
+  WORKFLOW_REJECTION_DIAGNOSTIC_JSON_BYTES,
+  WORKFLOW_RESULT_REJECTION_LIMIT,
   WORKFLOW_SETTLEMENT_DIAGNOSTIC_JSON_BYTES,
   WorkflowAgentInput,
   WorkflowPrune,
@@ -78,6 +80,12 @@ const boundedBytes = (text: string, limit: number) => {
   return `${text.slice(0, low)}${suffix}`;
 };
 const isCompleted = (step: WorkflowStep): step is Extract<WorkflowStep, { status: "completed" }> => step.status === "completed";
+export type ResultCall = { sessionID: string; messageID: string; id: string };
+const callIdentity = (call: ResultCall) => digest(call.sessionID, call.messageID, call.id).slice(0, 32);
+const exhausted = (step: WorkflowStep) => (step.rejections?.count ?? 0) >= WORKFLOW_RESULT_REJECTION_LIMIT;
+const exhaustedError = (step: WorkflowStep) => new Error(step.status === "failed"
+  ? step.error
+  : `Workflow step ${step.key} rejected ${WORKFLOW_RESULT_REJECTION_LIMIT} workflows_result submissions`);
 const notify = (runID: string) => {
   const listeners = workflowSignals.get(runID);
   if (!listeners) return;
@@ -241,6 +249,79 @@ export function workflowEngine(
     return run;
   }
 
+  // Calls whose workflows_result handler ran. Its own validation counts them, so the after hook skips them.
+  const executedCalls = new Set<string>();
+  const enforcing = new Set<string>();
+
+  // Interrupts an exhausted step's worker outside any lock and without awaiting it, because the
+  // caller can be that worker's own tool hook. A failed attempt stays pending for the next
+  // recovery, worker context, or rejected call.
+  function enforce(run: WorkflowRun, step: WorkflowStep) {
+    if (disposed || step.rejections?.interrupt !== "pending") return;
+    const identity = `${run.id}:${step.key}`;
+    if (enforcing.has(identity)) return;
+    enforcing.add(identity);
+    setTimeout(() => void (async () => {
+      try {
+        if (disposed) return;
+        if (await nativeWorker(step.workerID)) await workers.interrupt(run.ownerID, { workerID: Session.ID.make(step.workerID) });
+        await store.update(run.id, (current) => {
+          const target = current.steps.find((item) => item.key === step.key && item.workerID === step.workerID);
+          if (target?.rejections?.interrupt === "pending") target.rejections.interrupt = "done";
+        }, "control");
+      } catch {
+        // Retried by the next recovery, worker context, or rejected call.
+      } finally {
+        enforcing.delete(identity);
+      }
+    })(), 0);
+  }
+
+  async function stepForWorker(workerID: string) {
+    const session = await nativeWorker(workerID);
+    if (!session) return undefined;
+    const metadata = WorkflowWorker.safeParse(session.metadata?.opWorkflow);
+    if (!metadata.success || metadata.data.ownerID === workerID) return undefined;
+    try { workerLink(session); } catch { return undefined; }
+    const run = await owned(metadata.data.ownerID, metadata.data.runID).catch(() => undefined);
+    const step = run?.steps.find((item) => item.workerID === workerID && item.key === metadata.data.stepKey);
+    return run && step ? { run, step } : undefined;
+  }
+
+  // Counts one rejected submission per call identity, serialized with acceptance. An accepted
+  // result, a completed step, or a run that no longer accepts results is never counted.
+  async function recordRejection(runID: string, stepKey: string, workerID: string, call: ResultCall, diagnostic: string) {
+    const identity = callIdentity(call);
+    const error = boundedBytes(diagnostic, WORKFLOW_REJECTION_DIAGNOSTIC_JSON_BYTES);
+    const apply = (run: WorkflowRun) => {
+      if (run.status === "stopping" || terminal.has(run.status)) return false;
+      const index = run.steps.findIndex((item) => item.key === stepKey && item.workerID === workerID);
+      const step = run.steps[index];
+      if (!step || step.status === "completed") return false;
+      const prior = step.rejections;
+      if (prior && (prior.count >= WORKFLOW_RESULT_REJECTION_LIMIT || prior.calls.includes(identity))) return false;
+      const rejections = { count: (prior?.count ?? 0) + 1, calls: [...(prior?.calls ?? []), identity], error };
+      run.steps[index] = rejections.count < WORKFLOW_RESULT_REJECTION_LIMIT
+        ? { ...step, rejections }
+        : {
+          ...step, status: "failed", retryable: false, rejections: { ...rejections, interrupt: "pending" },
+          error: errorText(`Workflow result was rejected ${WORKFLOW_RESULT_REJECTION_LIMIT} times, so the step failed and its worker was interrupted. Last validation error: ${error}`),
+        } as WorkflowStep;
+      return true;
+    };
+    const latest = await serialized(resultKey(workerID), async () => {
+      if (await ctx.storage.get(resultKey(workerID)) !== undefined) return undefined;
+      const current = await store.get(runID);
+      if (!apply(structuredClone(current))) return current;
+      return store.update(runID, (run) => { apply(run); }, "control");
+    });
+    const step = latest?.steps.find((item) => item.key === stepKey && item.workerID === workerID);
+    if (latest && step && exhausted(step)) {
+      notify(runID);
+      enforce(latest, step);
+    }
+  }
+
   async function deliver(runID: string) {
     return serialized(`workflow-delivery:${runID}`, async () => {
       const run = await store.get(runID);
@@ -309,6 +390,7 @@ export function workflowEngine(
       }
     }
     for (const run of await store.list(ownerID)) {
+      for (const step of run.steps) enforce(run, step);
       await attend(run.id);
       if (terminal.has(run.status) && !run.delivered) {
         await deliver(run.id).catch((error) => diagnose({ id: run.id, ownerID, message: errorText(error) }));
@@ -640,6 +722,12 @@ export function workflowEngine(
         };
         const dispatch = async () => {
           let admitted = await store.get(run.id);
+          // Exhaustion outranks every later transition: no dispatch, running mark, report, or waiter outcome replaces it.
+          const authoritative = (latest: WorkflowRun) => {
+            const step = latest.steps.find((item) => item.key === key);
+            if (step && exhausted(step)) throw exhaustedError(step);
+          };
+          authoritative(admitted);
           if (admitted.status !== "running") throw new SchedulingDeferred();
           if (admitted.limits.tokenBudget != null && admitted.steps.find((step) => step.key === key)?.status === "prepared") {
             const tokenBudget = admitted.limits.tokenBudget;
@@ -721,6 +809,7 @@ export function workflowEngine(
             if (deferred) throw new SchedulingDeferred();
             current = run.steps.find((step) => step.key === key)!;
           } else await requireDispatchedWorker(current);
+          authoritative(await store.get(run.id));
           await ensureWorker();
           current = await finalizeProfile();
           const finishRecorded = async (recorded: unknown) => {
@@ -756,10 +845,12 @@ export function workflowEngine(
               throw new UncertainWriteError(message);
             }
           }
-          await store.update(run.id, (value) => {
+          authoritative(await store.update(run.id, (value) => {
             const index = value.steps.findIndex((step) => step.key === key);
-            if (index >= 0 && value.steps[index].status !== "completed") value.steps[index] = { ...value.steps[index], status: "running" } as WorkflowStep;
-          }, "control");
+            if (index >= 0 && value.steps[index].status !== "completed" && !exhausted(value.steps[index])) {
+              value.steps[index] = { ...value.steps[index], status: "running" } as WorkflowStep;
+            }
+          }, "control"));
           const agentTimeout = input.timeoutMs ?? run.limits.agentTimeoutMs;
           const deadline = agentTimeout === null ? undefined : Date.now() + agentTimeout;
           const deadlineReason = () => controller.signal.aborted
@@ -810,17 +901,24 @@ export function workflowEngine(
               await interrupt;
             }
           };
-          await waitWorker();
+          try {
+            await waitWorker();
+          } catch (error) {
+            authoritative(await store.get(run.id));
+            throw error;
+          }
           recorded ??= await ctx.storage.get(resultKey(current.workerID));
           if (recorded === undefined) {
+            authoritative(await store.get(run.id));
             const native = await ctx.session.get({ sessionID: current.workerID });
             const message = native.outcome === "succeeded"
               ? "Worker completed without a workflows_result report; native success is not workflow success"
               : `Worker ended ${native.outcome ?? "without a terminal outcome"} before a valid workflows_result report`;
-            await store.update(run.id, (value) => {
+            authoritative(await store.update(run.id, (value) => {
               const index = value.steps.findIndex((step) => step.key === key);
+              if (exhausted(value.steps[index])) return;
               value.steps[index] = { ...value.steps[index], status: "failed", error: message, retryable: input.access === "read", usage: usage(native) } as WorkflowStep;
-            }, "control");
+            }, "control"));
             throw new Error(message);
           }
           return finishRecorded(recorded);
@@ -1184,7 +1282,11 @@ export function workflowEngine(
         return run;
       });
     },
-    async result(workerID: string, raw: WorkflowResult) {
+    async result(workerID: string, raw: WorkflowResult, call?: ResultCall) {
+      if (call) {
+        executedCalls.add(callIdentity(call));
+        if (executedCalls.size > 10_000) executedCalls.delete(executedCalls.values().next().value!);
+      }
       const session = await ctx.session.get({ sessionID: workerID });
       workerLink(session);
       const metadata = WorkflowWorker.parse(session.metadata?.opWorkflow);
@@ -1193,22 +1295,54 @@ export function workflowEngine(
       if (run.status === "stopping" || terminal.has(run.status)) throw new Error(`Workflow ${run.id} is no longer accepting results`);
       const step = run.steps.find((item) => item.workerID === workerID && item.key === metadata.stepKey);
       if (!step) throw new Error("Workflow result does not match its server-recorded step");
-      const input = WorkflowResult.parse(raw);
-      if (input.summary.length > 20_000 || input.evidence.length > 100 || input.evidence.some((item) => item.length > 20_000)) {
-        throw new Error("Workflow report exceeds its bounded summary or evidence limits");
+      let input: WorkflowResult;
+      try {
+        input = WorkflowResult.parse(raw);
+        if (input.summary.length > 20_000 || input.evidence.length > 100 || input.evidence.some((item) => item.length > 20_000)) {
+          throw new Error("Workflow report exceeds its bounded summary or evidence limits");
+        }
+        boundedJson(input, "Workflow worker report");
+        if (step.input.schema !== undefined) {
+          const validate = ajv.compile(step.input.schema);
+          if (!validate(input.result)) throw new Error(`Workflow result schema validation failed: ${ajv.errorsText(validate.errors)}`);
+        }
+      } catch (error) {
+        // A storage failure here loses only this count; the call's validation error still reaches the worker.
+        if (call) await recordRejection(run.id, step.key, workerID, call, errorText(error)).catch(() => {});
+        throw error;
       }
-      boundedJson(input, "Workflow worker report");
-      if (step.input.schema !== undefined) {
-        const validate = ajv.compile(step.input.schema);
-        if (!validate(input.result)) throw new Error(`Workflow result schema validation failed: ${ajv.errorsText(validate.errors)}`);
-      }
+      let blocked = undefined as { run: WorkflowRun; step: WorkflowStep } | undefined;
       await serialized(resultKey(workerID), async () => {
         const existing = await ctx.storage.get(resultKey(workerID));
         if (existing !== undefined && JSON.stringify(WorkflowResult.parse(existing)) !== JSON.stringify(input)) throw new Error("This worker already reported a different workflow result");
+        if (existing === undefined) {
+          const latest = await store.get(run.id);
+          const current = latest.steps.find((item) => item.workerID === workerID && item.key === step.key);
+          if (current && exhausted(current)) {
+            blocked = { run: latest, step: current };
+            return;
+          }
+        }
         await ctx.storage.set(resultKey(workerID), Json.parse(input));
       });
+      if (blocked) {
+        enforce(blocked.run, blocked.step);
+        throw exhaustedError(blocked.step);
+      }
       await workers.reportWorkflow(workerID, input);
       return { accepted: true as const };
+    },
+    // OpenCode rejects input that fails the workflows_result schema before the handler runs; only
+    // this hook sees those calls. Calls that reached the handler were classified there.
+    async resultRejected(event: ResultCall & { tool: string; input: unknown; status: "completed" | "error" }) {
+      if (event.tool !== "workflows_result") return;
+      if (executedCalls.delete(callIdentity(event)) || event.status !== "error") return;
+      const parsed = WorkflowResult.safeParse(event.input);
+      if (parsed.success) return;
+      const target = await stepForWorker(event.sessionID);
+      if (!target) return;
+      const diagnostic = parsed.error.issues.map((issue) => `${issue.path.map(String).join(".") || "input"}: ${issue.message}`).join("; ");
+      await recordRejection(target.run.id, target.step.key, event.sessionID, event, `Invalid workflows_result arguments: ${diagnostic}`);
     },
     async preparePrompt(sessionID: string, messageID: string) {
       await workers.prepareWorkflowPrompt(sessionID, messageID);
@@ -1223,6 +1357,11 @@ export function workflowEngine(
         item.workerID === sessionID && item.key === metadata.data.stepKey
       );
       if (!step) throw new Error("Workflow worker context does not match its durable step");
+      // Neither a live lease nor an owner follow-up reopens an exhausted step.
+      if (exhausted(step)) {
+        enforce(run, step);
+        throw new Error(`Workflow worker generation is blocked: run ${run.id}, step ${JSON.stringify(step.key)} failed after ${WORKFLOW_RESULT_REJECTION_LIMIT} rejected workflows_result submissions, worker ${sessionID}. ${exhaustedError(step).message}`);
+      }
       const lease = leases.get(run.id);
       const leased = lease !== undefined && !lease.controller.signal.aborted && !terminal.has(run.status);
       watchWorkflowExecution(sessionID, () => ctx.session.wait({ sessionID }));

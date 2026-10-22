@@ -59,6 +59,21 @@ export const WorkflowUsage = z.object({
   measured: z.boolean(),
 });
 
+export const WORKFLOW_RESULT_REJECTION_LIMIT = 5;
+export const WORKFLOW_REJECTION_DIAGNOSTIC_JSON_BYTES = 1_024;
+// `calls` holds a hash of each counted call's session, message, and call IDs.
+export const WorkflowResultRejections = z.object({
+  count: z.number().int().min(1).max(WORKFLOW_RESULT_REJECTION_LIMIT),
+  calls: z.array(z.string().length(32)).max(WORKFLOW_RESULT_REJECTION_LIMIT),
+  error: z.string(),
+  interrupt: z.enum(["pending", "done"]).optional(),
+});
+export type WorkflowResultRejections = z.infer<typeof WorkflowResultRejections>;
+// The most a step's rejection record can occupy, reserved as control headroom until it is full.
+export const WORKFLOW_REJECTION_RESERVE_BYTES = new TextEncoder().encode(JSON.stringify({
+  rejections: { count: WORKFLOW_RESULT_REJECTION_LIMIT, calls: Array.from({ length: WORKFLOW_RESULT_REJECTION_LIMIT }, () => "0".repeat(32)), error: "", interrupt: "pending" },
+})).byteLength + WORKFLOW_REJECTION_DIAGNOSTIC_JSON_BYTES + 1;
+
 const StepBase = z.object({
   key: z.string(),
   fingerprint: z.string(),
@@ -74,6 +89,7 @@ const StepBase = z.object({
   // The profile as loaded at the source when the step was admitted. profileFingerprint is loaded
   // where the worker ran, which for a worktree differs from the source and may since be removed.
   sourceProfileFingerprint: z.string().optional(),
+  rejections: WorkflowResultRejections.optional(),
 });
 export const WorkflowStep = z.discriminatedUnion("status", [
   StepBase.extend({ status: z.literal("prepared") }),

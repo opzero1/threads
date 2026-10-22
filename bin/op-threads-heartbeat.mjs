@@ -190,6 +190,17 @@ var WorkflowUsage = z3.object({
   cost: z3.number().nonnegative(),
   measured: z3.boolean()
 });
+var WORKFLOW_RESULT_REJECTION_LIMIT = 5;
+var WORKFLOW_REJECTION_DIAGNOSTIC_JSON_BYTES = 1024;
+var WorkflowResultRejections = z3.object({
+  count: z3.number().int().min(1).max(WORKFLOW_RESULT_REJECTION_LIMIT),
+  calls: z3.array(z3.string().length(32)).max(WORKFLOW_RESULT_REJECTION_LIMIT),
+  error: z3.string(),
+  interrupt: z3.enum(["pending", "done"]).optional()
+});
+var WORKFLOW_REJECTION_RESERVE_BYTES = new TextEncoder().encode(JSON.stringify({
+  rejections: { count: WORKFLOW_RESULT_REJECTION_LIMIT, calls: Array.from({ length: WORKFLOW_RESULT_REJECTION_LIMIT }, () => "0".repeat(32)), error: "", interrupt: "pending" }
+})).byteLength + WORKFLOW_REJECTION_DIAGNOSTIC_JSON_BYTES + 1;
 var StepBase = z3.object({
   key: z3.string(),
   fingerprint: z3.string(),
@@ -202,7 +213,8 @@ var StepBase = z3.object({
   directory: z3.string(),
   model: WorkflowModel,
   profileFingerprint: z3.string(),
-  sourceProfileFingerprint: z3.string().optional()
+  sourceProfileFingerprint: z3.string().optional(),
+  rejections: WorkflowResultRejections.optional()
 });
 var WorkflowStep = z3.discriminatedUnion("status", [
   StepBase.extend({ status: z3.literal("prepared") }),

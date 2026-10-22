@@ -71,6 +71,8 @@ export async function workflows(
   });
   await ctx.session.hook("prompt", (event) => engine.preparePrompt(event.sessionID, event.messageID));
   await ctx.session.hook("context", (event) => engine.prepareContext(event.sessionID));
+  // Counting must never fail the tool call it observes.
+  await ctx.tool.hook("execute.after", (event) => engine.resultRejected(event).catch(() => {}));
   await ctx.tool.transform((editor) => {
     editor.namespace({ name: "workflows", description: "List, inspect, control, save, and prune durable workflow runs, and manage heartbeat monitors. Start runs with the native workflows_start tool." });
     editor.add({
@@ -139,12 +141,12 @@ export async function workflows(
     });
     editor.add({
       name: "result",
-      description: "Submit the assigned workflow step's final verdict, evidence, and JSON result. Only the original workflow worker can submit. The runner validates result against the step's schema before accepting it. Correct validation errors and retry. PASS requires completed verification, INCONCLUSIVE is not a pass.",
+      description: "Submit the assigned workflow step's final verdict, evidence, and JSON result. Only the original workflow worker can submit. The runner validates result against the step's schema before accepting it. Correct validation errors and retry; after 5 rejected submissions the step fails and you are interrupted. PASS requires completed verification, INCONCLUSIVE is not a pass.",
       input: WorkflowResult,
       output: z.object({ accepted: z.literal(true) }),
       options: { namespace: "workflows", codemode: false },
       execute: async (input, tool) => {
-        const output = await engine.result(tool.sessionID, input);
+        const output = await engine.result(tool.sessionID, input, { sessionID: tool.sessionID, messageID: tool.messageID, id: tool.id });
         return { content: JSON.stringify(output), output };
       },
     });

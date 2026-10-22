@@ -471,6 +471,33 @@ def start_permission():
     return {"rejected": request, "approved": approved, "retried": retried, "run": final["id"]}
 
 
+def result_rejection_cap():
+    marker = "REGRESSION_REJECTION_CAP"
+    def submit(**arguments):
+        return {"name": "workflows_result", "arguments": {"summary": "fixture", "evidence": ["fixture"], "result": {"ok": True}, **arguments}}
+    # Missing verdict and a wrong verdict fail the tool schema before the handler; {"ok": "no"} fails the step schema in it.
+    provider.responses[marker] = {"sequence": [
+        submit(), submit(verdict="PASS", result={"ok": "no"}), submit(verdict="MAYBE"),
+        submit(verdict="PASS", result={"ok": "no"}), submit(), submit(verdict="PASS"),
+    ]}
+    schema = '{type:"object",required:["ok"],properties:{ok:{type:"boolean"}}}'
+    run = start("result-rejection-cap", f'''try {{ return await agent("{marker}", {{key:"capped",agent:"regression-role",schema:{schema}}}); }}
+catch (error) {{ return {{ fallback: error.message }}; }}''')
+    final = settled(run)
+    assert "rejected 5 times" in final["result"]["fallback"], final
+    step = final["steps"][0]
+    assert step["status"] == "failed" and step["retryable"] is False, step
+    assert step["rejections"]["count"] == 5 and len(step["rejections"]["calls"]) == 5, step
+    eventually(lambda: inspect(run)["steps"][0]["rejections"].get("interrupt") == "done", timeout=30)
+    worker = step["workerID"]
+    eventually(lambda: worker not in sandbox.api("GET", "/api/session/active")["data"], timeout=30)
+    calls = [part for message in messages(worker) if message["type"] == "assistant" for part in message["content"]
+             if part["type"] == "tool" and part["name"] == "workflows_result"]
+    # The fifth rejection blocks the next turn; a sixth call, if one started first, is refused.
+    assert 5 <= len(calls) <= 6 and all(part["state"]["status"] == "error" for part in calls), calls
+    return {"run": final["id"], "worker": worker, "calls": len(calls), "rejections": step["rejections"]}
+
+
 cases = {
     "assistant-prefill-script-retry": assistant_prefill_script_retry,
     "assistant-prefill-fails-step": assistant_prefill_fails_step,
@@ -489,6 +516,7 @@ cases = {
     "optional-budgets": optional_budgets,
     "configured-defaults": configured_defaults,
     "start-permission": start_permission,
+    "result-rejection-cap": result_rejection_cap,
 }
 selected = options.case or list(cases)
 assert all(name in cases for name in selected), selected

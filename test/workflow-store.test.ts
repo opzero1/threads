@@ -3,7 +3,10 @@ import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:f
 import { join } from "node:path";
 import type { Plugin } from "@opencode/plugin";
 import { workflowHash, workflowStore } from "../src/workflow-store";
-import { Json, WORKFLOW_CONTROL_HEADROOM, WorkflowRun, workflowSummary } from "../src/workflow-types";
+import {
+  Json, WORKFLOW_CONTROL_HEADROOM, WORKFLOW_DIAGNOSTIC_JSON_BYTES, WORKFLOW_REJECTION_DIAGNOSTIC_JSON_BYTES, WORKFLOW_REJECTION_RESERVE_BYTES,
+  WORKFLOW_SETTLEMENT_DIAGNOSTIC_JSON_BYTES, WorkflowRun, workflowSummary,
+} from "../src/workflow-types";
 
 const temporary: string[] = [];
 afterEach(async () => {
@@ -223,6 +226,77 @@ test("payload admission reserves diagnostics for queued steps as well as active 
   const fill = 16 * 1024 * 1024 - WORKFLOW_CONTROL_HEADROOM - Buffer.byteLength(before) - 32;
   await expect(store.update(initial.id, (current) => { current.args = "x".repeat(fill); })).rejects.toThrow("headroom");
   expect(await readFile(fixture.path("workflows/runs/workflow-a"), "utf8")).toBe(before);
+});
+
+test("control headroom fits a full rejection record, failure, and settlement for every unfinished step", async () => {
+  const fixture = await disk();
+  const store = workflowStore(fixture.storage);
+  const initial = run();
+  initial.status = "running";
+  initial.limits.maxAgents = 32;
+  initial.steps = Array.from({ length: 32 }, (_, index) => ({
+    status: "running", key: `step-${index}`, fingerprint: "input", index,
+    input: { key: `step-${index}`, prompt: "read", agent: "analyst", access: "read", isolation: "shared" },
+    workerID: `worker-${index}`, spawnKey: `spawn-${index}`, created: 1, phase: "", directory: "/fixture",
+    model: initial.model, profileFingerprint: "profile",
+  }));
+  initial.args = "";
+  initial.settlements = [];
+  await store.create(initial);
+  // Measure after one update: updates replace the fixture's `updated: 1` with a 13-digit timestamp.
+  await store.update(initial.id, (current) => { current.args = ""; });
+  const base = Buffer.byteLength(await readFile(fixture.path("workflows/runs/workflow-a"), "utf8"));
+  const perStep = (key: string) => Buffer.byteLength(JSON.stringify({ kind: "agent", key, outcome: "failure", error: "" }), "utf8")
+    + WORKFLOW_SETTLEMENT_DIAGNOSTIC_JSON_BYTES + 1 + WORKFLOW_REJECTION_RESERVE_BYTES + WORKFLOW_DIAGNOSTIC_JSON_BYTES + 256;
+  const headroom = Math.max(WORKFLOW_CONTROL_HEADROOM, WORKFLOW_DIAGNOSTIC_JSON_BYTES + 256 + initial.steps.reduce((sum, step) => sum + perStep(step.key), 0));
+  const fill = 16 * 1024 * 1024 - headroom - base;
+  await expect(store.update(initial.id, (current) => { current.args = "x".repeat(fill + 1); })).rejects.toThrow("headroom");
+  await store.update(initial.id, (current) => { current.args = "x".repeat(fill); });
+  const exhausted = await store.update(initial.id, (current) => {
+    current.steps = current.steps.map((step) => ({
+      ...step, status: "failed", retryable: false, error: "e".repeat(WORKFLOW_DIAGNOSTIC_JSON_BYTES),
+      rejections: { count: 5, calls: Array.from({ length: 5 }, (_, call) => `${call}`.repeat(32)), error: "r".repeat(WORKFLOW_REJECTION_DIAGNOSTIC_JSON_BYTES), interrupt: "pending" },
+    }) as WorkflowRun["steps"][number]);
+    current.settlements = current.steps.map((step) => ({ kind: "agent", key: step.key, outcome: "failure", error: "s".repeat(WORKFLOW_SETTLEMENT_DIAGNOSTIC_JSON_BYTES) }));
+  }, "control");
+  expect(exhausted.steps.every((step) => step.rejections?.count === 5)).toBe(true);
+  expect(Buffer.byteLength(await readFile(fixture.path("workflows/runs/workflow-a"), "utf8"))).toBeLessThanOrEqual(16 * 1024 * 1024);
+});
+
+test("control headroom fits cap errors replacing short errors on failed, settled steps", async () => {
+  const fixture = await disk();
+  const store = workflowStore(fixture.storage);
+  const initial = run();
+  initial.status = "interrupted";
+  initial.limits.maxAgents = 100;
+  initial.steps = Array.from({ length: 100 }, (_, index) => ({
+    status: "failed", error: "short", retryable: true, key: `step-${index}`, fingerprint: "input", index,
+    input: { key: `step-${index}`, prompt: "read", agent: "analyst", access: "read", isolation: "shared" },
+    workerID: `worker-${index}`, spawnKey: `spawn-${index}`, created: 1, phase: "", directory: "/fixture",
+    model: initial.model, profileFingerprint: "profile",
+  }));
+  initial.settlements = initial.steps.map((step) => ({ kind: "agent", key: step.key, outcome: "failure", error: "short" }));
+  initial.args = "";
+  await store.create(initial);
+  // Measure after one update: updates replace the fixture's `updated: 1` with a 13-digit timestamp.
+  await store.update(initial.id, (current) => { current.args = ""; });
+  const base = Buffer.byteLength(await readFile(fixture.path("workflows/runs/workflow-a"), "utf8"));
+  // Settled failed steps reserve no settlement, only the rejection record, the error's growth to the
+  // diagnostic bound, and one byte for retryable becoming false.
+  const perStep = WORKFLOW_REJECTION_RESERVE_BYTES + WORKFLOW_DIAGNOSTIC_JSON_BYTES + 2 - Buffer.byteLength(JSON.stringify("short")) + 1;
+  const headroom = Math.max(WORKFLOW_CONTROL_HEADROOM, WORKFLOW_DIAGNOSTIC_JSON_BYTES + 256 + 100 * perStep);
+  expect(headroom).toBeGreaterThan(WORKFLOW_CONTROL_HEADROOM);
+  const fill = 16 * 1024 * 1024 - headroom - base;
+  await expect(store.update(initial.id, (current) => { current.args = "x".repeat(fill + 1); })).rejects.toThrow("headroom");
+  await store.update(initial.id, (current) => { current.args = "x".repeat(fill); });
+  const exhausted = await store.update(initial.id, (current) => {
+    current.steps = current.steps.map((step) => ({
+      ...step, status: "failed", retryable: false, error: "e".repeat(WORKFLOW_DIAGNOSTIC_JSON_BYTES),
+      rejections: { count: 5, calls: Array.from({ length: 5 }, (_, call) => `${call}`.repeat(32)), error: "r".repeat(WORKFLOW_REJECTION_DIAGNOSTIC_JSON_BYTES), interrupt: "pending" },
+    }) as WorkflowRun["steps"][number]);
+  }, "control");
+  expect(exhausted.steps.every((step) => step.rejections?.count === 5)).toBe(true);
+  expect(Buffer.byteLength(await readFile(fixture.path("workflows/runs/workflow-a"), "utf8"))).toBeLessThanOrEqual(16 * 1024 * 1024);
 });
 
 test("stores each checkpoint answer once and derives it on every read", async () => {

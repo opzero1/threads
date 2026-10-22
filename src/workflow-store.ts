@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
 import type { Plugin } from "@opencode/plugin";
 import { serialized } from "./threads";
-import { Json, WORKFLOW_CONTROL_HEADROOM, WORKFLOW_DIAGNOSTIC_JSON_BYTES, WORKFLOW_SETTLEMENT_DIAGNOSTIC_JSON_BYTES, WorkflowRun, workflowRunKey } from "./workflow-types";
+import {
+  Json, WORKFLOW_CONTROL_HEADROOM, WORKFLOW_DIAGNOSTIC_JSON_BYTES, WORKFLOW_REJECTION_RESERVE_BYTES, WORKFLOW_RESULT_REJECTION_LIMIT,
+  WORKFLOW_SETTLEMENT_DIAGNOSTIC_JSON_BYTES, WorkflowRun, workflowRunKey,
+} from "./workflow-types";
 
 export function workflowHash(value: unknown): string {
   const json = Json.parse(value);
@@ -15,21 +18,32 @@ export function workflowHash(value: unknown): string {
   return createHash("sha256").update(canonical(json)).digest("hex");
 }
 
+const jsonBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
+
+// Bytes that control updates may still add to `run`: each unfinished step's failure settlement and
+// failure diagnostic, and its rejection record until that is full. An exhausted step is final. A
+// failed step that can still reach the rejection limit may have its error replaced by the cap
+// error, so it reserves growth up to the diagnostic bound, plus `retryable` becoming false.
+export function workflowControlHeadroom(run: WorkflowRun) {
+  const settled = new Set(run.settlements?.filter((item) => item.kind === "agent").map((item) => item.key));
+  const pending = run.steps.reduce((bytes, step) => {
+    if (step.status === "completed") return bytes;
+    const settlementBytes = settled.has(step.key) ? 0
+      : jsonBytes({ kind: "agent", key: step.key, outcome: "failure", error: "" }) + WORKFLOW_SETTLEMENT_DIAGNOSTIC_JSON_BYTES + 1;
+    if ((step.rejections?.count ?? 0) >= WORKFLOW_RESULT_REJECTION_LIMIT) return bytes + settlementBytes;
+    const failureBytes = step.status === "failed"
+      ? Math.max(0, WORKFLOW_DIAGNOSTIC_JSON_BYTES + 2 - jsonBytes(step.error)) + 1
+      : WORKFLOW_DIAGNOSTIC_JSON_BYTES + 256;
+    return bytes + settlementBytes + WORKFLOW_REJECTION_RESERVE_BYTES + failureBytes;
+  }, 0);
+  return Math.max(WORKFLOW_CONTROL_HEADROOM, WORKFLOW_DIAGNOSTIC_JSON_BYTES + 256 + pending);
+}
+
 export function workflowStore(storage: Plugin.Context["storage"], options: {
   onDiagnostic?: (issue: { id: string; ownerID: string; message: string }) => Promise<void>;
 } = {}) {
   const journalLimit = 16 * 1024 * 1024;
-  const controlHeadroom = (run: WorkflowRun) => {
-    const settled = new Set(run.settlements?.filter((item) => item.kind === "agent").map((item) => item.key));
-    const pending = run.steps.reduce((bytes, step) => {
-      if (step.status === "completed") return bytes;
-      const settlementBytes = settled.has(step.key) ? 0
-        : Buffer.byteLength(JSON.stringify({ kind: "agent", key: step.key, outcome: "failure", error: "" }), "utf8")
-          + WORKFLOW_SETTLEMENT_DIAGNOSTIC_JSON_BYTES + 1;
-      return bytes + settlementBytes + (step.status === "failed" ? 0 : WORKFLOW_DIAGNOSTIC_JSON_BYTES + 256);
-    }, 0);
-    return Math.max(WORKFLOW_CONTROL_HEADROOM, WORKFLOW_DIAGNOSTIC_JSON_BYTES + 256 + pending);
-  };
+  const controlHeadroom = workflowControlHeadroom;
   const key = workflowRunKey;
   // Each checkpoint answer is stored once, in settlement order. Readers see it on the checkpoint.
   const answered = (run: WorkflowRun) => {
