@@ -70,7 +70,7 @@ test("saved workflows register no per-script commands and refresh only warms the
     storage: { get: async () => undefined, set: async () => {}, remove: async () => {}, scan: async () => ({ entries: [] }) },
     session: { hook: async () => {} },
     rpc: { register: async () => ({ events: { emit: async () => {} } }) },
-    tool: { transform: async () => {} },
+    tool: { transform: async () => {}, hook: async () => ({ dispose: async () => {} }) },
     skill: { transform: async () => {} },
     command: {
       transform: async (register: (editor: { add: (command: { name: string; execute: () => Promise<void> }) => void }) => void) =>

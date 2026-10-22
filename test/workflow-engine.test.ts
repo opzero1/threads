@@ -6,6 +6,7 @@ import type { Plugin } from "@opencode/plugin";
 import { Session } from "@opencode/schema/session";
 import { SessionMessage } from "@opencode/schema/session-message";
 import { workflowEngine } from "../src/workflow-engine";
+import { workflowControlHeadroom } from "../src/workflow-store";
 import { authorizeWorkflowExecution, serialized, threads, workerIdentity } from "../src/threads";
 import { WORKFLOW_CONTROL_HEADROOM, WORKFLOW_DIAGNOSTIC_JSON_BYTES, WorkflowAgentInput, WorkflowRun, WorkflowStart, workflowSummary } from "../src/workflow-types";
 import { withWorkflowSlot, workflowDirectoryPlan } from "../src/workflow-worker";
@@ -56,6 +57,7 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
   const deliveries: string[] = [];
   const deliveryTexts: string[] = [];
   let deliveryFailures = 0;
+  let interruptFailures = 0;
   let profileSystem: string | ((directory: string) => string) = "profile-v1";
   let profilePermissions: unknown[] = [{ action: "read", resource: "*", effect: "allow" }];
   const saved = new Map<string, string>();
@@ -221,6 +223,11 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
       return {};
     },
     async interrupt(_actor: string, input: { workerID: string }) {
+      if (interruptFailures > 0) {
+        interruptFailures--;
+        workerEvents.push("interrupt-failed");
+        throw new Error("native interrupt failed");
+      }
       workerEvents.push("interrupt-start");
       if (mode === "timeout-race" || mode === "timeout-reject") {
         sessions.get(input.workerID)!.outcome = "interrupted";
@@ -266,6 +273,7 @@ async function harness(mode: "valid" | "repair" | "missing" | "reported-fail" | 
     api, ownerID, directory, deliveries, deliveryTexts, writes, validationErrors, worktreeProjects, reservations, spawnInputs, spawnScopes, spawns: () => spawns, file,
     reopen: engine,
     failDeliveries: (count: number) => { deliveryFailures = count; },
+    failInterrupts: (count: number) => { interruptFailures = count; },
     setProfileSystem: (value: typeof profileSystem) => { profileSystem = value; },
     setProfilePermissions: (value: unknown[]) => { profilePermissions = value; },
     setOwnerPermissions: (value: unknown[]) => { sessions.get(ownerID)!.permissions = value; },
@@ -2793,5 +2801,279 @@ return await agent("check", { key: "check", agent: "analyst", directory: ${JSON.
       expect(recorded.finished).toBe(updated);
       expect(outcomes(recorded)).toEqual({ write: "removed" });
     } finally { await reopened?.dispose(); await fixture.api.dispose(); }
+  });
+});
+
+describe("rejected workflows_result submissions", () => {
+  const runtime = { agent: "caller", model: { providerID: "test", id: "model" } };
+  const call = (workerID: string, label: string | number) => ({ sessionID: workerID, messageID: `msg_cap_${label}`, id: `call_cap_${label}` });
+  const invalid = { verdict: "PASS" as const, summary: "wrong type", evidence: ["fixture"], result: { ok: "no" } };
+  const valid = { verdict: "PASS" as const, summary: "valid", evidence: ["fixture"], result: { ok: true } };
+  const caught = `
+export const meta = { name: "capped", description: "rejection cap" };
+try {
+  return await agent("Inspect", { key: "inspect", agent: "analyst", schema: { type: "object", required: ["ok"], properties: { ok: { type: "boolean" } } } });
+} catch (error) {
+  return { fallback: error.message };
+}`;
+  type Api = ReturnType<typeof workflowEngine>;
+  const rejectInHandler = (api: Api, workerID: string, label: string | number) =>
+    expect(api.result(workerID, invalid as never, call(workerID, label))).rejects.toThrow("schema validation failed");
+  const malformed = (api: Api, workerID: string, label: string | number, input: unknown = { summary: "missing verdict", evidence: ["fixture"], result: { ok: true } }) =>
+    api.resultRejected({ tool: "workflows_result", ...call(workerID, label), input, status: "error" });
+  const step = async (api: Api, ownerID: string, runID: string) => (await api.get(ownerID, runID)).steps.find((item) => item.key === "inspect")!;
+  const eventually = async (check: () => boolean | Promise<boolean>, label: string) => {
+    for (let count = 0; count < 400; count++) {
+      if (await check()) return;
+      await Bun.sleep(5);
+    }
+    throw new Error(`timed out waiting for ${label}`);
+  };
+  async function started(fixture: Awaited<ReturnType<typeof harness>>, key: string, body = caught) {
+    const run = await fixture.api.start(fixture.ownerID, WorkflowStart.parse({ key, script: body, args: null }), runtime);
+    await fixture.waitForSpawn("inspect");
+    return { run, workerID: fixture.workerID("inspect") };
+  }
+
+  test("the fifth rejection fails the step for an active waiter, interrupts the worker, and refuses a later valid result", async () => {
+    const fixture = await harness("manual");
+    try {
+      const { run, workerID } = await started(fixture, "active");
+      for (const label of [1, 2, 3]) await rejectInHandler(fixture.api, workerID, label);
+      await malformed(fixture.api, workerID, 4);
+      expect((await step(fixture.api, fixture.ownerID, run.id)).rejections?.count).toBe(4);
+      await malformed(fixture.api, workerID, 5, { verdict: "MAYBE", summary: "bad verdict", evidence: ["fixture"], result: { ok: true } });
+      const failed = await step(fixture.api, fixture.ownerID, run.id);
+      expect(failed.status).toBe("failed");
+      expect(failed.status === "failed" && failed.retryable).toBe(false);
+      expect(failed.rejections).toMatchObject({ count: 5 });
+      expect(failed.rejections?.calls).toHaveLength(5);
+      expect(failed.status === "failed" && failed.error).toContain("rejected 5 times");
+      expect(failed.status === "failed" && failed.error).toContain("verdict");
+      await eventually(() => fixture.workerEvents.includes("interrupt-start"), "independent interrupt");
+      await eventually(async () => (await step(fixture.api, fixture.ownerID, run.id)).rejections?.interrupt === "done", "interrupt receipt");
+      await expect(fixture.api.result(workerID, valid, call(workerID, "late"))).rejects.toThrow("rejected 5 times");
+      expect(await fixture.getStorage(`workflows/results/${workerID}`)).toBeUndefined();
+      await expect(fixture.api.prepareContext(workerID)).rejects.toThrow("rejected workflows_result submissions");
+      fixture.setOutcome("inspect", "failed");
+      const final = await settled(fixture.api, fixture.ownerID, run.id);
+      expect(final.status).toBe("completed");
+      expect((final.result as { fallback: string }).fallback).toContain("rejected 5 times");
+      const settlement = final.settlements?.find((item) => item.kind === "agent" && item.key === "inspect");
+      expect(settlement?.kind === "agent" && settlement.outcome === "failure" && settlement.error).toContain("rejected 5 times");
+      expect(final.steps[0].status).toBe("failed");
+    } finally { await fixture.api.dispose(); }
+  });
+
+  test("without a waiter, an owner follow-up on an interrupted run is capped, interrupted, and blocked", async () => {
+    const fixture = await harness("manual");
+    let reopened: Api | undefined;
+    try {
+      const { run, workerID } = await started(fixture, "no-waiter");
+      await fixture.api.dispose();
+      reopened = fixture.reopen();
+      expect((await reopened.get(fixture.ownerID, run.id)).status).toBe("interrupted");
+      authorizeWorkflowExecution(workerID);
+      await expect(reopened.prepareContext(workerID)).resolves.toBeUndefined();
+      const before = fixture.workerEvents.filter((event) => event === "interrupt-start").length;
+      for (const label of [1, 2, 3, 4, 5]) await rejectInHandler(reopened, workerID, label);
+      const failed = await step(reopened, fixture.ownerID, run.id);
+      expect(failed.status).toBe("failed");
+      await eventually(() => fixture.workerEvents.filter((event) => event === "interrupt-start").length > before, "interrupt without a waiter");
+      await expect(reopened.prepareContext(workerID)).rejects.toThrow("rejected workflows_result submissions");
+      await expect(reopened.result(workerID, valid, call(workerID, "late"))).rejects.toThrow("rejected 5 times");
+      await reopened.control(fixture.ownerID, { runID: run.id, action: "resume" });
+      const final = await settled(reopened, fixture.ownerID, run.id);
+      expect(final.status).toBe("completed");
+      expect((final.result as { fallback: string }).fallback).toContain("rejected 5 times");
+      expect(final.steps[0].status).toBe("failed");
+    } finally { await reopened?.dispose(); await fixture.api.dispose(); }
+  });
+
+  test("the count survives a restart at four, ignores a duplicate call from before it, and fails at five", async () => {
+    const fixture = await harness("manual");
+    let reopened: Api | undefined;
+    try {
+      const { run, workerID } = await started(fixture, "restart");
+      for (const label of [1, 2, 3]) await rejectInHandler(fixture.api, workerID, label);
+      await malformed(fixture.api, workerID, 4);
+      await fixture.api.dispose();
+      reopened = fixture.reopen();
+      await malformed(reopened, workerID, 4);
+      await expect(reopened.result(workerID, invalid as never, call(workerID, 2))).rejects.toThrow("schema validation failed");
+      expect((await step(reopened, fixture.ownerID, run.id)).rejections?.count).toBe(4);
+      await malformed(reopened, workerID, 5);
+      const failed = await step(reopened, fixture.ownerID, run.id);
+      expect(failed.status).toBe("failed");
+      expect(failed.rejections?.count).toBe(5);
+    } finally { await reopened?.dispose(); await fixture.api.dispose(); }
+  });
+
+  test("recovery interrupts a step persisted as exhausted before its interrupt, and retries a failed interrupt", async () => {
+    const fixture = await harness("manual");
+    let reopened: Api | undefined;
+    try {
+      const { run, workerID } = await started(fixture, "crash-window");
+      await fixture.api.dispose();
+      await fixture.mutateRun(run.id, (value) => {
+        const index = value.steps.findIndex((item) => item.key === "inspect");
+        value.steps[index] = {
+          ...value.steps[index], status: "failed", retryable: false,
+          error: "Workflow result was rejected 5 times, so the step failed and its worker was interrupted. Last validation error: fixture",
+          rejections: { count: 5, calls: [1, 2, 3, 4, 5].map((n) => String(n).repeat(32)), error: "fixture", interrupt: "pending" },
+        } as WorkflowRun["steps"][number];
+      });
+      fixture.workerEvents.length = 0;
+      fixture.failInterrupts(1);
+      reopened = fixture.reopen();
+      await reopened.list(fixture.ownerID);
+      await eventually(() => fixture.workerEvents.includes("interrupt-failed"), "failed interrupt");
+      await Bun.sleep(20);
+      expect((await step(reopened, fixture.ownerID, run.id)).rejections?.interrupt).toBe("pending");
+      await expect(reopened.prepareContext(workerID)).rejects.toThrow("rejected workflows_result submissions");
+      await eventually(() => fixture.workerEvents.includes("interrupt-start"), "retried interrupt");
+      await eventually(async () => (await step(reopened!, fixture.ownerID, run.id)).rejections?.interrupt === "done", "interrupt receipt");
+    } finally { await reopened?.dispose(); await fixture.api.dispose(); }
+  });
+
+  test("concurrent rejections stop at five", async () => {
+    const fixture = await harness("manual");
+    try {
+      const { run, workerID } = await started(fixture, "concurrent");
+      await Promise.all([
+        ...[1, 2, 3, 4].map((label) => rejectInHandler(fixture.api, workerID, label)),
+        ...[5, 6, 7, 8].map((label) => malformed(fixture.api, workerID, label)),
+      ]);
+      const failed = await step(fixture.api, fixture.ownerID, run.id);
+      expect(failed.status).toBe("failed");
+      expect(failed.rejections?.count).toBe(5);
+      expect(new Set(failed.rejections?.calls).size).toBe(5);
+    } finally { await fixture.api.dispose(); }
+  });
+
+  test("a valid result accepted before the fifth rejection wins, and the fifth rejection first refuses the valid result", async () => {
+    const accepted = await harness("manual");
+    try {
+      const { run, workerID } = await started(accepted, "valid-first");
+      for (const label of [1, 2, 3, 4]) await rejectInHandler(accepted.api, workerID, label);
+      await expect(accepted.api.result(workerID, valid, call(workerID, "valid"))).resolves.toEqual({ accepted: true });
+      await rejectInHandler(accepted.api, workerID, 5);
+      await malformed(accepted.api, workerID, 6);
+      const kept = await step(accepted.api, accepted.ownerID, run.id);
+      expect(kept.status).not.toBe("failed");
+      expect(kept.rejections?.count).toBe(4);
+      accepted.setOutcome("inspect", "succeeded");
+      const final = await settled(accepted.api, accepted.ownerID, run.id);
+      expect(final.result).toEqual({ ok: true });
+      expect(final.steps[0].status).toBe("completed");
+    } finally { await accepted.api.dispose(); }
+    const refused = await harness("manual");
+    try {
+      const { run, workerID } = await started(refused, "rejection-first");
+      for (const label of [1, 2, 3, 4, 5]) await rejectInHandler(refused.api, workerID, label);
+      await expect(refused.api.result(workerID, valid, call(workerID, "valid"))).rejects.toThrow("rejected 5 times");
+      expect((await step(refused.api, refused.ownerID, run.id)).status).toBe("failed");
+    } finally { await refused.api.dispose(); }
+  });
+
+  test("four rejections then a valid result complete the step, and later submissions can't poison it", async () => {
+    const fixture = await harness("manual");
+    try {
+      const { run, workerID } = await started(fixture, "four-then-valid");
+      for (const label of [1, 2, 3, 4]) await rejectInHandler(fixture.api, workerID, label);
+      await fixture.api.result(workerID, valid, call(workerID, "valid"));
+      await expect(fixture.api.result(workerID, valid, call(workerID, "retry"))).resolves.toEqual({ accepted: true });
+      await expect(fixture.api.result(workerID, { ...valid, summary: "different" }, call(workerID, "different"))).rejects.toThrow("different workflow result");
+      for (const label of [5, 6, 7]) await rejectInHandler(fixture.api, workerID, label);
+      for (const label of [8, 9]) await malformed(fixture.api, workerID, label);
+      expect((await step(fixture.api, fixture.ownerID, run.id)).rejections?.count).toBe(4);
+      fixture.setOutcome("inspect", "succeeded");
+      const final = await settled(fixture.api, fixture.ownerID, run.id);
+      expect(final.result).toEqual({ ok: true });
+    } finally { await fixture.api.dispose(); }
+  });
+
+  test("only real validation failures by the step's own worker count, each call once", async () => {
+    const fixture = await harness("manual");
+    try {
+      const { run, workerID } = await started(fixture, "filters");
+      // A handler rejection is counted by the handler, so its after-hook event adds nothing.
+      await rejectInHandler(fixture.api, workerID, "handled");
+      await malformed(fixture.api, workerID, "handled");
+      // Valid arguments that failed for another reason, such as permission or cancellation.
+      await fixture.api.resultRejected({ tool: "workflows_result", ...call(workerID, "infra"), input: valid, status: "error" });
+      // Completed calls, other tools, and sessions that aren't this step's worker.
+      await fixture.api.resultRejected({ tool: "workflows_result", ...call(workerID, "done"), input: { summary: "x" }, status: "completed" });
+      await fixture.api.resultRejected({ tool: "threads_report", ...call(workerID, "other-tool"), input: {}, status: "error" });
+      await malformed(fixture.api, fixture.ownerID, "owner");
+      await malformed(fixture.api, "ses_missing_worker", "missing");
+      // A handler error that isn't validation, such as a different result after acceptance, is tested above.
+      expect((await step(fixture.api, fixture.ownerID, run.id)).rejections?.count).toBe(1);
+      for (const [label, input] of [
+        ["no-verdict", { summary: "s", evidence: ["e"], result: {} }],
+        ["bad-verdict", { verdict: "NOT_A_VERDICT", summary: "s", evidence: ["e"], result: {} }],
+        ["no-evidence", { verdict: "PASS", summary: "s", result: {} }],
+      ] as const) await malformed(fixture.api, workerID, label, input);
+      const counted = await step(fixture.api, fixture.ownerID, run.id);
+      expect(counted.rejections?.count).toBe(4);
+      expect(counted.rejections?.error).toContain("evidence");
+      expect(Buffer.byteLength(JSON.stringify(counted.rejections?.error), "utf8")).toBeLessThanOrEqual(1_026);
+      await fixture.api.control(fixture.ownerID, { runID: run.id, action: "stop" });
+      await malformed(fixture.api, workerID, "stopped");
+      expect((await step(fixture.api, fixture.ownerID, run.id)).rejections?.count).toBe(4);
+    } finally { await fixture.api.dispose(); }
+  });
+
+  test("at the payload boundary, a failed step's fifth rejection persists and blocks after other failed steps used their reserve", async () => {
+    const fixture = await harness("manual");
+    let reopened: Api | undefined;
+    try {
+      const { run, workerID } = await started(fixture, "boundary");
+      await fixture.api.dispose();
+      type Step = WorkflowRun["steps"][number];
+      await fixture.mutateRun(run.id, (value) => {
+        const index = value.steps.findIndex((item) => item.key === "inspect");
+        const base = value.steps[index];
+        value.steps[index] = { ...base, status: "failed", retryable: true, error: "short" } as Step;
+        value.steps.push(...Array.from({ length: 100 }, (_, n) => ({
+          ...base, key: `filler-${n}`, index: n + 1, workerID: `ses_filler_${n}`, spawnKey: `filler-${n}`,
+          status: "failed", retryable: true, error: "short",
+        }) as Step));
+        value.settlements = value.steps.map((step) => ({ kind: "agent", key: step.key, outcome: "failure", error: "short" }));
+      });
+      const storageKey = `workflows/runs/${run.id}`;
+      const raw = JSON.parse(JSON.stringify(await fixture.getStorage(storageKey)));
+      raw.args = "";
+      raw.args = "x".repeat(16 * 1024 * 1024 - workflowControlHeadroom(WorkflowRun.parse(raw)) - Buffer.byteLength(JSON.stringify(raw)));
+      // The other failed steps reach the cap first and spend their whole reserve.
+      for (const step of raw.steps) {
+        if (step.key === "inspect") continue;
+        Object.assign(step, {
+          retryable: false, error: "e".repeat(WORKFLOW_DIAGNOSTIC_JSON_BYTES),
+          rejections: { count: 5, calls: [0, 1, 2, 3, 4].map((n) => String(n).repeat(32)), error: "r".repeat(1_024), interrupt: "done" },
+        });
+      }
+      await fixture.setStorage(storageKey, raw);
+      reopened = fixture.reopen();
+      authorizeWorkflowExecution(workerID);
+      for (const label of [1, 2, 3, 4, 5]) await rejectInHandler(reopened, workerID, label);
+      const failed = await step(reopened, fixture.ownerID, run.id);
+      expect(failed.rejections?.count).toBe(5);
+      expect(failed.status === "failed" && failed.retryable).toBe(false);
+      expect(failed.status === "failed" && failed.error).toContain("rejected 5 times");
+      await expect(reopened.prepareContext(workerID)).rejects.toThrow("rejected workflows_result submissions");
+      expect(Buffer.byteLength(JSON.stringify(await fixture.getStorage(storageKey)))).toBeLessThanOrEqual(16 * 1024 * 1024);
+    } finally { await reopened?.dispose(); await fixture.api.dispose(); }
+  });
+
+  test("a step's last diagnostic is byte-bounded", async () => {
+    const fixture = await harness("manual");
+    try {
+      const { run, workerID } = await started(fixture, "bounded");
+      await malformed(fixture.api, workerID, "huge", { verdict: "PASS", summary: "s", evidence: ["e"], result: {}, ["x".repeat(20_000)]: true });
+      const counted = await step(fixture.api, fixture.ownerID, run.id);
+      expect(counted.rejections?.count).toBe(1);
+      expect(Buffer.byteLength(JSON.stringify(counted.rejections?.error), "utf8") - 2).toBeLessThanOrEqual(1_024);
+    } finally { await fixture.api.dispose(); }
   });
 });
