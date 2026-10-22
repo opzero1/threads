@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.3 — 2026-10-22
 
 Requires OpenCode 2.1 or later. OpenCode 2.0 releases are no longer supported; use Threads 0.3.2 with OpenCode 2.0.28.
 
