@@ -50,11 +50,11 @@ for (const hostname of ["127.0.0.1", "0.0.0.0", "::", "::1", "[::]", "[::1]", "l
   const snapshotHosts: string[] = [];
   const server = Bun.serve({ hostname: hostname.replace(/[\[\]]/g, ""), port: 0, fetch(request) {
     if (request.headers.get("authorization") !== `Basic ${Buffer.from("opencode:local-fixture-only").toString("base64")}`) return new Response("Unauthorized", { status: 401 });
-    if (new URL(request.url).pathname === "/api/info") return Response.json({ pid: process.pid, version: "2.0.26" });
+    if (new URL(request.url).pathname === "/api/info") return Response.json({ pid: process.pid, version: "2.1.1" });
     if (new URL(request.url).pathname.endsWith("/snapshot")) { snapshots++; snapshotHosts.push(new URL(request.url).hostname); return Response.json({ output: { protocol: 1, entries: [] } }); }
     return new Response("Unexpected request", { status: 500 });
   } });
-  const registration = { url: `http://${hostname}:${server.port}`, pid: process.pid, version: "2.0.26", password: "local-fixture-only" };
+  const registration = { url: `http://${hostname}:${server.port}`, pid: process.pid, version: "2.1.1", password: "local-fixture-only" };
   const config = RunnerConfig.parse({ protocol: 1, serviceFile, hostDirectory: dir, node: process.execPath, runner: "/unused", intervalMs: 60_000, label: "com.opthreads.heartbeat.test", launchAgentsDirectory: dir });
   try {
     await writeFile(serviceFile, JSON.stringify(registration));

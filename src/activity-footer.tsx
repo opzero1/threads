@@ -1,14 +1,20 @@
 import type { Plugin } from "@opencode/plugin/tui";
-import type { RGBA } from "@opentui/core";
-import type { SpinnerRenderable } from "opentui-spinner";
+import type { ColorInput, Renderable, RenderableOptions, RenderContext, RGBA } from "@opentui/core";
 import { Show } from "solid-js";
 import { footerText, type FooterSummary } from "./activity-model";
 import { themeColor, themeMuted } from "./activity-theme";
 
-// OpenCode registers its spinner renderable under this name; the type comes from the same package.
+// OpenCode 2.1 registers its own spinner under this name and publishes no type for it.
+type SpinnerOptions = RenderableOptions<Renderable> & {
+  frames?: string[];
+  interval?: number;
+  autoplay?: boolean;
+  color?: ColorInput;
+  backgroundColor?: ColorInput;
+};
 declare module "@opentui/solid" {
   interface OpenTUIComponents {
-    spinner: typeof SpinnerRenderable;
+    spinner: new (ctx: RenderContext, options: SpinnerOptions) => Renderable;
   }
 }
 

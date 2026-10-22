@@ -162,7 +162,7 @@ def outage(kind):
     before = json.loads(before_bytes)
     prefix = "http://127.0.0.1:"
     if kind is IPv6Sandbox:
-        prefix = "http://::1:" if before["version"] == "2.0.26" else "http://[::1]:"
+        prefix = "http://[::1]:"
         listener = command(["/usr/sbin/lsof", "-nP", "-a", "-p", str(sandbox.process.pid), "-iTCP", "-sTCP:LISTEN"]).stdout
         check("OS confirms an IPv6 loopback listener", "IPv6" in listener and "[::1]:" in listener)
     check(f"unchanged native {before['version']} writes its expected {name}registration", before["url"].startswith(prefix))

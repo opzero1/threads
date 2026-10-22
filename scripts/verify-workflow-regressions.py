@@ -2,6 +2,7 @@ import argparse
 import json
 from pathlib import Path
 import time
+import uuid
 
 from fixture import Provider, config, decoded, plugin_entry, run_tool, source_fingerprint
 from sandbox import Sandbox, eventually
@@ -430,6 +431,46 @@ def runtime_deadline():
     return {"run": final, "responseSecondsDuringRegex": response_seconds}
 
 
+def start_permission():
+    sandbox.api("PATCH", f"/api/session/{owner}", {"permissions": [{"action": "workflows_start", "resource": "*", "effect": "ask"}]})
+    arguments = {"key": "start-permission", "script": script("start-permission", "return 1;")}
+
+    def runs():
+        return sandbox.api("POST", "/api/rpc/workflows/snapshot", {"input": {"ownerID": owner}}, location=sandbox.directory)["output"]["runs"]
+
+    def starts():
+        return [part for message in messages(owner) if message["type"] == "assistant" for part in message["content"]
+                if part["type"] == "tool" and part["name"] == "workflows_start"]
+
+    def attempt(decision):
+        before = {part["id"] for part in starts()}
+        marker = f"START_PERMISSION_{uuid.uuid4().hex}"
+        provider.responses[marker] = {"name": "workflows_start", "arguments": arguments}
+        sandbox.api("POST", f"/api/session/{owner}/prompt", {"text": marker})
+        request = eventually(lambda: next((item for item in sandbox.api("GET", f"/api/session/{owner}/permission")["data"]
+                                           if item["action"] == "workflows_start"), None), timeout=60)
+        waiting = runs()
+        sandbox.api("POST", f"/api/session/{owner}/permission/{request['id']}/reply", {"decision": decision})
+        eventually(lambda: owner not in sandbox.api("GET", "/api/session/active")["data"], timeout=60)
+        part = next((part for part in starts() if part["id"] not in before), None)
+        return request, waiting, part
+
+    request, waiting, part = attempt("reject")
+    assert request["resources"] == ["*"] and not request.get("save"), request
+    assert request.get("metadata", {}).get("key") == "start-permission", request
+    assert waiting == [] and runs() == [], runs()
+    assert part is None or part["state"]["status"] != "completed", part
+    approved, waiting, part = attempt("once")
+    assert waiting == [] and part is not None, part
+    run = decoded(part)
+    retried, _, part = attempt("once")
+    assert part is not None and decoded(part)["id"] == run["id"], part
+    assert [item["id"] for item in runs()] == [run["id"]], runs()
+    final = settled(run)
+    assert final["result"] == 1, final
+    return {"rejected": request, "approved": approved, "retried": retried, "run": final["id"]}
+
+
 cases = {
     "assistant-prefill-script-retry": assistant_prefill_script_retry,
     "assistant-prefill-fails-step": assistant_prefill_fails_step,
@@ -447,6 +488,7 @@ cases = {
     "runtime-deadline": runtime_deadline,
     "optional-budgets": optional_budgets,
     "configured-defaults": configured_defaults,
+    "start-permission": start_permission,
 }
 selected = options.case or list(cases)
 assert all(name in cases for name in selected), selected

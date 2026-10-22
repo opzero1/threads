@@ -274,7 +274,7 @@ test("compaction hiding the admitted message is unresolved, never a stale-idle c
   h.complete();
   h.messages.splice(0);
   h.messages.push({ id: SessionMessage.ID.create(), type: "compaction", status: "completed", reason: "auto",
-    summary: "Truncated history", recent: "", time: { created: Date.now() + 1000 } });
+    summary: "Truncated history", time: { created: Date.now() + 1000 } });
   h.complete();
   await h.reopen().list(h.ownerID);
   expect(h.wakes()).toBe(1);

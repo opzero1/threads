@@ -4,11 +4,11 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { heartbeatOnce, RunnerConfig } from "../src/heartbeat-runner";
 
-test("transport supports OpenCode 2.0.28 while rejecting mismatched registered and live versions", async () => {
+test("transport supports OpenCode 2.1 while rejecting 2.0, unknown, and mismatched registered and live versions", async () => {
   const dir = await mkdtemp(join(tmpdir(), "heartbeat-upgrade-"));
   const file = join(dir, "service.json");
   const config = RunnerConfig.parse({ protocol: 1, serviceFile: file, hostDirectory: dir, node: process.execPath, runner: "/unused", intervalMs: 60_000, label: "com.opthreads.heartbeat.test", launchAgentsDirectory: dir });
-  let version = "2.0.28";
+  let version = "2.1.2";
   let snapshots = 0;
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
     expect(request.headers.get("authorization")).toBe(`Basic ${Buffer.from("opencode:upgrade-fixture").toString("base64")}`);
@@ -18,17 +18,20 @@ test("transport supports OpenCode 2.0.28 while rejecting mismatched registered a
   } });
   const put = (registered: string) => writeFile(file, JSON.stringify({ url: server.url.toString(), pid: process.pid, version: registered, password: "upgrade-fixture" }));
   try {
-    await put("2.0.28");
+    await put("2.1.2");
     const original = await readFile(file, "utf8");
     expect(await heartbeatOnce(config, false)).toEqual({ protocol: 1, shadow: false, decisions: [] });
     expect(snapshots).toBe(1);
-    version = "2.0.26";
+    version = "2.1.1";
     await expect(heartbeatOnce(config, false)).rejects.toThrow("Existing compatible service unavailable");
     expect(await readFile(file, "utf8")).toBe(original);
-    version = "2.0.28";
-    await put("2.0.26");
+    version = "2.1.2";
+    await put("2.1.1");
     await expect(heartbeatOnce(config, false)).rejects.toThrow("Existing compatible service unavailable");
-    await put("2.0.29");
+    await put("2.1.3");
+    await expect(heartbeatOnce(config, false)).rejects.toThrow("Existing compatible service unavailable");
+    version = "2.0.28";
+    await put("2.0.28");
     await expect(heartbeatOnce(config, false)).rejects.toThrow("Existing compatible service unavailable");
     expect(snapshots).toBe(1);
   } finally { await server.stop(true); await rm(dir, { recursive: true, force: true }); }
@@ -50,20 +53,20 @@ test("transport rejects unsafe registrations, bad health and redirects without i
     if (mode === "redirect" || (mode === "rpc-redirect" && path !== "/api/info")) return Response.redirect(trap.url.toString(), 302);
     if (path === "/api/info") {
       if (mode === "slow") return new Promise<Response>(() => {});
-      return Response.json({ pid: mode === "pid" ? process.pid + 1 : process.pid, version: mode === "version" ? "2.0.27" : "2.0.26" }, { status: mode === "status" ? 500 : 200 });
+      return Response.json({ pid: mode === "pid" ? process.pid + 1 : process.pid, version: mode === "version" ? "2.0.28" : "2.1.1" }, { status: mode === "status" ? 500 : 200 });
     }
     snapshots++;
     expect(path.endsWith("/snapshot")).toBe(true);
     return Response.json({ output: { protocol: 1, entries: [] } });
   } });
-  const registration = { url: `http://::1:${server.port}`, pid: process.pid, version: "2.0.26", password: "fixture-password" };
+  const registration = { url: `http://::1:${server.port}`, pid: process.pid, version: "2.1.1", password: "fixture-password" };
   const put = async (value: unknown) => writeFile(file, JSON.stringify(value));
   try {
     for (const url of ["http://192.0.2.1:12345", "http://example.com", `http://fixture-password@127.0.0.1:${server.port}`, "http://::2:12345", "http://::1", "http://::1:12345/path", "http://::1:0", "http://::1:65536", "http://127.1:12345", "http://2130706433:12345", "http://localhost.:12345", "http://localhost:12345?x=1", "http://localhost:12345#x", "http://localhost:12345\\@example.com", "ftp://localhost:12345"]) {
       await put({ ...registration, url });
       await expect(heartbeatOnce(config, false)).rejects.toThrow("loopback");
     }
-    for (const bad of [{ ...registration, pid: 0 }, { ...registration, pid: "1" }, { ...registration, password: 123 }, { ...registration, version: "2.0.27" }]) {
+    for (const bad of [{ ...registration, pid: 0 }, { ...registration, pid: "1" }, { ...registration, password: 123 }, { ...registration, version: "2.0.28" }]) {
       await put(bad);
       await expect(heartbeatOnce(config, false)).rejects.toThrow("Existing compatible service unavailable");
     }
@@ -96,13 +99,13 @@ test("each cycle rereads native registration after outage and new local listener
   let snapshots = 0;
   const start = () => Bun.serve({ hostname: "::1", port: 0, fetch(request) {
     if (request.headers.get("authorization") !== `Basic ${Buffer.from("opencode:restart-fixture").toString("base64")}`) return new Response(null, { status: 401 });
-    if (new URL(request.url).pathname === "/api/info") return Response.json({ pid: process.pid, version: "2.0.26" });
+    if (new URL(request.url).pathname === "/api/info") return Response.json({ pid: process.pid, version: "2.1.1" });
     snapshots++;
     return Response.json({ output: { protocol: 1, entries: [] } });
   } });
   let server = start();
   const put = async () => {
-    const bytes = JSON.stringify({ url: `http://::1:${server.port}`, pid: process.pid, version: "2.0.26", password: "restart-fixture" });
+    const bytes = JSON.stringify({ url: `http://::1:${server.port}`, pid: process.pid, version: "2.1.1", password: "restart-fixture" });
     await writeFile(file, bytes);
     return bytes;
   };

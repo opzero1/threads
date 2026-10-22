@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { Skill } from "@opencode/plugin";
 import type { Plugin } from "@opencode/plugin";
 import type { SessionContext } from "@opencode/plugin/promise/session";
+import type { ToolContext } from "@opencode/plugin/promise/tool";
 import { z } from "zod";
 import { threads } from "./threads";
 import { heartbeat } from "./heartbeat";
@@ -10,6 +11,29 @@ import { workflowEngine } from "./workflow-engine";
 import { WorkflowControl, WorkflowsRpc } from "./workflow-rpc";
 import { savedWorkflows, SavedWorkflow } from "./workflow-saved";
 import { WorkflowLimits, WorkflowPrune, WorkflowPruneResult, WorkflowResult, WorkflowRun, WorkflowStart, WorkflowSummary, workflowSummary } from "./workflow-types";
+
+export type WorkflowStartPermission = Parameters<Plugin.Context["permission"]["assert"]>[0];
+
+export function workflowStartPermission(
+  input: Pick<WorkflowStart, "key" | "name" | "resumeFrom">,
+  tool: Pick<ToolContext, "sessionID" | "agent" | "messageID" | "id">,
+): WorkflowStartPermission {
+  const target = input.name === undefined ? "an inline workflow script" : `saved workflow ${input.name}`;
+  const resume = input.resumeFrom === undefined ? "" : `, reusing completed steps of ${input.resumeFrom}`;
+  return {
+    sessionID: tool.sessionID,
+    agent: tool.agent,
+    action: "workflows_start",
+    resources: [input.name ?? "*"],
+    metadata: {
+      description: `Start ${target} with key ${input.key}${resume}`,
+      key: input.key,
+      ...(input.name === undefined ? {} : { name: input.name }),
+      ...(input.resumeFrom === undefined ? {} : { resumeFrom: input.resumeFrom }),
+    },
+    source: { type: "tool", messageID: tool.messageID, id: tool.id },
+  };
+}
 
 export async function workflows(
   ctx: Plugin.Context,
@@ -56,9 +80,12 @@ export async function workflows(
       output: WorkflowSummary,
       options: { namespace: "workflows", codemode: false },
       execute: async (input, tool) => {
+        const request = startInput.parse(input);
         const model = models.get(tool.sessionID);
         if (!model) throw new Error("Workflow start requires a resolved session model");
-        const run = await engine.start(tool.sessionID, startInput.parse(input), { agent: tool.agent, model });
+        // Don't catch: a plain rejection must propagate to end the step.
+        await ctx.permission.assert(workflowStartPermission(request, tool));
+        const run = await engine.start(tool.sessionID, request, { agent: tool.agent, model });
         await rpc.events.emit("updated", { ownerID: tool.sessionID, runID: run.id });
         const output = workflowSummary(run);
         return { content: JSON.stringify(output), output };
