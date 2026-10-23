@@ -10,8 +10,8 @@ The tools use the namespace `threads`. Each tool returns JSON in the native `con
 | --- | --- | --- | --- |
 | `threads_spawn` | `{ key, title, directory, task, agent?, paths? }` | `WorkerView` | A conversation that is not a worker or a subagent |
 | `threads_list` | `{}` | `{ workers: WorkerView[] }` | The coordinator |
-| `threads_send` | `{ workerID, key, text }` | `{ workerID, messageID }` | The worker's coordinator |
-| `threads_interrupt` | `{ workerID }` | `WorkerView` | The worker's coordinator |
+| `threads_send` | `{ workerID, key, text }` | `{ workerID, messageID, resumedFollowups?, failedFollowups? }` | The worker's coordinator |
+| `threads_interrupt` | `{ workerID }` | `WorkerView` and `heldFollowups` | The worker's coordinator |
 | `threads_hide` | `{ workerID }` | `WorkerView` | The worker's coordinator |
 | `threads_report` | `{ verdict, summary, evidence }` | `{ workerID, report }` | The worker itself, once |
 
@@ -55,7 +55,15 @@ Changing `title`, `directory`, `task`, `agent`, or the resolved `paths` under an
 
 The result confirms admission, not completion. A separate durable notice identifies the follow-up message and its native outcome: `succeeded`, `failed`, or `interrupted`. The notice does not replace the original report or establish a task verdict.
 
-Pending deliveries reconcile when the coordinator lists workers or enters a model turn. Retries reuse the recorded message IDs. If compaction removes the worker's follow-up message before completion is recorded, that completion remains unresolved because the SDK exposes only compacted context.
+Pending deliveries reconcile when the coordinator lists workers or enters a model turn. Reconciliation wakes the worker only for a follow-up whose wake was never confirmed. Once the wake is delivered, only an explicit `threads_send` wakes the worker again, so reconciliation can't undo an interrupt. Retries reuse the recorded message IDs. If compaction removes the worker's follow-up message before completion is recorded, that completion remains unresolved because the SDK exposes only compacted context.
+
+## Interrupting and held follow-ups
+
+`threads_interrupt` returns the worker's `WorkerView` plus `heldFollowups`: the sorted message IDs of follow-ups that hadn't started when it stopped the run. A follow-up that was already running is interrupted, and its completion notice reports `interrupted`. Held follow-ups get no notice until they run.
+
+OpenCode 2.1 doesn't let a plugin remove a queued message from a worker's inbox, so a held follow-up stays queued there. Threads only stops waking the worker for it. Any later wake runs it: your next `threads_send` to that worker, an identical retry of its key, or a message typed in the worker's tab. `threads_send` redelivers held follow-ups before its own message, and the native queue keeps its original order. `resumedFollowups` lists the message IDs it redelivered. `failedFollowups` lists each one whose admission or wake failed, as `{ messageID, error }` with the error cut to 240 characters. A failed one stays pending, and the next recovery pass or send retries it. Both fields are omitted when empty. A held follow-up that runs still gets its completion notice.
+
+Redelivery reads the worker's context, which can be compacted. A follow-up that already ran and was compacted away looks unstarted, so an interrupt can hold it and a send can list it as redelivered. It doesn't run twice: Threads doesn't wake a worker when a completed compaction follows the message's admission. Its completion notice stays unresolved, as described above.
 
 Background recovery isolates rejected records and continues through the current page. Failed records remain pending for a later pass. The coordinator's context includes bounded diagnostics with the worker and message IDs. Explicit `threads_send` calls still return their own admission or wake errors.
 

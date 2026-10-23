@@ -83,9 +83,12 @@ export default Plugin.define({
       editor.add({
         name: "send",
         description:
-          "Send a follow-up to your worker. Reuse key for an identical retry. A separate completion notice names this message and its native outcome; inspect the evidence before accepting it. The original report remains unchanged.",
+          "Send a follow-up to your worker. Reuse key for an identical retry. A separate completion notice names this message and its native outcome; inspect the evidence before accepting it. The original report remains unchanged. Sending also redelivers follow-ups that threads_interrupt held, in their original order. resumedFollowups lists those redelivered; failedFollowups lists each one that failed, with its error, and recovery retries it.",
         input: Send,
-        output: z.object({ workerID: z.string(), messageID: z.string() }),
+        output: z.object({
+          workerID: z.string(), messageID: z.string(), resumedFollowups: z.array(z.string()).optional(),
+          failedFollowups: z.array(z.object({ messageID: z.string(), error: z.string() })).optional(),
+        }),
         options: { namespace: "threads", codemode: false },
         execute: async (input, tool) => {
           const output = await workers.send(tool.sessionID, input);
@@ -94,9 +97,9 @@ export default Plugin.define({
       });
       editor.add({
         name: "interrupt",
-        description: "Interrupt your worker without claiming task success.",
+        description: "Interrupt your worker without claiming task success. Follow-ups that have not started are held, not run, and listed in heldFollowups. Your next threads_send to this worker resumes them.",
         input: WorkerTarget,
-        output: WorkerView,
+        output: WorkerView.extend({ heldFollowups: z.array(z.string()) }),
         options: { namespace: "threads", codemode: true },
         execute: async (input, tool) => {
           const output = await workers.interrupt(tool.sessionID, input);

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- `threads_interrupt` now stops follow-ups queued behind the interrupted run. Before, the coordinator's next model turn or `threads_list` woke the worker again, and it ran the queued follow-up. Follow-ups that haven't started are held, and the result lists them in a new `heldFollowups` field. Your next `threads_send` to that worker resumes them in their original order and lists them in a new optional `resumedFollowups` field. Any whose redelivery fails are listed instead in a new optional `failedFollowups` field with their errors, and recovery retries them. OpenCode 2.1 doesn't let plugins remove a queued message, so a held follow-up also runs if something else wakes the worker, such as a message typed in its tab; it still gets its completion notice. See [interrupting and held follow-ups](docs/reference.md#interrupting-and-held-follow-ups).
+- Follow-up recovery no longer wakes a worker for a follow-up whose wake was already delivered, so an interrupt from the worker's own tab also stays in effect. Follow-up records gain the `woken` and `held` states; earlier Threads versions can't read them and report them as recovery failures.
+- `scripts/verify-interrupt-followups.py` reproduces both cases against an isolated OpenCode server.
+
 ## 0.3.3 — 2026-10-22
 
 Requires OpenCode 2.1 or later. OpenCode 2.0 releases are no longer supported; use Threads 0.3.2 with OpenCode 2.0.28.
