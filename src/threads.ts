@@ -912,26 +912,33 @@ export function threads(
         if (stored === undefined) await ctx.storage.set(key, entry);
         const workflow = session.metadata?.opWorkflow !== undefined;
         // Any wake promotes the held input queued ahead of this message, so an explicit send
-        // resumes all of it. Failures stay pending for the next recovery pass.
+        // resumes all of it. A failed redelivery is reported and stays pending for recovery.
         const resumed: string[] = [];
+        const failed: { messageID: string; error: string }[] = [];
         if (entry.state !== "notified") {
           for (const other of await workerFollowups(input.workerID)) {
-            if (other.state !== "held") continue;
-            resumed.push(other.messageID);
-            if (other.messageID === id) continue;
+            if (other.state !== "held" || other.messageID === id) continue;
             const prepared = { ...other, state: "prepared" as const };
-            await storeFollowup(prepared);
-            await deliverFollowup(prepared, workflow, true).catch(() => {});
+            try {
+              await storeFollowup(prepared);
+              await deliverFollowup(prepared, workflow, true);
+              resumed.push(other.messageID);
+            } catch (error) {
+              failed.push({ messageID: other.messageID, error: (error instanceof Error ? error.message : "Redelivery rejected").slice(0, 240) });
+            }
           }
           await ctx.storage.set(pendingKey(entry), entry);
           await deliverFollowup(entry, workflow);
+          if (entry.state === "held") resumed.push(id);
         }
         if ((await ctx.storage.get(reportKey(link))) !== undefined) {
           await ctx.storage.set(visibilityKey(link), false);
         } else {
           await ctx.storage.remove(visibilityKey(link));
         }
-        return { workerID: input.workerID, messageID: id, ...(resumed.length ? { resumedFollowups: resumed.sort() } : {}) };
+        return { workerID: input.workerID, messageID: id,
+          ...(resumed.length ? { resumedFollowups: resumed.sort() } : {}),
+          ...(failed.length ? { failedFollowups: failed.sort((a, b) => a.messageID.localeCompare(b.messageID)) } : {}) };
       });
     },
     // Holding first, under the follow-up lock, keeps a concurrent send or recovery pass from
