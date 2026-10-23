@@ -59,8 +59,20 @@ function harness() {
   let rejectAdmission = false;
   let rejectWake = false;
   let beforeWake = () => {};
+  let beforeInterrupt = () => {};
   let finish = () => {};
   let waiting = Promise.resolve();
+  // Native inbox model: admitted worker input waits here until a wake reaches an idle worker.
+  // A wake during a busy turn only rings the doorbell, and an interrupt clears that doorbell.
+  const queue: string[] = [];
+  let busy = false;
+  let doorbell = false;
+  let interrupts = 0;
+  const promote = () => {
+    for (const id of queue.splice(0)) {
+      if (!messages.some(message => message.id === id)) messages.push({ id, type: "synthetic", text: admitted.get(id)!.payload.text, time: { created: Date.now() } });
+    }
+  };
   const session = {
     async get({ sessionID }: { sessionID: string }) {
       return { id: sessionID, location: { directory: process.cwd() }, metadata: sessionID === workerID ? {
@@ -79,16 +91,31 @@ function harness() {
       const result = prior ?? { id, sessionID: input.sessionID, type: "synthetic" as const,
         payload: { text: input.text, metadata: input.metadata }, delivery: input.delivery ?? "steer", time: { created: Date.now() } };
       admitted.set(id, result);
+      if (input.sessionID === workerID && !messages.some(message => message.id === id) && !queue.includes(id)) queue.push(id);
       if (input.sessionID === ownerID && input.resume !== false && !ownerMessages.some(message => message.id === id)) {
         notices.push(input);
         ownerMessages.push({ id, type: "synthetic", text: input.text, time: { created: Date.now() } });
       }
       if (input.sessionID === workerID && input.resume !== false) {
         wakes++;
-        waiting = new Promise<void>(resolve => { finish = resolve; });
-        if (!messages.some(message => message.id === id)) messages.push({ id, type: "synthetic", text: input.text, time: { created: Date.now() } });
+        if (busy) doorbell = true;
+        else {
+          waiting = new Promise<void>(resolve => { finish = resolve; });
+          promote();
+        }
       }
       return result;
+    },
+    async interrupt({ sessionID }: { sessionID: string; resume?: boolean }) {
+      if (sessionID !== workerID) return { interrupted: false };
+      interrupts++;
+      beforeInterrupt();
+      if (!busy) return { interrupted: false };
+      busy = false;
+      doorbell = false;
+      messages.push({ id: SessionMessage.ID.create(), type: "idle", outcome: "interrupted", time: { created: Date.now() } });
+      finish();
+      return { interrupted: true };
     },
   };
   // Only the API methods exercised by send/list are implemented at this test boundary.
@@ -100,9 +127,18 @@ function harness() {
     rejectWake: () => { rejectWake = true; },
     allowWake: () => { rejectWake = false; },
     beforeWake: (callback: () => void) => { beforeWake = callback; },
+    beforeInterrupt: (callback: () => void) => { beforeInterrupt = callback; },
+    interrupts: () => interrupts,
+    queued: () => [...queue],
+    doorbell: () => doorbell,
+    // Starts a native turn that later admissions wait behind.
+    busy() { busy = true; waiting = new Promise<void>(resolve => { finish = resolve; }); },
+    // The busy turn reaches its idle boundary and promotes the next queued input.
+    promoteQueued() { busy = false; doorbell = false; promote(); },
     failNextState: (state: string, sticky = false) => { failState = state; stickyFailure = sticky; },
     allowWrites: () => { failState = undefined; },
     complete(outcome: "succeeded" | "failed" | "interrupted" = "succeeded") {
+      busy = false;
       messages.push({ id: SessionMessage.ID.create(), type: "idle", outcome, time: { created: Date.now() } }); finish();
     },
   };
@@ -489,4 +525,132 @@ test("registered owner context also isolates cursor-read and cursor-write storag
     } });
     expect(JSON.stringify((await context(h.ownerID)).system)).toContain(`cursor ${operation} unavailable`);
   }
+});
+
+const pendingKeys = (h: ReturnType<typeof harness>) => [...h.values.keys()].filter(key => key.startsWith("followup-pending/"));
+const settleWatchers = async (h: ReturnType<typeof harness>) => {
+  await h.ctx.session.wait({ sessionID: h.workerID });
+  await serialized(`followup/${h.workerID}`, async () => {});
+};
+
+test("interrupt holds a follow-up queued behind the running turn and no later pass wakes it", async () => {
+  const h = harness();
+  h.busy();
+  const queued = await h.api.send(h.ownerID, { workerID: h.workerID, key: "queued", text: "Queued behind the run" });
+  expect(h.queued()).toEqual([queued.messageID]);
+  expect(h.doorbell()).toBe(true);
+  const wakes = h.wakes();
+  const stopped = await h.api.interrupt(h.ownerID, { workerID: h.workerID });
+  expect(stopped.heldFollowups).toEqual([queued.messageID]);
+  expect(h.interrupts()).toBe(1);
+  expect(h.doorbell()).toBe(false);
+  const context = await ownerContextHook(h.ctx);
+  await context(h.ownerID);
+  await h.api.list(h.ownerID);
+  await h.reopen().list(h.ownerID);
+  await context(h.ownerID);
+  expect(h.wakes()).toBe(wakes);
+  expect(h.messages.some(message => message.id === queued.messageID)).toBe(false);
+  expect(h.queued()).toEqual([queued.messageID]);
+  expect(h.notices).toHaveLength(0);
+  expect(pendingKeys(h)).toHaveLength(1);
+});
+
+test("a native interrupt is not undone by recovery of a woken follow-up", async () => {
+  const h = harness();
+  h.busy();
+  const queued = await h.api.send(h.ownerID, { workerID: h.workerID, key: "native", text: "Queued before a native stop" });
+  const wakes = h.wakes();
+  await h.ctx.session.interrupt({ sessionID: h.workerID, resume: false });
+  await (await ownerContextHook(h.ctx))(h.ownerID);
+  await h.reopen().list(h.ownerID);
+  expect(h.wakes()).toBe(wakes);
+  expect(h.queued()).toEqual([queued.messageID]);
+  expect(h.notices).toHaveLength(0);
+});
+
+test("a later explicit send resumes held follow-ups and reports them", async () => {
+  const h = harness();
+  h.busy();
+  const held = await h.api.send(h.ownerID, { workerID: h.workerID, key: "held", text: "Held work" });
+  expect((await h.api.interrupt(h.ownerID, { workerID: h.workerID })).heldFollowups).toEqual([held.messageID]);
+  const next = await h.reopen().send(h.ownerID, { workerID: h.workerID, key: "next", text: "Resume now" });
+  expect(next.resumedFollowups).toEqual([held.messageID]);
+  expect(h.messages.filter(message => message.type === "synthetic").map(message => message.id)).toEqual([held.messageID, next.messageID]);
+  h.complete();
+  await settleWatchers(h);
+  await h.reopen().list(h.ownerID);
+  expect(h.notices.map(notice => (notice.metadata as { opThreadsFollowup: { messageID: string } }).opThreadsFollowup.messageID).sort())
+    .toEqual([held.messageID, next.messageID].sort());
+  expect(pendingKeys(h)).toHaveLength(0);
+});
+
+test("an identical retry of a held key resumes it", async () => {
+  const h = harness();
+  h.busy();
+  const input = { workerID: h.workerID, key: "retry-held", text: "Held then retried" };
+  const held = await h.api.send(h.ownerID, input);
+  await h.api.interrupt(h.ownerID, { workerID: h.workerID });
+  const retried = await h.reopen().send(h.ownerID, input);
+  expect(retried).toEqual({ ...held, resumedFollowups: [held.messageID] });
+  expect(h.messages.some(message => message.id === held.messageID)).toBe(true);
+  h.complete();
+  await settleWatchers(h);
+  expect(h.notices).toHaveLength(1);
+});
+
+test("a follow-up already running is interrupted and notified, not held", async () => {
+  const h = harness();
+  const running = await h.api.send(h.ownerID, { workerID: h.workerID, key: "running", text: "Running now" });
+  h.busy();
+  const stopped = await h.api.interrupt(h.ownerID, { workerID: h.workerID });
+  expect(stopped.heldFollowups).toEqual([]);
+  await settleWatchers(h);
+  await h.reopen().list(h.ownerID);
+  expect(h.notices).toHaveLength(1);
+  expect(h.notices[0]?.text).toContain(running.messageID);
+  expect(h.notices[0]?.text).toContain("interrupted");
+});
+
+test("a follow-up promoted between the hold and the interrupt is tracked as interrupted, not held", async () => {
+  const h = harness();
+  h.busy();
+  const raced = await h.api.send(h.ownerID, { workerID: h.workerID, key: "raced", text: "Promoted during the stop" });
+  h.beforeInterrupt(() => { h.promoteQueued(); h.busy(); });
+  const stopped = await h.api.interrupt(h.ownerID, { workerID: h.workerID });
+  expect(stopped.heldFollowups).toEqual([]);
+  await settleWatchers(h);
+  await h.reopen().list(h.ownerID);
+  expect(h.notices).toHaveLength(1);
+  expect(h.notices[0]?.text).toContain(raced.messageID);
+  expect(h.notices[0]?.text).toContain("interrupted");
+});
+
+test("an unadmitted follow-up is held too, and only an explicit send admits it", async () => {
+  const h = harness();
+  h.reject();
+  await expect(h.api.send(h.ownerID, { workerID: h.workerID, key: "unadmitted", text: "Never admitted" })).rejects.toThrow("admission rejected");
+  h.allow();
+  const stopped = await h.api.interrupt(h.ownerID, { workerID: h.workerID });
+  expect(stopped.heldFollowups).toHaveLength(1);
+  await (await ownerContextHook(h.ctx))(h.ownerID);
+  await h.reopen().list(h.ownerID);
+  expect(h.admitted.size).toBe(0);
+  expect(h.wakes()).toBe(0);
+  const next = await h.reopen().send(h.ownerID, { workerID: h.workerID, key: "after", text: "Explicit send" });
+  expect(next.resumedFollowups).toEqual(stopped.heldFollowups);
+  expect(h.admitted.size).toBe(2);
+});
+
+test("a held follow-up that another wake promotes is still notified", async () => {
+  const h = harness();
+  h.busy();
+  const held = await h.api.send(h.ownerID, { workerID: h.workerID, key: "elsewhere", text: "Promoted by the worker tab" });
+  await h.api.interrupt(h.ownerID, { workerID: h.workerID });
+  h.promoteQueued();
+  h.complete();
+  await h.reopen().list(h.ownerID);
+  expect(h.notices).toHaveLength(1);
+  expect(h.notices[0]?.text).toContain(held.messageID);
+  expect(pendingKeys(h)).toHaveLength(0);
 });
