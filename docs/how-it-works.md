@@ -2,6 +2,16 @@
 
 This page explains the design behind Threads and what it doesn't support. You don't need it to use Threads. The current rules are in [Work with workers](workers.md) for workers, and in the [workflow runtime contract](../skills/workflow-authoring/references/runtime.md) and [Configuration](configuration.md) for workflows. [Verification history](verification-history.md) records what earlier releases measured.
 
+## Workers, workflows, and subagents
+
+OpenCode's built-in subagents suit a quick lookup or a small review whose answer comes straight back to the caller. Threads workers suit work that needs a separate conversation you can open, read, and follow up on. Each worker can use its own folder or worktree, agent profile, and model.
+
+A worker reports a verdict with evidence. Finishing a run is not the same as passing: a worker that stops without a report has no verdict. Reports arrive in the conversation that started the worker, without polling.
+
+Workflows coordinate agents that run in parallel or depend on earlier results. A workflow keeps a journal, so a resumed run can reuse completed steps instead of repeating them.
+
+Workers can use OpenCode's built-in subagents, but they cannot start Threads workers of their own. This keeps ownership one level deep.
+
 ## One package, two plugins
 
 OpenCode V2 runs plugins in two places, so Threads ships two entry points from one package.

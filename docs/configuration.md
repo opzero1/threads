@@ -7,6 +7,12 @@ Threads has two parts, and each has its own config entry:
 
 Both entries use the same package, `@op1/threads`.
 
+## Compatibility
+
+Threads 0.3.4 needs OpenCode 2.1 or later. Use Threads 0.3.2 with OpenCode 2.0.28, or Threads 0.2.8 with OpenCode 2.0.26 or earlier.
+
+The optional heartbeat runner currently accepts OpenCode 2.1.0, 2.1.1, and 2.1.2. See [Workflow heartbeats](heartbeat.md).
+
 ## Server plugin
 
 The smallest entry is the package name:
@@ -79,7 +85,7 @@ The terminal plugin takes no options. Server options don't reach it.
 
 ## Pin a version
 
-Add the version to the package name in both files, for example `@op1/threads@0.3.2`.
+Add the version to the package name in both files, for example `@op1/threads@0.3.4`.
 
 ## Use a local checkout
 
