@@ -672,3 +672,28 @@ test("a malformed follow-up record does not block an interrupt", async () => {
   expect((await h.api.interrupt(h.ownerID, { workerID: h.workerID })).heldFollowups).toEqual([queued.messageID]);
   expect(h.values.get(`followups/${h.workerID}/malformed`)).toEqual({ bad: true });
 });
+
+test("send reports only held follow-ups it redelivered and names each failure", async () => {
+  for (const failure of ["admission", "wake"] as const) {
+    const h = harness();
+    h.reject();
+    await expect(h.api.send(h.ownerID, { workerID: h.workerID, key: "held", text: "Held work" })).rejects.toThrow("admission rejected");
+    h.allow();
+    const [held] = (await h.api.interrupt(h.ownerID, { workerID: h.workerID })).heldFollowups;
+    let calls = 0;
+    // Fail only the held follow-up's delivery; the new send's own delivery succeeds.
+    const flaky = threads({ ...h.ctx, session: { ...h.ctx.session, async synthetic(input: Parameters<Plugin.Context["session"]["synthetic"]>[0]) {
+      if (input.id === held && (failure === "admission" || input.resume !== false) && calls++ === 0) throw new Error(`${failure} unavailable ${"x".repeat(500)}`);
+      return h.ctx.session.synthetic(input);
+    } } as Plugin.Context["session"] });
+    const next = await flaky.send(h.ownerID, { workerID: h.workerID, key: `after-${failure}`, text: "Explicit send" });
+    expect(next.resumedFollowups).toBeUndefined();
+    expect(next.failedFollowups).toHaveLength(1);
+    expect(next.failedFollowups![0]!.messageID).toBe(held!);
+    expect(next.failedFollowups![0]!.error).toContain(`${failure} unavailable`);
+    expect(next.failedFollowups![0]!.error.length).toBeLessThanOrEqual(240);
+    expect([...h.values.keys()]).toContain(`followup-pending/${h.ownerID}/${held}`);
+    await h.reopen().list(h.ownerID);
+    expect(h.messages.some(message => message.id === held)).toBe(true);
+  }
+});
