@@ -8,7 +8,7 @@ Requires OpenCode 2.1 or later.
 - Interrupt results list held messages in `heldFollowups`. Send results list resumed messages in `resumedFollowups` and redelivery errors in `failedFollowups`; recovery retries failed deliveries. OpenCode 2.1 cannot remove queued messages, so a message typed in the worker's tab can also wake it and run held follow-ups. See [interrupting and held follow-ups](docs/reference.md#interrupting-and-held-follow-ups).
 - Follow-up records add `woken` and `held` states. Earlier Threads versions cannot read these states and report recovery failures if you downgrade.
 - Add isolated-server checks for both interrupt paths. The package UI check now waits for dismiss and restore changes before checking the list.
-- Rewrite the README around installation and a first worker, with absolute documentation links and badges for npm. Move compatibility details and the subagent comparison into `docs/`.
+- Rewrite the README around installation and a first worker, with absolute documentation links and badges for npm. Move compatibility details and the subagent comparison into `docs/`. Correct the installation instructions: OpenCode loads the terminal UI from the server plugin automatically, without a second `cli.json` entry.
 
 ## 0.3.3 — 2026-10-22
 

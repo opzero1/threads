@@ -5,7 +5,7 @@ This page is for working on Threads itself: setting up a checkout, running the c
 ## Set up
 
 1. Clone the repository and run `bun install`.
-2. Point both plugin entries at the clone's absolute path. See [use a local checkout](configuration.md#use-a-local-checkout).
+2. Point the server plugin entry at the clone's absolute path. Update any explicit terminal entry too. See [use a local checkout](configuration.md#use-a-local-checkout).
 3. Restart OpenCode.
 
 A local checkout loads `tui.ts` directly. The npm package ships a compiled `tui.js` instead.

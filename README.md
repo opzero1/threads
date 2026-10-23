@@ -16,17 +16,9 @@ Threads **0.3.4 needs OpenCode 2.1 or later**. For older versions, see [compatib
    opencode plugin add @op1/threads
    ```
 
-2. Add the terminal plugin to `~/.config/opencode/cli.json`. Keep any other entries in `plugins`:
+2. Restart OpenCode.
 
-   ```json
-   {
-     "plugins": [{ "package": "@op1/threads" }]
-   }
-   ```
-
-3. Restart OpenCode.
-
-Both plugin entries are needed. The command in step 1 does not add the terminal plugin. See [configuration](https://github.com/opzero1/threads/blob/main/docs/configuration.md) for version pinning, limits, and the optional agent skill.
+OpenCode loads the terminal UI from the server plugin automatically. You do not need a second entry in `cli.json`. See [configuration](https://github.com/opzero1/threads/blob/main/docs/configuration.md) for version pinning, limits, and the optional agent skill.
 
 ## Start your first worker
 
