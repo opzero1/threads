@@ -2,6 +2,16 @@
 
 This page explains the design behind Threads and what it doesn't support. You don't need it to use Threads. The current rules are in [Work with workers](workers.md) for workers, and in the [workflow runtime contract](../skills/workflow-authoring/references/runtime.md) and [Configuration](configuration.md) for workflows. [Verification history](verification-history.md) records what earlier releases measured.
 
+## Workers, workflows, and subagents
+
+OpenCode's built-in subagents suit a quick lookup or a small review whose answer comes straight back to the caller. Threads workers suit work that needs a separate conversation you can open, read, and follow up on. Each worker can use its own folder or worktree, agent profile, and model.
+
+A worker reports a verdict with evidence. Finishing a run is not the same as passing: a worker that stops without a report has no verdict. Reports arrive in the conversation that started the worker, without polling.
+
+Workflows coordinate agents that run in parallel or depend on earlier results. A workflow keeps a journal, so a resumed run can reuse completed steps instead of repeating them.
+
+Workers can use OpenCode's built-in subagents, but they cannot start Threads workers of their own. This keeps ownership one level deep.
+
 ## One package, two plugins
 
 OpenCode V2 runs plugins in two places, so Threads ships two entry points from one package.
@@ -50,7 +60,9 @@ OpenCode itself still refreshes catalogs for any Location that starts while a te
 
 Creating a session and indexing it are two separate writes, and so are admitting a report and saving its view. A crash between them leaves the first write in place, so repeating the identical request finishes the second without duplicating the first.
 
-Each `threads_send` key has a durable record that moves from prepared to accepted, completed, and notified, and a pending record until it is notified. Recovery reuses the recorded message IDs, so a retried delivery can't duplicate the message or its completion notice. Startup itself replays nothing: it never sends a first prompt or a report again. See [after a crash or restart](workers.md#after-a-crash-or-restart) for what to do.
+Each `threads_send` key has a durable record and a pending record until its completion notice is delivered. A follow-up moves from `prepared` to `accepted` when admitted, then to `woken` when its wake is delivered. An interrupt marks follow-ups that have not started as `held`. Recovery does not wake `woken` or `held` messages; an explicit send can resume them. Completed messages move through `completed` and `notified`. See [interrupting and held follow-ups](reference.md#interrupting-and-held-follow-ups) for the native-queue limitation.
+
+Recovery reuses the recorded message IDs, so a retried delivery can't duplicate the message or its completion notice. Startup itself replays nothing: it never sends a first prompt or a report again. See [after a crash or restart](workers.md#after-a-crash-or-restart) for what to do.
 
 Workflows have their own journal and recovery rules. See [Start and control](../skills/workflow-authoring/references/runtime.md#start-and-control).
 

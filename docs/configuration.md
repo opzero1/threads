@@ -1,11 +1,17 @@
 # Configuration
 
-Threads has two parts, and each has its own config entry:
+Threads has two parts:
 
 - The **server plugin** runs workers and workflows. It lives in `~/.config/opencode/opencode.json` or `opencode.jsonc`.
-- The **terminal plugin** draws the footer indicator, the Threads list, the workflow panel, and the sidebar's Workflows section. It lives in `~/.config/opencode/cli.json`.
+- The **terminal plugin** draws the footer indicator, the Threads list, the workflow panel, and the sidebar's Workflows section. OpenCode loads it automatically from the server's plugin list.
 
-Both entries use the same package, `@op1/threads`.
+Add `@op1/threads` to the server configuration. You do not need a second entry in `~/.config/opencode/cli.json`.
+
+## Compatibility
+
+Threads 0.3.4 needs OpenCode 2.1 or later. Use Threads 0.3.2 with OpenCode 2.0.28, or Threads 0.2.8 with OpenCode 2.0.26 or earlier.
+
+The optional heartbeat runner currently accepts OpenCode 2.1.0, 2.1.1, and 2.1.2. See [Workflow heartbeats](heartbeat.md).
 
 ## Server plugin
 
@@ -69,6 +75,8 @@ An agent with no matching rule gets OpenCode's default, `ask`. OpenCode's defaul
 
 ## Terminal plugin
 
+OpenCode loads Threads' terminal entry point from the server plugin automatically, including when the server is remote. An explicit local entry in `~/.config/opencode/cli.json` is supported but not required:
+
 ```json
 {
   "plugins": [{ "package": "@op1/threads" }]
@@ -77,14 +85,16 @@ An agent with no matching rule gets OpenCode's default, `ask`. OpenCode's defaul
 
 The terminal plugin takes no options. Server options don't reach it.
 
+See [OpenCode's CLI plugin guide](https://opencode.ai/v2/docs/cli/plugins) for terminal-only plugins and disabling a terminal plugin.
+
 ## Pin a version
 
-Add the version to the package name in both files, for example `@op1/threads@0.3.2`.
+Add the version to the server plugin's package name, for example `@op1/threads@0.3.4`. If you also have an explicit `cli.json` entry, keep it on the same version.
 
 ## Use a local checkout
 
 1. Clone the repository and run `bun install`.
-2. In both files, replace `@op1/threads` with the absolute path of the clone.
+2. In the server configuration, replace `@op1/threads` with the absolute path of the clone. If you also have an explicit `cli.json` entry, update that entry too.
 3. Restart OpenCode.
 
 Local and published installs share the plugin ID `op-threads`, so switching between them keeps your worker records.
