@@ -70,6 +70,22 @@ def close_list():
     terminal.wait_for_match(lambda text: header not in text, "closed Threads list", 10, False)
 
 
+def reopen_until(text, timeout=20):
+    """Open the list until it shows `text`. Dismiss and Restore save the TUI store with a locked,
+    asynchronous file write, and an open list keeps the rows it opened with, so a list opened
+    before that write lands shows the earlier state until it is reopened."""
+    deadline = time.monotonic() + timeout
+    while True:
+        open_list()
+        try:
+            terminal.wait_for(text, timeout=min(2, max(0.1, deadline - time.monotonic())))
+            return
+        except TimeoutError:
+            if time.monotonic() >= deadline:
+                raise
+            close_list()
+
+
 def option(name, text):
     # A native menu option is a padded word of its own, unlike "Open" in other text.
     return re.search(rf"(?m)(?:^|\s{{2,}}){name}(?:\s{{2,}}|$)", text)
@@ -149,11 +165,9 @@ try:
     open_list()
     terminal.wait_for(worker_row)
     choose("Packaged footer worker", main_row, "Dismiss")
-    open_list()
-    terminal.wait_for("Packaged footer worker Closed · FAIL")
+    reopen_until("Packaged footer worker Closed · FAIL")
     choose("Packaged footer worker", main_row, "Restore")
-    open_list()
-    terminal.wait_for(worker_row)
+    reopen_until(worker_row)
     passed("a row's menu in the compiled list dismisses and restores the worker")
     choose("Packaged footer worker", main_row, "Open")
     terminal.wait_for_match(lambda _: "Packaged footer worker" in left() and header not in screen(), "focused worker tab", 20, False)
