@@ -109,7 +109,7 @@ When the follow-up finishes, inspect its completion notice and the worker's evid
 
 Agents call these tools, and `threads_list`, through [Code Mode](reference.md#native-and-code-mode-tools).
 
-- `threads_interrupt` stops the worker's current run. The conversation stays.
+- `threads_interrupt` stops the worker's current run. The conversation stays. Follow-ups that haven't started yet are held instead of run, and the result lists them in `heldFollowups`. No later list or turn starts them. Your next `threads_send` to that worker resumes them first, in their original order, and lists them in `resumedFollowups`.
 - `threads_hide` removes the worker from the list and closes its tab. It keeps the conversation and the report. Hiding doesn't stop the worker and doesn't free its slot.
 
 Workers that report `PASS` or `PASS WITH NOTES` hide by themselves once they are idle. Workers that report `FAIL` or `INCONCLUSIVE`, or that stop without a report, stay under **Finished** so you notice them.
@@ -128,7 +128,7 @@ A report is the worker's claim. Check its evidence before you accept the work. A
 
 Threads doesn't start or resume work at startup. Ask the agent to check existing workers with `threads_list` before it starts new ones. An idle worker isn't a reason to start its task again.
 
-If a crash interrupted `threads_spawn`, `threads_send`, or `threads_report`, repeat the identical call. Threads finds the worker, message, or report that the first call recorded instead of creating another. Undelivered follow-ups are sent again when the agent lists workers or starts its next turn.
+If a crash interrupted `threads_spawn`, `threads_send`, or `threads_report`, repeat the identical call. Threads finds the worker, message, or report that the first call recorded instead of creating another. Follow-ups that never reached the worker are sent again when the agent lists workers or starts its next turn. Threads doesn't wake a worker again for a follow-up it already delivered or held, so a stopped worker stays stopped.
 
 ## Let workers use subagents
 

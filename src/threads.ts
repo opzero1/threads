@@ -214,10 +214,14 @@ export function threads(
     notificationID: messageID, text: z.string(),
   }).strict();
   const Completion = z.object({ outcome: z.enum(["succeeded", "failed", "interrupted"]), idleMessageID: messageID }).strict();
+  // `accepted`: admitted, wake unconfirmed, so recovery wakes it. `woken`: the wake was delivered,
+  // and only an explicit send wakes it again. `held`: an interrupt stopped it before it ran, and
+  // recovery neither admits nor wakes it.
   const Followup = z.discriminatedUnion("state", [
-    FollowupBase.extend({ state: z.enum(["prepared", "accepted"]) }),
+    FollowupBase.extend({ state: z.enum(["prepared", "accepted", "woken", "held"]) }),
     FollowupBase.extend({ state: z.enum(["completed", "notified"]), completion: Completion }),
   ]);
+  type Followup = z.infer<typeof Followup>;
   const followupKey = (workerID: string, id: string) => `followups/${workerID}/${id}`;
   const pendingKey = (entry: z.infer<typeof Followup>) => `followup-pending/${entry.coordinatorID}/${entry.messageID}`;
   const watching = new Set<string>();
@@ -268,6 +272,9 @@ export function threads(
   async function deliverFollowup(entry: z.infer<typeof Followup>, workflow: boolean, recovery = false) {
     if (entry.state === "notified") return;
     if (entry.state === "completed") return finishFollowup(entry);
+    // OpenCode keeps queued input parked after an interrupt and promotes it on any later wake, so
+    // a background pass must not wake input whose wake was already delivered or held.
+    if (recovery && (entry.state === "woken" || entry.state === "held")) return finishFollowup(entry);
     // Admission without wake validates native conflicts before any execution grant exists.
     const clearRejected = async () => {
       if (recovery) return;
@@ -301,8 +308,66 @@ export function threads(
         throw error;
       }
     }
+    entry = { ...entry, state: "woken" };
+    await ctx.storage.set(followupKey(entry.workerID, entry.messageID), entry);
     await finishFollowup(entry);
     watchFollowup(entry);
+  }
+
+  async function workerFollowups(workerID: string) {
+    const entries: Followup[] = [];
+    let after: string | undefined;
+    do {
+      const page = await ctx.storage.scan({ prefix: `followups/${workerID}/`, after, limit: 100 });
+      // A malformed record stays for recovery diagnostics and must not block a stop or send.
+      for (const item of page.entries) {
+        const entry = Followup.safeParse(item.value);
+        if (entry.success && entry.data.workerID === workerID) entries.push(entry.data);
+      }
+      after = page.next;
+    } while (after);
+    return entries;
+  }
+
+  async function promoted(workerID: Session.ID) {
+    const messages = await ctx.session.context({ sessionID: workerID });
+    return new Set(messages.filter(message => message.type === "synthetic").map(message => message.id as string));
+  }
+
+  async function storeFollowup(entry: Followup) {
+    await ctx.storage.set(followupKey(entry.workerID, entry.messageID), entry);
+    await ctx.storage.set(pendingKey(entry), entry);
+  }
+
+  // Plugins cannot cancel a native inbox item, so every follow-up that has not started is held in
+  // Threads storage. Native queue order still applies when a later wake promotes it.
+  async function holdFollowups(workerID: Session.ID) {
+    const started = await promoted(workerID);
+    const held: Followup[] = [];
+    for (const entry of await workerFollowups(workerID)) {
+      if (entry.state === "completed" || entry.state === "notified" || started.has(entry.messageID)) continue;
+      const next = { ...entry, state: "held" as const };
+      if (entry.state !== "held") await storeFollowup(next);
+      held.push(next);
+    }
+    return held;
+  }
+
+  // A run can promote held input before the interrupt lands; that input ran and was interrupted.
+  async function releasePromoted(held: Followup[]) {
+    if (held.length === 0) return [];
+    const started = await promoted(held[0]!.workerID);
+    const remaining: string[] = [];
+    for (const entry of held) {
+      if (!started.has(entry.messageID)) {
+        remaining.push(entry.messageID);
+        continue;
+      }
+      const woken = { ...entry, state: "woken" as const };
+      await storeFollowup(woken);
+      watchFollowup(woken);
+    }
+    return remaining.sort();
   }
 
   async function reconcileFollowups(coordinatorID: string) {
@@ -845,25 +910,54 @@ export function threads(
           throw new Error("This send key already belongs to different text");
         }
         if (stored === undefined) await ctx.storage.set(key, entry);
+        const workflow = session.metadata?.opWorkflow !== undefined;
+        // Any wake promotes the held input queued ahead of this message, so an explicit send
+        // resumes all of it. Failures stay pending for the next recovery pass.
+        const resumed: string[] = [];
         if (entry.state !== "notified") {
+          for (const other of await workerFollowups(input.workerID)) {
+            if (other.state !== "held") continue;
+            resumed.push(other.messageID);
+            if (other.messageID === id) continue;
+            const prepared = { ...other, state: "prepared" as const };
+            await storeFollowup(prepared);
+            await deliverFollowup(prepared, workflow, true).catch(() => {});
+          }
           await ctx.storage.set(pendingKey(entry), entry);
-          await deliverFollowup(entry, session.metadata?.opWorkflow !== undefined);
+          await deliverFollowup(entry, workflow);
         }
         if ((await ctx.storage.get(reportKey(link))) !== undefined) {
           await ctx.storage.set(visibilityKey(link), false);
         } else {
           await ctx.storage.remove(visibilityKey(link));
         }
-        return { workerID: input.workerID, messageID: id };
+        return { workerID: input.workerID, messageID: id, ...(resumed.length ? { resumedFollowups: resumed.sort() } : {}) };
       });
     },
+    // Holding first, under the follow-up lock, keeps a concurrent send or recovery pass from
+    // waking held input after the interrupt clears the native doorbell. The stop happens even
+    // when holding fails.
     async interrupt(actor: string, input: z.infer<typeof WorkerTarget>) {
-      await owned(actor, input.workerID);
-      await ctx.session.interrupt({
-        sessionID: input.workerID,
-        resume: false,
+      return serialized(`followup/${input.workerID}`, async () => {
+        await owned(actor, input.workerID);
+        let held: Followup[] = [];
+        let failure: unknown;
+        try {
+          held = await holdFollowups(input.workerID);
+        } catch (error) {
+          failure = error;
+        }
+        await ctx.session.interrupt({
+          sessionID: input.workerID,
+          resume: false,
+        });
+        if (failure !== undefined) {
+          throw new Error(`The worker was interrupted, but its pending follow-ups could not be held, so recovery may still deliver them. Retry threads_interrupt. Cause: ${
+            failure instanceof Error ? failure.message.slice(0, 240) : "storage or native context failure"}`);
+        }
+        const heldFollowups = await releasePromoted(held);
+        return { ...await view(await ctx.session.get({ sessionID: input.workerID })), heldFollowups };
       });
-      return view(await ctx.session.get({ sessionID: input.workerID }));
     },
     async report(actor: string, input: z.infer<typeof Report>) {
       const session = await ctx.session.get({ sessionID: actor });

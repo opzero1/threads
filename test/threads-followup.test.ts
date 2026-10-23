@@ -654,3 +654,21 @@ test("a held follow-up that another wake promotes is still notified", async () =
   expect(h.notices[0]?.text).toContain(held.messageID);
   expect(pendingKeys(h)).toHaveLength(0);
 });
+
+test("interrupt still stops the worker when follow-ups cannot be held, and says so", async () => {
+  const h = harness();
+  h.busy();
+  await h.api.send(h.ownerID, { workerID: h.workerID, key: "unholdable", text: "Storage fails" });
+  const broken = threads({ ...h.ctx, storage: { ...h.ctx.storage, scan: async () => { throw new Error("scan unavailable"); } } });
+  await expect(broken.interrupt(h.ownerID, { workerID: h.workerID })).rejects.toThrow("could not be held");
+  expect(h.interrupts()).toBe(1);
+});
+
+test("a malformed follow-up record does not block an interrupt", async () => {
+  const h = harness();
+  h.busy();
+  const queued = await h.api.send(h.ownerID, { workerID: h.workerID, key: "beside-malformed", text: "Valid" });
+  h.values.set(`followups/${h.workerID}/malformed`, { bad: true });
+  expect((await h.api.interrupt(h.ownerID, { workerID: h.workerID })).heldFollowups).toEqual([queued.messageID]);
+  expect(h.values.get(`followups/${h.workerID}/malformed`)).toEqual({ bad: true });
+});
