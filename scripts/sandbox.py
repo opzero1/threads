@@ -143,7 +143,7 @@ class Sandbox:
             (self.artifacts / "plugins.json").write_text(json.dumps(plugins, indent=2))
             return any(plugin["id"] == "op-threads" and plugin["state"]["status"] == "active"
                        for plugin in plugins["data"])
-        return eventually(active)
+        return eventually(active, timeout=180)
 
     def api(self, method, path, body=None, location=None):
         if location:
