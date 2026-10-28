@@ -384,22 +384,28 @@ export function threads(
     await ctx.storage.set(pendingKey(entry), entry);
   }
 
-  // Every follow-up that has not started is held in Threads storage. Native queue order still
-  // applies when a later wake promotes it, so a held follow-up loses its steering and redelivers
-  // as queued. Steering is returned for the caller to withdraw natively.
+  // Every follow-up that has not started is held in Threads storage. A held follow-up redelivers
+  // as queued, in native queue order, so steered input keeps its marker until the native inbox
+  // confirms it moved back to the queue; a later interrupt or send retries the move.
   async function holdFollowups(workerID: Session.ID) {
     const started = await promoted(workerID);
     const held: Followup[] = [];
-    const steered: string[] = [];
     for (const entry of await workerFollowups(workerID)) {
       if (entry.state === "completed" || entry.state === "notified" || entry.state === "dropped" || started.has(entry.messageID)) continue;
-      const { delivery, ...rest } = entry;
-      if (delivery === "steer") steered.push(entry.messageID);
-      const next = { ...rest, state: "held" as const };
-      if (entry.state !== "held" || delivery !== undefined) await storeFollowup(next);
+      const next = { ...entry, state: "held" as const };
+      if (entry.state !== "held") await storeFollowup(next);
       held.push(next);
     }
-    return { held, steered };
+    return held;
+  }
+
+  // A conflict means the input is no longer pending as steered, so it can't jump the queue.
+  async function requeue(entry: Followup): Promise<Followup> {
+    if (entry.delivery !== "steer") return entry;
+    await inbox.queue(entry.workerID, entry.messageID);
+    const { delivery: _, ...queued } = entry;
+    await storeFollowup(queued);
+    return queued;
   }
 
   // A run can promote held input before the interrupt lands; that input ran and was interrupted.
@@ -972,7 +978,7 @@ export function threads(
         );
         const key = followupKey(input.workerID, id);
         const stored = await ctx.storage.get(key);
-        const entry = Followup.parse(stored ?? {
+        let entry = Followup.parse(stored ?? {
           workerID: input.workerID, coordinatorID: actor, messageID: id,
           notificationID: SessionMessage.ID.make(`msg_${digest([input.workerID, id, "followup-completion"]).slice(0, 32)}`),
           text: input.text, state: "prepared", ...(input.delivery === "steer" ? { delivery: "steer" } : {}),
@@ -994,10 +1000,17 @@ export function threads(
         const resumed: string[] = [];
         const failed: { messageID: string; error: string }[] = [];
         let steerError: string | undefined;
+        // Held input redelivers queued. If the native move still fails, the wake below runs it
+        // steered anyway; threads_interrupt already reported that in failedRequeues.
+        const unsteer = async (held: Followup) => {
+          const { delivery: _, ...queued } = await requeue(held).catch(() => held);
+          return queued;
+        };
+        if (entry.state === "held") entry = await unsteer(entry);
         if (entry.state !== "notified") {
           for (const other of await workerFollowups(input.workerID)) {
             if (other.state !== "held" || other.messageID === id) continue;
-            const prepared = { ...other, state: "prepared" as const };
+            const prepared = { ...await unsteer(other), state: "prepared" as const };
             try {
               await storeFollowup(prepared);
               await deliverFollowup(prepared, workflow, true);
@@ -1031,18 +1044,21 @@ export function threads(
         let failure: unknown;
         const cancelled = new Set<string>();
         const failedDrops: { messageID: string; error: string }[] = [];
+        const failedRequeues: { messageID: string; error: string }[] = [];
         const reason = (error: unknown, fallback: string) => (error instanceof Error ? error.message : fallback).slice(0, 240);
         try {
-          const hold = await holdFollowups(input.workerID);
-          held = hold.held;
+          held = await holdFollowups(input.workerID);
           // Before the stop, so the running loop cannot take steered input at its next step.
-          if (input.dropHeld) {
-            for (const entry of held) {
+          for (const [index, entry] of held.entries()) {
+            if (input.dropHeld) {
               await inbox.cancel(input.workerID, entry.messageID).then(() => cancelled.add(entry.messageID),
                 (error: unknown) => failedDrops.push({ messageID: entry.messageID, error: reason(error, "Cancel rejected") }));
+            } else {
+              held[index] = await requeue(entry).catch((error: unknown) => {
+                failedRequeues.push({ messageID: entry.messageID, error: reason(error, "Requeue rejected") });
+                return entry;
+              });
             }
-          } else {
-            for (const messageID of hold.steered) await inbox.queue(input.workerID, messageID).catch(() => {});
           }
         } catch (error) {
           failure = error;
@@ -1058,7 +1074,8 @@ export function threads(
         const released = await releasePromoted(held, cancelled);
         return { ...await view(await ctx.session.get({ sessionID: input.workerID })), heldFollowups: released.held,
           ...(input.dropHeld ? { droppedFollowups: released.dropped } : {}),
-          ...(failedDrops.length ? { failedDrops: failedDrops.sort((a, b) => a.messageID.localeCompare(b.messageID)) } : {}) };
+          ...(failedDrops.length ? { failedDrops: failedDrops.sort((a, b) => a.messageID.localeCompare(b.messageID)) } : {}),
+          ...(failedRequeues.length ? { failedRequeues: failedRequeues.sort((a, b) => a.messageID.localeCompare(b.messageID)) } : {}) };
       });
     },
     async rules(actor: string, input: z.infer<typeof WorkerTarget>) {

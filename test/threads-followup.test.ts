@@ -160,6 +160,7 @@ function harness() {
     inboxCalls: () => [...inboxCalls], steers: () => [...steers],
     inboxDown: (down = true) => { inboxDown = down; },
     failInbox: (call: string) => { failInbox.add(call); },
+    allowInbox: (call: string) => { failInbox.delete(call); },
     // A busy turn reaches its next step boundary and takes steered input.
     step() {
       for (const id of steers.splice(0)) messages.push({ id, type: "synthetic", text: admitted.get(id)!.payload.text, time: { created: Date.now() } });
@@ -826,6 +827,38 @@ test("interrupt returns pending steered input to the queue and holds it until th
   expect(record.delivery).toBeUndefined();
   const next = await h.reopen().send(h.ownerID, { workerID: h.workerID, key: "after-steer", text: "Next" });
   expect(next.resumedFollowups).toEqual([steered.messageID]);
+  expect(syntheticIDs(h)).toEqual([steered.messageID, next.messageID]);
+});
+
+test("a failed requeue keeps the steer marker, is reported, and the next interrupt retries it", async () => {
+  const h = harness();
+  h.busy();
+  const steered = await h.api.send(h.ownerID, { workerID: h.workerID, key: "steer-stuck", text: "Steered", delivery: "steer" });
+  h.failInbox("queue");
+  const stopped = await h.api.interrupt(h.ownerID, { workerID: h.workerID });
+  expect(stopped.heldFollowups).toEqual([steered.messageID]);
+  expect(stopped.failedRequeues).toEqual([{ messageID: steered.messageID, error: "queue rejected" }]);
+  const record = () => h.values.get(`followups/${h.workerID}/${steered.messageID}`) as { state: string; delivery?: string };
+  expect(record()).toMatchObject({ state: "held", delivery: "steer" });
+  expect(h.steers()).toEqual([steered.messageID]);
+  h.allowInbox("queue");
+  const retried = await h.api.interrupt(h.ownerID, { workerID: h.workerID });
+  expect(retried.failedRequeues).toBeUndefined();
+  expect(record().state).toBe("held");
+  expect(record().delivery).toBeUndefined();
+  expect(h.queued()).toEqual([steered.messageID]);
+});
+
+test("a send retries the requeue of held steered input before redelivering it queued", async () => {
+  const h = harness();
+  h.busy();
+  const steered = await h.api.send(h.ownerID, { workerID: h.workerID, key: "steer-stuck", text: "Steered", delivery: "steer" });
+  h.failInbox("queue");
+  await h.api.interrupt(h.ownerID, { workerID: h.workerID });
+  h.allowInbox("queue");
+  const next = await h.api.send(h.ownerID, { workerID: h.workerID, key: "after", text: "Next" });
+  expect(next.resumedFollowups).toEqual([steered.messageID]);
+  expect(h.inboxCalls().filter(call => !call.startsWith("pending"))).toEqual([`steer ${steered.messageID}`, `queue ${steered.messageID}`, `queue ${steered.messageID}`]);
   expect(syntheticIDs(h)).toEqual([steered.messageID, next.messageID]);
 });
 

@@ -97,11 +97,12 @@ export default Plugin.define({
       });
       editor.add({
         name: "interrupt",
-        description: "Interrupt your worker without claiming task success. Follow-ups that have not started are held, not run, and listed in heldFollowups. Your next threads_send to this worker resumes them. Set dropHeld to remove them from the worker's inbox instead: droppedFollowups lists those removed, and failedDrops lists any still held, with the error. Interrupting an idle worker with dropHeld drops follow-ups an earlier interrupt held.",
+        description: "Interrupt your worker without claiming task success. Follow-ups that have not started are held, not run, and listed in heldFollowups. Your next threads_send to this worker resumes them. Set dropHeld to remove them from the worker's inbox instead: droppedFollowups lists those removed, and failedDrops lists any still held, with the error. Interrupting an idle worker with dropHeld drops follow-ups an earlier interrupt held. failedRequeues lists steered follow-ups that could not be moved back to the queue; a later send may run them ahead of queued ones, and the next interrupt retries the move.",
         input: Interrupt,
         output: WorkerView.extend({
           heldFollowups: z.array(z.string()), droppedFollowups: z.array(z.string()).optional(),
           failedDrops: z.array(z.object({ messageID: z.string(), error: z.string() })).optional(),
+          failedRequeues: z.array(z.object({ messageID: z.string(), error: z.string() })).optional(),
         }),
         options: { namespace: "threads", codemode: true },
         execute: async (input, tool) => {
