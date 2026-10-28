@@ -23,6 +23,7 @@ import { permissionMatches, requireDelegation } from "./permissions";
 import { Report, WorkerView } from "./rpc";
 import { GrantedPaths, terminalWorkflowStatus, workflowRunKey } from "./workflow-types";
 import { assertWorkerProject } from "./workflow-worker";
+import { type Inbox, serviceInbox } from "./inbox";
 
 const sessionID = z.string().transform((value) => Session.ID.make(value));
 const messageID = z
@@ -61,9 +62,28 @@ export const Send = z
     workerID: sessionID,
     key: z.string().min(1).max(200),
     text: z.string().min(1),
+    delivery: z.enum(["queue", "steer"]).optional().describe(
+      "queue (default) runs the message after the worker's current run. steer delivers it to a busy worker at its next step.",
+    ),
   })
   .strict();
 export const WorkerTarget = z.object({ workerID: sessionID }).strict();
+export const Interrupt = z.object({
+  workerID: sessionID,
+  dropHeld: z.boolean().optional().describe(
+    "Remove follow-ups that have not started from the worker's inbox instead of holding them.",
+  ),
+}).strict();
+const ruleKey = z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/, "Use 1-64 lowercase letters, digits, _ or -");
+export const RulePut = z.object({ workerID: sessionID, key: ruleKey, text: z.string().min(1).max(8000) }).strict();
+export const RuleTarget = z.object({ workerID: sessionID, key: ruleKey }).strict();
+export const Rule = z.object({ key: z.string(), text: z.string() });
+const rulePrefix = "coordinator-rule.";
+type InstructionEntries = {
+  list(input: { sessionID: Session.ID }): Promise<ReadonlyArray<{ key: string; value: unknown }>>;
+  put(input: { sessionID: Session.ID; key: string; value: string }): Promise<void>;
+  remove(input: { sessionID: Session.ID; key: string }): Promise<void>;
+};
 export const WorkflowWorker = z.object({
   ownerID: sessionID,
   runID: z.string().min(1),
@@ -199,6 +219,7 @@ export function workflowPermissions(
 export function threads(
   ctx: Pick<Plugin.Context, "session" | "agent" | "storage">,
   limit = 4,
+  inbox: Inbox = serviceInbox(),
 ) {
   const indexKey = (link: z.infer<typeof Link>) =>
     `workers/${link.coordinatorID}/${link.workerID}`;
@@ -212,13 +233,15 @@ export function threads(
   const FollowupBase = z.object({
     workerID: sessionID, coordinatorID: sessionID, messageID,
     notificationID: messageID, text: z.string(),
+    // Absent means queue, so records written by earlier versions stay valid.
+    delivery: z.literal("steer").optional(),
   }).strict();
   const Completion = z.object({ outcome: z.enum(["succeeded", "failed", "interrupted"]), idleMessageID: messageID }).strict();
   // `accepted`: admitted, wake unconfirmed, so recovery wakes it. `woken`: the wake was delivered,
   // and only an explicit send wakes it again. `held`: an interrupt stopped it before it ran, and
-  // recovery neither admits nor wakes it.
+  // recovery neither admits nor wakes it. `dropped`: an interrupt removed it from the native inbox.
   const Followup = z.discriminatedUnion("state", [
-    FollowupBase.extend({ state: z.enum(["prepared", "accepted", "woken", "held"]) }),
+    FollowupBase.extend({ state: z.enum(["prepared", "accepted", "woken", "held", "dropped"]) }),
     FollowupBase.extend({ state: z.enum(["completed", "notified"]), completion: Completion }),
   ]);
   type Followup = z.infer<typeof Followup>;
@@ -227,7 +250,7 @@ export function threads(
   const watching = new Set<string>();
 
   async function finishFollowup(entry: z.infer<typeof Followup>) {
-    if (entry.state === "notified") return;
+    if (entry.state === "notified" || entry.state === "dropped") return;
     if (entry.state !== "completed") {
       const messages = await ctx.session.context({ sessionID: entry.workerID });
       const index = messages.findIndex(message => message.id === entry.messageID && message.type === "synthetic");
@@ -269,12 +292,23 @@ export function threads(
     }).finally(() => watching.delete(entry.messageID));
   }
 
-  async function deliverFollowup(entry: z.infer<typeof Followup>, workflow: boolean, recovery = false) {
+  // Resolves with the steering error when a steered follow-up fell back to queue delivery.
+  async function deliverFollowup(entry: z.infer<typeof Followup>, workflow: boolean, recovery = false): Promise<string | undefined> {
     if (entry.state === "notified") return;
-    if (entry.state === "completed") return finishFollowup(entry);
+    if (entry.state === "dropped") {
+      await ctx.storage.remove(pendingKey(entry));
+      return;
+    }
+    if (entry.state === "completed") {
+      await finishFollowup(entry);
+      return;
+    }
     // OpenCode keeps queued input parked after an interrupt and promotes it on any later wake, so
     // a background pass must not wake input whose wake was already delivered or held.
-    if (recovery && (entry.state === "woken" || entry.state === "held")) return finishFollowup(entry);
+    if (recovery && (entry.state === "woken" || entry.state === "held")) {
+      await finishFollowup(entry);
+      return;
+    }
     // Admission without wake validates native conflicts before any execution grant exists.
     const clearRejected = async () => {
       if (recovery) return;
@@ -292,12 +326,22 @@ export function threads(
     }
     entry = { ...entry, state: "accepted" };
     await ctx.storage.set(followupKey(entry.workerID, entry.messageID), entry);
+    let steerError: string | undefined;
     // Reopening after wake must not wake an already promoted input again.
     if (await needsWake(entry.workerID, entry.messageID, admitted.time.created)) {
       const previousGrant = workflowExecutionGrants.get(entry.workerID);
       const grant = workflow ? authorizeWorkflowExecution(entry.workerID) : undefined;
       try {
-        await ctx.session.synthetic({ sessionID: entry.workerID, id: entry.messageID,
+        // Steering wakes execution itself. A conflict means the input is no longer pending as
+        // queued: it was promoted or already steered. Any other failure keeps queue delivery.
+        let steered = false;
+        if (entry.delivery === "steer") {
+          steered = await inbox.steer(entry.workerID, entry.messageID).then(() => true, (error: unknown) => {
+            steerError = (error instanceof Error ? error.message : "Steering rejected").slice(0, 240);
+            return false;
+          });
+        }
+        if (!steered) await ctx.session.synthetic({ sessionID: entry.workerID, id: entry.messageID,
           text: entry.text, delivery: "queue", resume: true });
         if (workflow) watchWorkflowExecution(entry.workerID, () => ctx.session.wait({ sessionID: entry.workerID }));
       } catch (error) {
@@ -312,6 +356,7 @@ export function threads(
     await ctx.storage.set(followupKey(entry.workerID, entry.messageID), entry);
     await finishFollowup(entry);
     watchFollowup(entry);
+    return steerError;
   }
 
   async function workerFollowups(workerID: string) {
@@ -339,13 +384,14 @@ export function threads(
     await ctx.storage.set(pendingKey(entry), entry);
   }
 
-  // Plugins cannot cancel a native inbox item, so every follow-up that has not started is held in
-  // Threads storage. Native queue order still applies when a later wake promotes it.
+  // Every follow-up that has not started is held in Threads storage. A held follow-up redelivers
+  // as queued, in native queue order, so steered input keeps its marker until the native inbox
+  // confirms it moved back to the queue; a later interrupt or send retries the move.
   async function holdFollowups(workerID: Session.ID) {
     const started = await promoted(workerID);
     const held: Followup[] = [];
     for (const entry of await workerFollowups(workerID)) {
-      if (entry.state === "completed" || entry.state === "notified" || started.has(entry.messageID)) continue;
+      if (entry.state === "completed" || entry.state === "notified" || entry.state === "dropped" || started.has(entry.messageID)) continue;
       const next = { ...entry, state: "held" as const };
       if (entry.state !== "held") await storeFollowup(next);
       held.push(next);
@@ -353,12 +399,29 @@ export function threads(
     return held;
   }
 
+  // A conflict means the input is no longer pending as steered, so it can't jump the queue.
+  async function requeue(entry: Followup): Promise<Followup> {
+    if (entry.delivery !== "steer") return entry;
+    await inbox.queue(entry.workerID, entry.messageID);
+    const { delivery: _, ...queued } = entry;
+    await storeFollowup(queued);
+    return queued;
+  }
+
   // A run can promote held input before the interrupt lands; that input ran and was interrupted.
-  async function releasePromoted(held: Followup[]) {
-    if (held.length === 0) return [];
+  // Held input whose native cancel succeeded and that never ran is dropped.
+  async function releasePromoted(held: Followup[], cancelled = new Set<string>()) {
+    if (held.length === 0) return { held: [], dropped: [] };
     const started = await promoted(held[0]!.workerID);
     const remaining: string[] = [];
+    const dropped: string[] = [];
     for (const entry of held) {
+      if (!started.has(entry.messageID) && cancelled.has(entry.messageID)) {
+        await ctx.storage.set(followupKey(entry.workerID, entry.messageID), { ...entry, state: "dropped" });
+        await ctx.storage.remove(pendingKey(entry));
+        dropped.push(entry.messageID);
+        continue;
+      }
       if (!started.has(entry.messageID)) {
         remaining.push(entry.messageID);
         continue;
@@ -367,7 +430,7 @@ export function threads(
       await storeFollowup(woken);
       watchFollowup(woken);
     }
-    return remaining.sort();
+    return { held: remaining.sort(), dropped: dropped.sort() };
   }
 
   async function reconcileFollowups(coordinatorID: string) {
@@ -554,6 +617,20 @@ export function threads(
     const workers: z.infer<typeof WorkerView>[] = [];
     for (const session of await workerSessions(coordinatorID, mode)) workers.push(await view(session));
     return workers;
+  }
+
+  // Experimental OpenCode 2.2 session instruction entries; earlier hosts lack the API.
+  function instructionEntries(): InstructionEntries {
+    const api = (ctx.session as { instructions?: { entry?: InstructionEntries } }).instructions?.entry;
+    if (!api) throw new Error("Worker rules need OpenCode 2.2 or later, which adds session instruction entries");
+    return api;
+  }
+
+  async function listRules(workerID: Session.ID) {
+    return (await instructionEntries().list({ sessionID: workerID }))
+      .filter(entry => entry.key.startsWith(rulePrefix))
+      .map(entry => ({ key: entry.key.slice(rulePrefix.length), text: typeof entry.value === "string" ? entry.value : JSON.stringify(entry.value) }))
+      .sort((a, b) => a.key.localeCompare(b.key));
   }
 
   async function owned(actor: string, workerID: string) {
@@ -901,34 +978,57 @@ export function threads(
         );
         const key = followupKey(input.workerID, id);
         const stored = await ctx.storage.get(key);
-        const entry = Followup.parse(stored ?? {
+        let entry = Followup.parse(stored ?? {
           workerID: input.workerID, coordinatorID: actor, messageID: id,
           notificationID: SessionMessage.ID.make(`msg_${digest([input.workerID, id, "followup-completion"]).slice(0, 32)}`),
-          text: input.text, state: "prepared",
+          text: input.text, state: "prepared", ...(input.delivery === "steer" ? { delivery: "steer" } : {}),
         });
         if (entry.text !== input.text || entry.coordinatorID !== actor) {
           throw new Error("This send key already belongs to different text");
         }
-        if (stored === undefined) await ctx.storage.set(key, entry);
+        if (entry.state === "dropped") {
+          throw new Error("threads_interrupt dropped this follow-up. Send it again with a new key.");
+        }
+        if (stored === undefined) {
+          // Fail before admission when steering cannot reach the native inbox.
+          if (entry.delivery === "steer") await inbox.pending(input.workerID);
+          await ctx.storage.set(key, entry);
+        }
         const workflow = session.metadata?.opWorkflow !== undefined;
         // Any wake promotes the held input queued ahead of this message, so an explicit send
         // resumes all of it. A failed redelivery is reported and stays pending for recovery.
         const resumed: string[] = [];
         const failed: { messageID: string; error: string }[] = [];
+        let steerError: string | undefined;
+        const reason = (error: unknown, fallback: string) => (error instanceof Error ? error.message : fallback).slice(0, 240);
         if (entry.state !== "notified") {
+          // Held input redelivers queued, so every steered one moves back to the queue before
+          // any wake can promote it ahead of older input. One that can't move stays held and
+          // steered: the wake may still run it, and recovery then sends its completion notice.
+          const held: Followup[] = [];
           for (const other of await workerFollowups(input.workerID)) {
-            if (other.state !== "held" || other.messageID === id) continue;
+            if (other.state !== "held") continue;
+            try {
+              held.push(await requeue(other));
+            } catch (error) {
+              if (other.messageID === id) held.push(other);
+              else failed.push({ messageID: other.messageID, error: `Could not move steered input back to the queue: ${reason(error, "Requeue rejected")}`.slice(0, 240) });
+            }
+          }
+          entry = held.find(other => other.messageID === id) ?? entry;
+          for (const other of held) {
+            if (other.messageID === id) continue;
             const prepared = { ...other, state: "prepared" as const };
             try {
               await storeFollowup(prepared);
               await deliverFollowup(prepared, workflow, true);
               resumed.push(other.messageID);
             } catch (error) {
-              failed.push({ messageID: other.messageID, error: (error instanceof Error ? error.message : "Redelivery rejected").slice(0, 240) });
+              failed.push({ messageID: other.messageID, error: reason(error, "Redelivery rejected") });
             }
           }
           await ctx.storage.set(pendingKey(entry), entry);
-          await deliverFollowup(entry, workflow);
+          steerError = await deliverFollowup(entry, workflow);
           if (entry.state === "held") resumed.push(id);
         }
         if ((await ctx.storage.get(reportKey(link))) !== undefined) {
@@ -937,6 +1037,7 @@ export function threads(
           await ctx.storage.remove(visibilityKey(link));
         }
         return { workerID: input.workerID, messageID: id,
+          ...(steerError !== undefined ? { steerError } : {}),
           ...(resumed.length ? { resumedFollowups: resumed.sort() } : {}),
           ...(failed.length ? { failedFollowups: failed.sort((a, b) => a.messageID.localeCompare(b.messageID)) } : {}) };
       });
@@ -944,13 +1045,29 @@ export function threads(
     // Holding first, under the follow-up lock, keeps a concurrent send or recovery pass from
     // waking held input after the interrupt clears the native doorbell. The stop happens even
     // when holding fails.
-    async interrupt(actor: string, input: z.infer<typeof WorkerTarget>) {
+    async interrupt(actor: string, input: z.infer<typeof Interrupt>) {
       return serialized(`followup/${input.workerID}`, async () => {
         await owned(actor, input.workerID);
         let held: Followup[] = [];
         let failure: unknown;
+        const cancelled = new Set<string>();
+        const failedDrops: { messageID: string; error: string }[] = [];
+        const failedRequeues: { messageID: string; error: string }[] = [];
+        const reason = (error: unknown, fallback: string) => (error instanceof Error ? error.message : fallback).slice(0, 240);
         try {
           held = await holdFollowups(input.workerID);
+          // Before the stop, so the running loop cannot take steered input at its next step.
+          for (const [index, entry] of held.entries()) {
+            if (input.dropHeld) {
+              await inbox.cancel(input.workerID, entry.messageID).then(() => cancelled.add(entry.messageID),
+                (error: unknown) => failedDrops.push({ messageID: entry.messageID, error: reason(error, "Cancel rejected") }));
+            } else {
+              held[index] = await requeue(entry).catch((error: unknown) => {
+                failedRequeues.push({ messageID: entry.messageID, error: reason(error, "Requeue rejected") });
+                return entry;
+              });
+            }
+          }
         } catch (error) {
           failure = error;
         }
@@ -962,9 +1079,26 @@ export function threads(
           throw new Error(`The worker was interrupted, but its pending follow-ups could not be held, so recovery may still deliver them. Retry threads_interrupt. Cause: ${
             failure instanceof Error ? failure.message.slice(0, 240) : "storage or native context failure"}`);
         }
-        const heldFollowups = await releasePromoted(held);
-        return { ...await view(await ctx.session.get({ sessionID: input.workerID })), heldFollowups };
+        const released = await releasePromoted(held, cancelled);
+        return { ...await view(await ctx.session.get({ sessionID: input.workerID })), heldFollowups: released.held,
+          ...(input.dropHeld ? { droppedFollowups: released.dropped } : {}),
+          ...(failedDrops.length ? { failedDrops: failedDrops.sort((a, b) => a.messageID.localeCompare(b.messageID)) } : {}),
+          ...(failedRequeues.length ? { failedRequeues: failedRequeues.sort((a, b) => a.messageID.localeCompare(b.messageID)) } : {}) };
       });
+    },
+    async rules(actor: string, input: z.infer<typeof WorkerTarget>) {
+      await owned(actor, input.workerID);
+      return { workerID: input.workerID, rules: await listRules(input.workerID) };
+    },
+    async setRule(actor: string, input: z.infer<typeof RulePut>) {
+      await owned(actor, input.workerID);
+      await instructionEntries().put({ sessionID: input.workerID, key: rulePrefix + input.key, value: input.text });
+      return { workerID: input.workerID, rules: await listRules(input.workerID) };
+    },
+    async removeRule(actor: string, input: z.infer<typeof RuleTarget>) {
+      await owned(actor, input.workerID);
+      await instructionEntries().remove({ sessionID: input.workerID, key: rulePrefix + input.key });
+      return { workerID: input.workerID, rules: await listRules(input.workerID) };
     },
     async report(actor: string, input: z.infer<typeof Report>) {
       const session = await ctx.session.get({ sessionID: actor });

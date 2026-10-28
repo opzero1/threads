@@ -103,13 +103,25 @@ threads_send({ workerID: "ses_...", key: "use-staging", text: "Test against stag
 
 Use a new `key` for each message. Keep follow-ups within the original task. For new work, start a new worker.
 
+A follow-up normally waits until the worker's current run ends. To correct a busy worker sooner, add `delivery: "steer"`; the worker sees the message at its next step. Steering needs OpenCode 2.2 running as the local service. See [`threads_send` fields](reference.md#threads_send-fields).
+
 When the follow-up finishes, inspect its completion notice and the worker's evidence. The notice identifies your message and its native execution outcome. The original report stays unchanged.
+
+## Give a worker standing rules
+
+On OpenCode 2.2, a coordinator can add rules that stay in a worker's context, such as "Don't edit `src/config.ts`":
+
+```text
+tools.threads.set_rule({ workerID: "ses_...", key: "no-config", text: "Don't edit src/config.ts." })
+```
+
+The worker sees the rule at its next step and keeps it after compaction. `tools.threads.remove_rule` withdraws it, and `tools.threads.rules` lists the current rules. See [worker rules](reference.md#worker-rules).
 
 ## Stop or hide a worker
 
 Agents call these tools, and `threads_list`, through [Code Mode](reference.md#native-and-code-mode-tools).
 
-- `threads_interrupt` stops the worker's current run. The conversation stays. Follow-ups that haven't started yet are held instead of run, and the result lists them in `heldFollowups`. No later list or turn starts them. Your next `threads_send` to that worker resumes them first, in their original order, and lists them in `resumedFollowups`. Any it couldn't redeliver are listed in `failedFollowups` with their errors and retried later.
+- `threads_interrupt` stops the worker's current run. The conversation stays. Follow-ups that haven't started yet are held instead of run, and the result lists them in `heldFollowups`. No later list or turn starts them. Your next `threads_send` to that worker resumes them first, in their original order, and lists them in `resumedFollowups`. Any it couldn't redeliver are listed in `failedFollowups` with their errors and retried later. To discard them instead, interrupt with `dropHeld: true`.
 - `threads_hide` removes the worker from the list and closes its tab. It keeps the conversation and the report. Hiding doesn't stop the worker and doesn't free its slot.
 
 Workers that report `PASS` or `PASS WITH NOTES` hide by themselves once they are idle. Workers that report `FAIL` or `INCONCLUSIVE`, or that stop without a report, stay under **Finished** so you notice them.
