@@ -39,6 +39,9 @@ export function workflowControlHeadroom(run: WorkflowRun) {
   return Math.max(WORKFLOW_CONTROL_HEADROOM, WORKFLOW_DIAGNOSTIC_JSON_BYTES + 256 + pending);
 }
 
+const ownerPrefix = (ownerID: string) => `workflows/owners/${encodeURIComponent(ownerID)}/`;
+const ownerKey = (ownerID: string, runID: string) => `${ownerPrefix(ownerID)}${encodeURIComponent(runID)}`;
+
 export function workflowStore(storage: Plugin.Context["storage"], options: {
   onDiagnostic?: (issue: { id: string; ownerID: string; message: string }) => Promise<void>;
 } = {}) {
@@ -78,6 +81,34 @@ export function workflowStore(storage: Plugin.Context["storage"], options: {
     }
     return answered(parsed.data);
   }
+  // One full scan per store adds index entries for runs written before the index existed, or by a
+  // create that stopped between its two writes. A failed pass is retried by the next list.
+  let backfill: Promise<void> | undefined;
+  function indexed() {
+    backfill ??= (async () => {
+      const present = new Set<string>();
+      let after: string | undefined;
+      do {
+        const page = await storage.scan({ prefix: "workflows/owners/", after, limit: 1000 });
+        for (const entry of page.entries) present.add(entry.key);
+        after = page.next;
+      } while (after);
+      do {
+        const page = await storage.scan({ prefix: "workflows/runs/", after, limit: 100 });
+        for (const entry of page.entries) {
+          const raw = entry.value;
+          if (typeof raw !== "object" || raw === null || !("ownerID" in raw) || typeof raw.ownerID !== "string") continue;
+          const index = ownerKey(raw.ownerID, entry.key.slice("workflows/runs/".length));
+          if (!present.has(index)) await storage.set(index, true);
+        }
+        after = page.next;
+      } while (after);
+    })().catch((error) => {
+      backfill = undefined;
+      throw error;
+    });
+    return backfill;
+  }
   return {
     get,
     async create(run: WorkflowRun) {
@@ -88,6 +119,9 @@ export function workflowStore(storage: Plugin.Context["storage"], options: {
           if (previous.fingerprint !== run.fingerprint) throw new Error("This workflow key belongs to a different request");
           return previous;
         }
+        // The index entry comes first, so a listed owner never misses a run that exists. An entry
+        // whose run was never written is skipped by list.
+        await storage.set(ownerKey(run.ownerID, run.id), true);
         await persist(run, "payload");
         return run;
       });
@@ -103,23 +137,29 @@ export function workflowStore(storage: Plugin.Context["storage"], options: {
         return next;
       });
     },
+    // Reads only this owner's runs through the owner index. Scanning workflows/runs/ makes the
+    // host decode every owner's journal, which is too costly for each UI snapshot.
     async list(ownerID: string) {
-      const runs: WorkflowRun[] = [];
+      await indexed();
+      const prefix = ownerPrefix(ownerID);
+      const ids: string[] = [];
       let after: string | undefined;
       do {
-        const page = await storage.scan({ prefix: "workflows/runs/", after, limit: 100 });
-        for (const entry of page.entries) {
-          const raw = entry.value;
-          if (typeof raw !== "object" || raw === null || !("ownerID" in raw) || raw.ownerID !== ownerID) continue;
-          const parsed = WorkflowRun.safeParse(raw);
-          if (parsed.success) runs.push(answered(parsed.data));
-          else await options.onDiagnostic?.({
-            id: entry.key.slice("workflows/runs/".length), ownerID,
-            message: `Corrupt or unsupported journal record: ${parsed.error.issues[0]?.message ?? "validation failed"}`,
-          }).catch(() => undefined);
-        }
+        const page = await storage.scan({ prefix, after, limit: 1000 });
+        for (const entry of page.entries) ids.push(decodeURIComponent(entry.key.slice(prefix.length)));
         after = page.next;
       } while (after);
+      const runs: WorkflowRun[] = [];
+      for (const id of ids) {
+        const raw = await storage.get(key(id));
+        if (typeof raw !== "object" || raw === null || !("ownerID" in raw) || raw.ownerID !== ownerID) continue;
+        const parsed = WorkflowRun.safeParse(raw);
+        if (parsed.success) runs.push(answered(parsed.data));
+        else await options.onDiagnostic?.({
+          id, ownerID,
+          message: `Corrupt or unsupported journal record: ${parsed.error.issues[0]?.message ?? "validation failed"}`,
+        }).catch(() => undefined);
+      }
       return runs.sort((a, b) => b.created - a.created);
     },
     // Every owner's readable runs that `include` selects before parsing. Corrupt records are

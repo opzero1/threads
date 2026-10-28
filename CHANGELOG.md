@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.5 — 2026-10-28
+
+- Reduce OpenCode CPU use while the workflow footer or panel is open. Each workflow refresh used to read the full record of every saved workflow run, from every session, three times. A refresh now reads only the current session's runs, once. Threads keeps a per-session index of run records. The first listing after OpenCode starts adds index entries for runs saved by earlier versions; that pass reads every record once.
+
 ## 0.3.4 — 2026-10-23
 
 Requires OpenCode 2.1 or later.

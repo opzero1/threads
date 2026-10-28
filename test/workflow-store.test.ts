@@ -313,3 +313,102 @@ test("stores each checkpoint answer once and derives it on every read", async ()
     expect(read.checkpoints.map((item) => item.response)).toEqual(["old", true]);
   }
 });
+
+// Counts journal values the host decodes: every workflows/runs/ value a get or scan returns.
+function counted(storage: Plugin.Context["storage"]) {
+  const stats = { runScans: 0, runDecodes: 0 };
+  const isRun = (key: string) => key.startsWith("workflows/runs/");
+  const wrapped: Plugin.Context["storage"] = {
+    ...storage,
+    async get(key) {
+      const value = await storage.get(key);
+      if (isRun(key) && value !== undefined) stats.runDecodes++;
+      return value;
+    },
+    async scan(input) {
+      const page = await storage.scan(input);
+      if (input.prefix.startsWith("workflows/runs/")) stats.runScans++;
+      stats.runDecodes += page.entries.filter((entry) => isRun(entry.key)).length;
+      return page;
+    },
+  };
+  return { storage: wrapped, stats, reset: () => Object.assign(stats, { runScans: 0, runDecodes: 0 }) };
+}
+
+test("listing decodes only the owner's journals after one backfill of runs written without the index", async () => {
+  const fixture = await disk();
+  // Runs written directly, as earlier versions did, have no owner index entry.
+  for (let index = 0; index < 120; index++) {
+    await fixture.storage.set(`workflows/runs/other-${index}`, Json.parse({ ...run(`other-${index}`, "owner-b"), logs: [{ time: 1, text: "x".repeat(2_000) }] }));
+  }
+  await fixture.storage.set("workflows/runs/mine-legacy", Json.parse(run("mine-legacy")));
+  const meter = counted(fixture.storage);
+  const store = workflowStore(meter.storage);
+  await store.create({ ...run("mine-new"), created: 2 });
+
+  expect((await store.list("owner-a")).map((item) => item.id)).toEqual(["mine-new", "mine-legacy"]);
+  // The first list pays one full scan (2 pages of 100) to backfill the index, plus the owner's reads.
+  expect(meter.stats).toEqual({ runScans: 2, runDecodes: 122 + 2 });
+
+  meter.reset();
+  for (let index = 0; index < 5; index++) expect(await store.list("owner-a")).toHaveLength(2);
+  expect(meter.stats).toEqual({ runScans: 0, runDecodes: 5 * 2 });
+
+  // A reopened store backfills once more and keeps every owner's runs.
+  meter.reset();
+  const reopened = workflowStore(meter.storage);
+  expect(await reopened.list("owner-b")).toHaveLength(120);
+  expect(meter.stats.runScans).toBe(2);
+  meter.reset();
+  expect((await reopened.list("owner-a")).map((item) => item.id)).toEqual(["mine-new", "mine-legacy"]);
+  expect(meter.stats).toEqual({ runScans: 0, runDecodes: 2 });
+});
+
+test("indexed listings show fresh writes, new runs, and corrupt records, and skip an unwritten run", async () => {
+  const fixture = await disk();
+  const diagnostics: string[] = [];
+  const meter = counted(fixture.storage);
+  const store = workflowStore(meter.storage, { onDiagnostic: async (issue) => { diagnostics.push(`${issue.ownerID}:${issue.id}`); } });
+  await store.create(run("first"));
+  expect((await store.list("owner-a"))[0]?.phase).toBe("");
+
+  await store.update("first", (draft) => { draft.phase = "Review"; });
+  expect((await store.list("owner-a"))[0]?.phase).toBe("Review");
+  // A write that bypasses the store, such as recovery evidence, is read fresh too.
+  await fixture.storage.set("workflows/runs/first", Json.parse({ ...(await store.get("first")), phase: "External" }));
+  expect((await store.list("owner-a"))[0]?.phase).toBe("External");
+
+  // Another store instance over the same storage, such as a second OpenCode process.
+  const peer = workflowStore(fixture.storage);
+  await peer.create({ ...run("second"), created: 2 });
+  await peer.create(run("foreign", "owner-b"));
+  expect((await store.list("owner-a")).map((item) => item.id)).toEqual(["second", "first"]);
+  expect((await store.list("owner-b")).map((item) => item.id)).toEqual(["foreign"]);
+
+  // A record replaced by a corrupt one stays indexed, so its owner keeps getting the diagnostic.
+  await writeFile(fixture.path("workflows/runs/second"), JSON.stringify({ ...run("second"), version: 99 }));
+  expect((await store.list("owner-a")).map((item) => item.id)).toEqual(["first"]);
+  expect((await store.list("owner-a")).map((item) => item.id)).toEqual(["first"]);
+  expect(diagnostics).toEqual(["owner-a:second", "owner-a:second"]);
+
+  // An index entry whose run write never landed lists nothing.
+  await fixture.storage.set("workflows/owners/owner-a/missing", true);
+  expect((await store.list("owner-a")).map((item) => item.id)).toEqual(["first"]);
+  expect(meter.stats.runScans).toBe(1);
+});
+
+test("a failed backfill is retried by the next list", async () => {
+  const fixture = await disk();
+  await fixture.storage.set("workflows/runs/legacy", Json.parse(run("legacy")));
+  let fail = true;
+  const store = workflowStore({
+    ...fixture.storage,
+    async scan(input) {
+      if (fail && input.prefix === "workflows/runs/") throw new Error("storage unavailable");
+      return fixture.storage.scan(input);
+    },
+  });
+  await expect(store.list("owner-a")).rejects.toThrow("storage unavailable");
+  fail = false;
+  expect((await store.list("owner-a")).map((item) => item.id)).toEqual(["legacy"]);
+});

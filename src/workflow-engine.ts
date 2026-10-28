@@ -360,12 +360,15 @@ export function workflowEngine(
     });
   }
 
+  // Returns the owner's runs as recovery left them, so a caller doesn't list again.
   async function recover(ownerID: string) {
-    const runs = await store.list(ownerID);
+    let runs = await store.list(ownerID);
     if (!recoveredOwners.has(ownerID)) {
       recoveredOwners.add(ownerID);
+      let changed = false;
       for (const run of runs) {
         if (activeStatus.has(run.status) && !leases.has(run.id)) {
+          changed = true;
           try {
             if (run.status === "stopping") {
               await interruptWorkflowWorkers(workers, ownerID, run);
@@ -388,14 +391,23 @@ export function workflowEngine(
           }
         }
       }
+      if (changed) runs = await store.list(ownerID);
     }
-    for (const run of await store.list(ownerID)) {
+    // attend and deliver act only on these statuses; they reread the run under their own locks.
+    const reread = new Set<string>();
+    for (const run of runs) {
       for (const step of run.steps) enforce(run, step);
-      await attend(run.id);
+      if (run.status === "waiting" || run.status === "interrupted") {
+        reread.add(run.id);
+        await attend(run.id);
+      }
       if (terminal.has(run.status) && !run.delivered) {
+        reread.add(run.id);
         await deliver(run.id).catch((error) => diagnose({ id: run.id, ownerID, message: errorText(error) }));
       }
     }
+    if (reread.size === 0) return runs;
+    return Promise.all(runs.map((run) => reread.has(run.id) ? store.get(run.id).catch(() => run) : run));
   }
 
   async function recordWorktrees(runID: string, outcomes: WorkflowWorktreeOutcome[]) {
@@ -1177,8 +1189,7 @@ export function workflowEngine(
       return owned(ownerID, runID);
     },
     async list(ownerID: string) {
-      await recover(ownerID);
-      return store.list(ownerID);
+      return recover(ownerID);
     },
     // Project-wide: a finished run has no controller left, and only checkouts that lose nothing are removed.
     async prune(sessionID: string, raw: z.input<typeof WorkflowPrune>): Promise<WorkflowPruneResult> {
