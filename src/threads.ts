@@ -1000,23 +1000,31 @@ export function threads(
         const resumed: string[] = [];
         const failed: { messageID: string; error: string }[] = [];
         let steerError: string | undefined;
-        // Held input redelivers queued. If the native move still fails, the wake below runs it
-        // steered anyway; threads_interrupt already reported that in failedRequeues.
-        const unsteer = async (held: Followup) => {
-          const { delivery: _, ...queued } = await requeue(held).catch(() => held);
-          return queued;
-        };
-        if (entry.state === "held") entry = await unsteer(entry);
+        const reason = (error: unknown, fallback: string) => (error instanceof Error ? error.message : fallback).slice(0, 240);
         if (entry.state !== "notified") {
+          // Held input redelivers queued, so every steered one moves back to the queue before
+          // any wake can promote it ahead of older input. One that can't move stays held and
+          // steered: the wake may still run it, and recovery then sends its completion notice.
+          const held: Followup[] = [];
           for (const other of await workerFollowups(input.workerID)) {
-            if (other.state !== "held" || other.messageID === id) continue;
-            const prepared = { ...await unsteer(other), state: "prepared" as const };
+            if (other.state !== "held") continue;
+            try {
+              held.push(await requeue(other));
+            } catch (error) {
+              if (other.messageID === id) held.push(other);
+              else failed.push({ messageID: other.messageID, error: `Could not move steered input back to the queue: ${reason(error, "Requeue rejected")}`.slice(0, 240) });
+            }
+          }
+          entry = held.find(other => other.messageID === id) ?? entry;
+          for (const other of held) {
+            if (other.messageID === id) continue;
+            const prepared = { ...other, state: "prepared" as const };
             try {
               await storeFollowup(prepared);
               await deliverFollowup(prepared, workflow, true);
               resumed.push(other.messageID);
             } catch (error) {
-              failed.push({ messageID: other.messageID, error: (error instanceof Error ? error.message : "Redelivery rejected").slice(0, 240) });
+              failed.push({ messageID: other.messageID, error: reason(error, "Redelivery rejected") });
             }
           }
           await ctx.storage.set(pendingKey(entry), entry);

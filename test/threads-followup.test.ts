@@ -134,6 +134,9 @@ function harness() {
     if (index === -1) return "unavailable" as const;
     from.splice(index, 1);
     to.push(id);
+    // Native inbox order is by enqueue sequence; changing delivery keeps an item's place.
+    const order = [...admitted.keys()];
+    to.sort((a, b) => order.indexOf(a) - order.indexOf(b));
     return "moved" as const;
   };
   const inbox: Inbox = {
@@ -860,6 +863,41 @@ test("a send retries the requeue of held steered input before redelivering it qu
   expect(next.resumedFollowups).toEqual([steered.messageID]);
   expect(h.inboxCalls().filter(call => !call.startsWith("pending"))).toEqual([`steer ${steered.messageID}`, `queue ${steered.messageID}`, `queue ${steered.messageID}`]);
   expect(syntheticIDs(h)).toEqual([steered.messageID, next.messageID]);
+});
+
+test("a send moves every held steered follow-up back to the queue before any wake", async () => {
+  const h = harness();
+  h.busy();
+  const first = await h.api.send(h.ownerID, { workerID: h.workerID, key: "steer-a", text: "First", delivery: "steer" });
+  const second = await h.api.send(h.ownerID, { workerID: h.workerID, key: "steer-b", text: "Second", delivery: "steer" });
+  h.failInbox("queue");
+  const stopped = await h.api.interrupt(h.ownerID, { workerID: h.workerID });
+  expect(stopped.failedRequeues?.map(item => item.messageID)).toEqual([first.messageID, second.messageID].sort());
+  h.allowInbox("queue");
+  let steeredAtWake: string[] | undefined;
+  h.beforeWake(() => { steeredAtWake ??= h.steers(); });
+  const next = await h.api.send(h.ownerID, { workerID: h.workerID, key: "after", text: "Next" });
+  expect(steeredAtWake).toEqual([]);
+  expect(next.resumedFollowups).toEqual([first.messageID, second.messageID].sort());
+  expect(syntheticIDs(h)).toEqual([first.messageID, second.messageID, next.messageID]);
+});
+
+test("a send keeps held steered input held and reports it when it still can't requeue", async () => {
+  const h = harness();
+  h.busy();
+  const steered = await h.api.send(h.ownerID, { workerID: h.workerID, key: "steer-stuck", text: "Steered", delivery: "steer" });
+  h.failInbox("queue");
+  await h.api.interrupt(h.ownerID, { workerID: h.workerID });
+  const next = await h.api.send(h.ownerID, { workerID: h.workerID, key: "after", text: "Next" });
+  expect(next.resumedFollowups).toBeUndefined();
+  expect(next.failedFollowups).toEqual([{ messageID: steered.messageID, error: "Could not move steered input back to the queue: queue rejected" }]);
+  const record = h.values.get(`followups/${h.workerID}/${steered.messageID}`) as { state: string; delivery?: string };
+  expect(record).toMatchObject({ state: "held", delivery: "steer" });
+  // The native inbox still runs the steered input first; recovery then notifies its completion.
+  expect(syntheticIDs(h)).toEqual([steered.messageID, next.messageID]);
+  h.complete();
+  await h.reopen().list(h.ownerID);
+  expect(h.notices.map(notice => notice.text).join("\n")).toContain(steered.messageID);
 });
 
 test("interrupt with dropHeld cancels queued follow-ups natively and no later send runs them", async () => {
