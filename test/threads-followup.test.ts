@@ -6,6 +6,7 @@ import { Link, threads, workerIdentity, workflowExecutionAuthorized, authorizeWo
 import type { Schema } from "effect";
 import plugin from "../index";
 import type { SessionContext } from "@opencode/plugin/promise/session";
+import { type Inbox, inboxUnavailable } from "../src/inbox";
 
 async function ownerContextHook(ctx: Pick<Plugin.Context, "session" | "storage" | "agent">) {
   let hook: ((event: SessionContext) => unknown) | undefined;
@@ -65,11 +66,13 @@ function harness() {
   // Native inbox model: admitted worker input waits here until a wake reaches an idle worker.
   // A wake during a busy turn only rings the doorbell, and an interrupt clears that doorbell.
   const queue: string[] = [];
+  // Steered input skips the queue: a busy turn takes it at its next step.
+  const steers: string[] = [];
   let busy = false;
   let doorbell = false;
   let interrupts = 0;
   const promote = () => {
-    for (const id of queue.splice(0)) {
+    for (const id of [...steers.splice(0), ...queue.splice(0)]) {
       if (!messages.some(message => message.id === id)) messages.push({ id, type: "synthetic", text: admitted.get(id)!.payload.text, time: { created: Date.now() } });
     }
   };
@@ -91,7 +94,7 @@ function harness() {
       const result = prior ?? { id, sessionID: input.sessionID, type: "synthetic" as const,
         payload: { text: input.text, metadata: input.metadata }, delivery: input.delivery ?? "steer", time: { created: Date.now() } };
       admitted.set(id, result);
-      if (input.sessionID === workerID && !messages.some(message => message.id === id) && !queue.includes(id)) queue.push(id);
+      if (input.sessionID === workerID && !messages.some(message => message.id === id) && !queue.includes(id) && !steers.includes(id)) queue.push(id);
       if (input.sessionID === ownerID && input.resume !== false && !ownerMessages.some(message => message.id === id)) {
         notices.push(input);
         ownerMessages.push({ id, type: "synthetic", text: input.text, time: { created: Date.now() } });
@@ -118,10 +121,49 @@ function harness() {
       return { interrupted: true };
     },
   };
+  const inboxCalls: string[] = [];
+  let inboxDown = false;
+  const failInbox = new Set<string>();
+  const check = (call: string) => {
+    inboxCalls.push(call);
+    if (inboxDown) throw new Error(inboxUnavailable);
+    if (failInbox.has(call.split(" ")[0]!)) throw new Error(`${call.split(" ")[0]} rejected`);
+  };
+  const move = (from: string[], to: string[], id: string) => {
+    const index = from.indexOf(id);
+    if (index === -1) return "unavailable" as const;
+    from.splice(index, 1);
+    to.push(id);
+    return "moved" as const;
+  };
+  const inbox: Inbox = {
+    async pending() { check("pending"); return [...steers, ...queue]; },
+    async steer(_sessionID, id) {
+      check(`steer ${id}`);
+      const result = move(queue, steers, id);
+      if (result === "moved" && !busy) {
+        waiting = new Promise<void>(resolve => { finish = resolve; });
+        promote();
+      }
+      return result;
+    },
+    async queue(_sessionID, id) { check(`queue ${id}`); return move(steers, queue, id); },
+    async cancel(_sessionID, id) {
+      check(`cancel ${id}`);
+      for (const list of [queue, steers]) if (list.includes(id)) list.splice(list.indexOf(id), 1);
+    },
+  };
   // Only the API methods exercised by send/list are implemented at this test boundary.
   const ctx = { session, storage, agent: {} } as unknown as Pick<Plugin.Context, "session" | "storage" | "agent">;
-  return { ownerID, workerID, values, messages, admitted, notices, ctx,
-    api: threads(ctx), reopen: () => threads(ctx), wakes: () => wakes,
+  return { ownerID, workerID, values, messages, admitted, notices, ctx, inbox,
+    api: threads(ctx, 4, inbox), reopen: () => threads(ctx, 4, inbox), wakes: () => wakes,
+    inboxCalls: () => [...inboxCalls], steers: () => [...steers],
+    inboxDown: (down = true) => { inboxDown = down; },
+    failInbox: (call: string) => { failInbox.add(call); },
+    // A busy turn reaches its next step boundary and takes steered input.
+    step() {
+      for (const id of steers.splice(0)) messages.push({ id, type: "synthetic", text: admitted.get(id)!.payload.text, time: { created: Date.now() } });
+    },
     reject: () => { rejectAdmission = true; },
     allow: () => { rejectAdmission = false; },
     rejectWake: () => { rejectWake = true; },
@@ -696,4 +738,210 @@ test("send reports only held follow-ups it redelivered and names each failure", 
     await h.reopen().list(h.ownerID);
     expect(h.messages.some(message => message.id === held)).toBe(true);
   }
+});
+
+const syntheticIDs = (h: ReturnType<typeof harness>) =>
+  h.messages.filter(message => message.type === "synthetic").map(message => message.id);
+
+test("queue stays the default delivery and never calls the inbox API", async () => {
+  const h = harness();
+  h.busy();
+  const queued = await h.api.send(h.ownerID, { workerID: h.workerID, key: "default", text: "Queued" });
+  expect(h.queued()).toEqual([queued.messageID]);
+  await h.api.interrupt(h.ownerID, { workerID: h.workerID });
+  expect(h.inboxCalls()).toEqual([]);
+});
+
+test("steer admits queued, then moves the input to steering so a busy worker takes it at its next step", async () => {
+  const h = harness();
+  h.busy();
+  const wakes = h.wakes();
+  const steered = await h.api.send(h.ownerID, { workerID: h.workerID, key: "steer", text: "Stop editing X", delivery: "steer" });
+  expect(steered.steerError).toBeUndefined();
+  expect(h.inboxCalls()).toEqual(["pending", `steer ${steered.messageID}`]);
+  expect(h.admitted.get(steered.messageID)?.delivery).toBe("queue");
+  // The steering request itself wakes execution, so no queued wake rings the doorbell.
+  expect(h.wakes()).toBe(wakes);
+  expect(h.queued()).toEqual([]);
+  h.step();
+  expect(syntheticIDs(h)).toEqual([steered.messageID]);
+  h.complete();
+  await settleWatchers(h);
+  expect(h.notices).toHaveLength(1);
+  expect(pendingKeys(h)).toHaveLength(0);
+});
+
+test("steer into an idle worker starts it", async () => {
+  const h = harness();
+  const steered = await h.api.send(h.ownerID, { workerID: h.workerID, key: "idle-steer", text: "Start", delivery: "steer" });
+  expect(syntheticIDs(h)).toEqual([steered.messageID]);
+});
+
+test("steer fails before admission when the inbox API is unavailable", async () => {
+  const h = harness();
+  h.inboxDown();
+  await expect(h.api.send(h.ownerID, { workerID: h.workerID, key: "no-inbox", text: "Steer", delivery: "steer" }))
+    .rejects.toThrow(inboxUnavailable);
+  expect(h.admitted.size).toBe(0);
+  expect([...h.values.keys()].filter(key => key.startsWith("followup"))).toEqual([]);
+});
+
+test("a steering failure after admission keeps queue delivery and says why", async () => {
+  const h = harness();
+  h.busy();
+  h.failInbox("steer");
+  const sent = await h.api.send(h.ownerID, { workerID: h.workerID, key: "fallback", text: "Steer", delivery: "steer" });
+  expect(sent.steerError).toBe("steer rejected");
+  expect(h.queued()).toEqual([sent.messageID]);
+  expect(h.doorbell()).toBe(true);
+});
+
+test("an identical steer retry finds the input already steered and does not wake again", async () => {
+  const h = harness();
+  h.busy();
+  const input = { workerID: h.workerID, key: "retry-steer", text: "Steer once", delivery: "steer" as const };
+  const first = await h.api.send(h.ownerID, input);
+  const calls = h.inboxCalls().length;
+  const wakes = h.wakes();
+  expect(await h.reopen().send(h.ownerID, input)).toEqual(first);
+  expect(h.inboxCalls().slice(calls)).toEqual([`steer ${first.messageID}`]);
+  expect(h.steers()).toEqual([first.messageID]);
+  expect(h.wakes()).toBe(wakes);
+});
+
+test("interrupt returns pending steered input to the queue and holds it until the next send", async () => {
+  const h = harness();
+  h.busy();
+  const steered = await h.api.send(h.ownerID, { workerID: h.workerID, key: "steer-held", text: "Steered", delivery: "steer" });
+  const stopped = await h.api.interrupt(h.ownerID, { workerID: h.workerID });
+  expect(stopped.heldFollowups).toEqual([steered.messageID]);
+  expect(h.inboxCalls().at(-1)).toBe(`queue ${steered.messageID}`);
+  expect(h.steers()).toEqual([]);
+  expect(h.queued()).toEqual([steered.messageID]);
+  await (await ownerContextHook(h.ctx))(h.ownerID);
+  await h.reopen().list(h.ownerID);
+  expect(syntheticIDs(h)).toEqual([]);
+  const record = h.values.get(`followups/${h.workerID}/${steered.messageID}`) as { state: string; delivery?: string };
+  expect(record.state).toBe("held");
+  expect(record.delivery).toBeUndefined();
+  const next = await h.reopen().send(h.ownerID, { workerID: h.workerID, key: "after-steer", text: "Next" });
+  expect(next.resumedFollowups).toEqual([steered.messageID]);
+  expect(syntheticIDs(h)).toEqual([steered.messageID, next.messageID]);
+});
+
+test("interrupt with dropHeld cancels queued follow-ups natively and no later send runs them", async () => {
+  const h = harness();
+  h.busy();
+  const dropped = await h.api.send(h.ownerID, { workerID: h.workerID, key: "drop", text: "Never run" });
+  const stopped = await h.api.interrupt(h.ownerID, { workerID: h.workerID, dropHeld: true });
+  expect(stopped.heldFollowups).toEqual([]);
+  expect(stopped.droppedFollowups).toEqual([dropped.messageID]);
+  expect(stopped.failedDrops).toBeUndefined();
+  expect(h.inboxCalls()).toEqual([`cancel ${dropped.messageID}`]);
+  expect(h.queued()).toEqual([]);
+  expect(pendingKeys(h)).toHaveLength(0);
+  await (await ownerContextHook(h.ctx))(h.ownerID);
+  const next = await h.reopen().send(h.ownerID, { workerID: h.workerID, key: "after-drop", text: "Next" });
+  expect(next.resumedFollowups).toBeUndefined();
+  expect(syntheticIDs(h)).toEqual([next.messageID]);
+  await expect(h.reopen().send(h.ownerID, { workerID: h.workerID, key: "drop", text: "Never run" }))
+    .rejects.toThrow("dropped this follow-up");
+  h.complete();
+  await settleWatchers(h);
+  expect(h.notices.map(notice => notice.text).join()).not.toContain(dropped.messageID);
+});
+
+test("dropHeld on an idle worker drops follow-ups an earlier interrupt held", async () => {
+  const h = harness();
+  h.busy();
+  const held = await h.api.send(h.ownerID, { workerID: h.workerID, key: "held-then-drop", text: "Held" });
+  expect((await h.api.interrupt(h.ownerID, { workerID: h.workerID })).heldFollowups).toEqual([held.messageID]);
+  const dropped = await h.api.interrupt(h.ownerID, { workerID: h.workerID, dropHeld: true });
+  expect(dropped.droppedFollowups).toEqual([held.messageID]);
+  expect(dropped.heldFollowups).toEqual([]);
+  expect(h.queued()).toEqual([]);
+});
+
+test("dropHeld also withdraws pending steered input before the stop", async () => {
+  const h = harness();
+  h.busy();
+  const steered = await h.api.send(h.ownerID, { workerID: h.workerID, key: "drop-steer", text: "Steered", delivery: "steer" });
+  const stopped = await h.api.interrupt(h.ownerID, { workerID: h.workerID, dropHeld: true });
+  expect(stopped.droppedFollowups).toEqual([steered.messageID]);
+  expect(h.steers()).toEqual([]);
+  h.step();
+  expect(syntheticIDs(h)).toEqual([]);
+});
+
+test("a failed drop still stops the worker and keeps the follow-up held", async () => {
+  const h = harness();
+  h.busy();
+  const held = await h.api.send(h.ownerID, { workerID: h.workerID, key: "undroppable", text: "Held" });
+  h.inboxDown();
+  const stopped = await h.api.interrupt(h.ownerID, { workerID: h.workerID, dropHeld: true });
+  expect(h.interrupts()).toBe(1);
+  expect(stopped.heldFollowups).toEqual([held.messageID]);
+  expect(stopped.droppedFollowups).toEqual([]);
+  expect(stopped.failedDrops).toEqual([{ messageID: held.messageID, error: inboxUnavailable.slice(0, 240) }]);
+  h.inboxDown(false);
+  const next = await h.reopen().send(h.ownerID, { workerID: h.workerID, key: "after-failed-drop", text: "Next" });
+  expect(next.resumedFollowups).toEqual([held.messageID]);
+});
+
+test("a follow-up promoted before its cancel lands is tracked as interrupted, not dropped", async () => {
+  const h = harness();
+  h.busy();
+  const raced = await h.api.send(h.ownerID, { workerID: h.workerID, key: "drop-race", text: "Promoted first" });
+  h.beforeInterrupt(() => {});
+  const cancel = h.inbox.cancel;
+  h.inbox.cancel = async (sessionID, id) => { h.promoteQueued(); h.busy(); await cancel(sessionID, id); };
+  const stopped = await h.api.interrupt(h.ownerID, { workerID: h.workerID, dropHeld: true });
+  expect(stopped.droppedFollowups).toEqual([]);
+  expect(stopped.heldFollowups).toEqual([]);
+  await settleWatchers(h);
+  await h.reopen().list(h.ownerID);
+  expect(h.notices).toHaveLength(1);
+  expect(h.notices[0]?.text).toContain(raced.messageID);
+  expect(h.notices[0]?.text).toContain("interrupted");
+});
+
+function withInstructions(h: ReturnType<typeof harness>) {
+  const entries = new Map<string, unknown>([["other.entry", "kept"]]);
+  const calls: string[] = [];
+  const api = threads({ ...h.ctx, session: { ...h.ctx.session, instructions: { entry: {
+    async list() { return [...entries].map(([key, value]) => ({ key, value })); },
+    async put({ sessionID, key, value }: { sessionID: string; key: string; value: string }) { calls.push(`put ${sessionID} ${key}`); entries.set(key, value); },
+    async remove({ sessionID, key }: { sessionID: string; key: string }) { calls.push(`remove ${sessionID} ${key}`); entries.delete(key); },
+  } } } } as unknown as typeof h.ctx, 4, h.inbox);
+  return { api, entries, calls };
+}
+
+test("coordinator rules put and remove instruction entries on the worker", async () => {
+  const h = harness();
+  const { api, entries, calls } = withInstructions(h);
+  const set = await api.setRule(h.ownerID, { workerID: h.workerID, key: "style", text: "Keep commits small" });
+  expect(set.rules).toEqual([{ key: "style", text: "Keep commits small" }]);
+  expect(entries.get("coordinator-rule.style")).toBe("Keep commits small");
+  await api.setRule(h.ownerID, { workerID: h.workerID, key: "a-first", text: "Read docs first" });
+  expect((await api.rules(h.ownerID, { workerID: h.workerID })).rules.map(rule => rule.key)).toEqual(["a-first", "style"]);
+  const removed = await api.removeRule(h.ownerID, { workerID: h.workerID, key: "style" });
+  expect(removed.rules).toEqual([{ key: "a-first", text: "Read docs first" }]);
+  expect(entries.get("other.entry")).toBe("kept");
+  expect(calls).toEqual([`put ${h.workerID} coordinator-rule.style`, `put ${h.workerID} coordinator-rule.a-first`, `remove ${h.workerID} coordinator-rule.style`]);
+});
+
+test("only the owning coordinator may set worker rules", async () => {
+  const h = harness();
+  const { api, calls } = withInstructions(h);
+  const stranger = Session.ID.create();
+  await expect(api.setRule(stranger, { workerID: h.workerID, key: "style", text: "x" })).rejects.toThrow("Only the owning coordinator");
+  await expect(api.removeRule(stranger, { workerID: h.workerID, key: "style" })).rejects.toThrow("Only the owning coordinator");
+  await expect(api.rules(stranger, { workerID: h.workerID })).rejects.toThrow("Only the owning coordinator");
+  expect(calls).toEqual([]);
+});
+
+test("worker rules explain the OpenCode version they need on older hosts", async () => {
+  const h = harness();
+  await expect(h.api.setRule(h.ownerID, { workerID: h.workerID, key: "style", text: "x" })).rejects.toThrow("OpenCode 2.2 or later");
+  await expect(h.api.rules(h.ownerID, { workerID: h.workerID })).rejects.toThrow("OpenCode 2.2 or later");
 });
